@@ -98,7 +98,7 @@ export class ServerVault {
 
   private async getFileMap(): Promise<FileMap> {
     // ugly, but we have to deal with this for the case where we have big files to stream back
-    const data = await (await this.fs.readFile(FILEMAP_PATH)).text();
+    const data = await new Response(await this.fs.readFile(FILEMAP_PATH)).text();
     const fileMap = deserializeFileMap(data);
     return fileMap;
   }
