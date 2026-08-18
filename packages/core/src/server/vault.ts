@@ -1,10 +1,10 @@
-import { deserializeFileMap, serializeFileMap, type FileMap } from "./filemap";
-import type { Filesystem } from "./filesystem";
+import { deserializeFileMap, serializeFileMap, type FileMap } from "../filemap";
+import type { Filesystem } from "../filesystem";
 import nodepath from "path";
 
 
-export const SIMPLESYNC_DIR = ".simplesync";
-export const FILEMAP_PATH = nodepath.join(SIMPLESYNC_DIR, "filemap.json");
+export const NANOSYNC_DIR = ".nanosync";
+export const FILEMAP_PATH = nodepath.join(NANOSYNC_DIR, "filemap.json");
 
 export class ServerVault {
   private queue = Promise.resolve();
@@ -117,7 +117,7 @@ function isLegalPath(path: string): boolean {
     parts.shift();
   }
 
-  if (parts[0] === ".." || parts[0] === SIMPLESYNC_DIR) {
+  if (parts[0] === ".." || parts[0] === NANOSYNC_DIR) {
     return false;
   }
 
