@@ -4,6 +4,7 @@ import { z } from "zod";
 export const fileMapData = z.object({
   hash: z.string(),
   lastEdited: z.iso.datetime(), 
+  deleted: z.boolean(),
 });
 
 export type FileMapData = z.infer<typeof fileMapData>;

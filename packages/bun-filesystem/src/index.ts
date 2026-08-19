@@ -1,4 +1,4 @@
-import { lstat, mkdir, readdir, stat as fsStat } from "node:fs/promises";
+import { lstat, mkdir, readdir, stat as fsStat, unlink } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
 import type { FileData, Filesystem, FileStat } from "core";
 
@@ -35,6 +35,10 @@ export class BunFilesystem implements Filesystem {
     } else {
       await Bun.write(destination, data);
     }
+  }
+
+  async deleteFile(path: string): Promise<void> {
+    await unlink(await this.resolveExistingPath(path));
   }
 
   async listDirectory(path: string): Promise<string[]> {

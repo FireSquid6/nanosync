@@ -50,6 +50,18 @@ describe.each([
     expect(await new Response(await filesystem.readFile("stream.txt")).text()).toBe("streamed");
   });
 
+  test("deletes files", async () => {
+    const filesystem = await createFilesystem();
+    await filesystem.writeFile("notes/today.txt", "hello");
+
+    await filesystem.deleteFile("notes/today.txt");
+
+    expect(await filesystem.exists("notes/today.txt")).toBe(false);
+    expect(await filesystem.exists("notes")).toBe(true);
+    await expect(filesystem.deleteFile("notes/today.txt")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(filesystem.deleteFile("notes")).rejects.toMatchObject({ code: "EISDIR" });
+  });
+
   test("does not replace a directory with a file", async () => {
     const filesystem = await createFilesystem();
     await filesystem.writeFile("directory/child.txt", "child");
@@ -75,7 +87,9 @@ test("Bun filesystem confines paths to its root", async () => {
 
   await expect(filesystem.readFile("escape/secret.txt")).rejects.toThrow("symbolic link");
   await expect(filesystem.writeFile("escape/new.txt", "nope")).rejects.toThrow("symbolic link");
+  await expect(filesystem.deleteFile("escape/secret.txt")).rejects.toThrow("symbolic link");
   expect(await Bun.file(join(outside, "new.txt")).exists()).toBe(false);
+  expect(await Bun.file(join(outside, "secret.txt")).exists()).toBe(true);
 
   await symlink(root, join(outside, "back"));
   await rm(join(root, "escape"));

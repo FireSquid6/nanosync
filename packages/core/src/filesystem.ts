@@ -12,6 +12,7 @@ export type FileData = string | Uint8Array | ReadableStream<Uint8Array>;
 export interface Filesystem {
   readFile(path: string): Promise<ReadableStream<Uint8Array>>;
   writeFile(path: string, data: FileData): Promise<void>;
+  deleteFile(path: string): Promise<void>;
   listDirectory(path: string): Promise<string[]>;
   stat(path: string): Promise<FileStat>;
   getHash(path: string): Promise<string>;
@@ -48,6 +49,13 @@ export class MockFilesystem implements Filesystem {
 
   async writeFile(path: string, data: FileData): Promise<void> {
     this.setFile(path, await toBytes(data));
+  }
+
+  async deleteFile(path: string): Promise<void> {
+    const normalized = mockPath(path);
+    const entry = this.getEntry(normalized);
+    if (entry.kind !== "file") throw filesystemError("EISDIR", path);
+    this.entries.delete(normalized);
   }
 
   async listDirectory(path: string): Promise<string[]> {
