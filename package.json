@@ -2,6 +2,10 @@
   "name": "nanosync-monorepo",
   "private": true,
   "workspaces": ["packages/*"],
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
   "devDependencies": {
     "@types/bun": "latest"
   },
