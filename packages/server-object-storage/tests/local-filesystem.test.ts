@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, readdir, rm, symlink } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { chmod, link, lstat, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -37,6 +38,13 @@ async function text(body: ReadableStream<Uint8Array>): Promise<string> {
 
 const helloChecksum = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
 
+async function promptly<T>(operation: Promise<T>): Promise<T> {
+  return Promise.race([
+    operation,
+    Bun.sleep(250).then(() => { throw new Error("operation did not settle promptly"); }),
+  ]);
+}
+
 describe("LocalFilesystem", () => {
   test("streams a verified object through every public read operation", async () => {
     const { filesystem } = await create();
@@ -61,6 +69,25 @@ describe("LocalFilesystem", () => {
     });
     expect(await filesystem.existsBatch(["bad/object"])).toEqual([false]);
     expect(await readdir(join(root, ".nanosync-tmp"))).toEqual([]);
+  });
+
+  test("checksums storage-owned bytes after a producer mutates an enqueued chunk", async () => {
+    const { root, filesystem } = await create();
+    const bytes = new Uint8Array(1024 * 1024).fill(65);
+    const mutated = new Uint8Array(bytes.byteLength).fill(66);
+    const checksum = createHash("sha256").update(mutated).digest("hex");
+    const source = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(bytes);
+        queueMicrotask(() => bytes.fill(66));
+        controller.close();
+      },
+    });
+
+    await filesystem.putIfAbsent("mutated", source, checksum);
+    const stored = await readFile(join(root, "mutated"));
+    expect(stored.equals(mutated)).toBe(true);
+    expect(createHash("sha256").update(stored).digest("hex")).toBe(checksum);
   });
 
   test("is idempotent for matching objects and never replaces a conflict", async () => {
@@ -99,6 +126,22 @@ describe("LocalFilesystem", () => {
     await symlink(outside, join(root, "escape"));
     await expect(filesystem.putIfAbsent("escape/object", stream("hello"), helloChecksum)).rejects.toMatchObject({ code: "SYMLINK" });
     await expect(filesystem.open("escape/object")).rejects.toMatchObject({ code: "SYMLINK" });
+    await expect(filesystem.existsBatch(["escape/object"])).rejects.toMatchObject({ code: "SYMLINK" });
+    await expect(filesystem.delete("escape/object")).rejects.toMatchObject({ code: "SYMLINK" });
+  });
+
+  test("rejects a symlink root and reserved temporary path", async () => {
+    const actualRoot = await mkdtemp(join(tmpdir(), "nanosync-actual-"));
+    const linkRoot = `${actualRoot}-link`;
+    roots.push(linkRoot, actualRoot);
+    await symlink(actualRoot, linkRoot);
+    await expect(new LocalFilesystem(linkRoot).existsBatch(["object"])).rejects.toMatchObject({ code: "SYMLINK" });
+
+    const root = await mkdtemp(join(tmpdir(), "nanosync-temp-link-"));
+    const outside = await mkdtemp(join(tmpdir(), "nanosync-temp-outside-"));
+    roots.push(root, outside);
+    await symlink(outside, join(root, ".nanosync-tmp"));
+    await expect(new LocalFilesystem(root).existsBatch(["object"])).rejects.toMatchObject({ code: "SYMLINK" });
   });
 
   test("uses validated half-open byte ranges", async () => {
@@ -132,6 +175,23 @@ describe("LocalFilesystem", () => {
     });
   });
 
+  test("stops lexical traversal after collecting one lookahead entry", async () => {
+    const { root, filesystem } = await create();
+    await filesystem.putIfAbsent("a", stream("hello"), helloChecksum);
+    await filesystem.putIfAbsent("b", stream("hello"), helloChecksum);
+    await symlink("outside", join(root, "z"));
+
+    expect(await filesystem.list("", { limit: 1 })).toEqual({ keys: ["a"], cursor: "a" });
+  });
+
+  test("orders nested and sibling keys by the complete lexical key", async () => {
+    const { filesystem } = await create();
+    for (const key of ["a/x", "a-", "a/y"]) {
+      await filesystem.putIfAbsent(key, stream("hello"), helloChecksum);
+    }
+    expect(await filesystem.list()).toEqual({ keys: ["a-", "a/x", "a/y"], cursor: null });
+  });
+
   test("cleans up after an interrupted source stream", async () => {
     const { root, filesystem } = await create();
     const source = new ReadableStream<Uint8Array>({
@@ -143,6 +203,43 @@ describe("LocalFilesystem", () => {
     await expect(filesystem.putIfAbsent("interrupted", source, helloChecksum)).rejects.toThrow("connection lost");
     expect(await filesystem.existsBatch(["interrupted"])).toEqual([false]);
     expect(await readdir(join(root, ".nanosync-tmp"))).toEqual([]);
+  });
+
+  test("cleans temporary state before non-settling source cancellation", async () => {
+    const { root, filesystem } = await create({ maximumObjectSize: 1 });
+    let cancelCalled = false;
+    const source = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(2));
+      },
+      cancel() {
+        cancelCalled = true;
+        return new Promise<void>(() => {});
+      },
+    });
+
+    await expect(promptly(filesystem.putIfAbsent("oversized", source, "0".repeat(64)))).rejects.toMatchObject({
+      code: "SIZE_LIMIT_EXCEEDED",
+    });
+    expect(cancelCalled).toBe(true);
+    expect(await readdir(join(root, ".nanosync-tmp"))).toEqual([]);
+  });
+
+  test("cancels an unused idempotent source without awaiting cancellation", async () => {
+    const { filesystem } = await create();
+    await filesystem.putIfAbsent("existing", stream("hello"), helloChecksum);
+    let cancelCalled = false;
+    const unused = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelCalled = true;
+        return new Promise<void>(() => {});
+      },
+    });
+
+    await expect(promptly(filesystem.putIfAbsent("existing", unused, helloChecksum))).resolves.toMatchObject({
+      status: "already-present",
+    });
+    expect(cancelCalled).toBe(true);
   });
 
   test("enforces the configured size while consuming incrementally", async () => {
@@ -165,5 +262,50 @@ describe("LocalFilesystem", () => {
     await mkdir(join(root, "objects"), { mode: 0o700 });
     await symlink("elsewhere", join(root, "objects", "link"));
     await expect(filesystem.list("objects")).rejects.toMatchObject({ code: "SYMLINK" });
+  });
+
+  test("creates restrictive directories and objects", async () => {
+    const { root, filesystem } = await create();
+    await filesystem.putIfAbsent("nested/object", stream("hello"), helloChecksum);
+    for (const [path, expected] of [
+      [root, 0o700],
+      [join(root, ".nanosync-tmp"), 0o700],
+      [join(root, "nested"), 0o700],
+      [join(root, "nested/object"), 0o600],
+    ] as const) {
+      expect((await lstat(path)).mode & 0o777).toBe(expected);
+    }
+  });
+
+  test("rejects unsafe pre-existing directory and file permissions", async () => {
+    const unsafeRoot = await mkdtemp(join(tmpdir(), "nanosync-unsafe-root-"));
+    roots.push(unsafeRoot);
+    await chmod(unsafeRoot, 0o755);
+    await expect(new LocalFilesystem(unsafeRoot).existsBatch(["object"])).rejects.toMatchObject({ code: "UNSAFE_PATH" });
+
+    const unsafeTempRoot = await mkdtemp(join(tmpdir(), "nanosync-unsafe-temp-"));
+    roots.push(unsafeTempRoot);
+    await mkdir(join(unsafeTempRoot, ".nanosync-tmp"), { mode: 0o755 });
+    await expect(new LocalFilesystem(unsafeTempRoot).existsBatch(["object"])).rejects.toMatchObject({ code: "UNSAFE_PATH" });
+
+    const unsafeDirectoryRoot = await mkdtemp(join(tmpdir(), "nanosync-unsafe-directory-"));
+    roots.push(unsafeDirectoryRoot);
+    await mkdir(join(unsafeDirectoryRoot, "unsafe"), { mode: 0o700 });
+    await chmod(join(unsafeDirectoryRoot, "unsafe"), 0o755);
+    const directoryFilesystem = new LocalFilesystem(unsafeDirectoryRoot);
+    await expect(directoryFilesystem.existsBatch(["unsafe/object"])).rejects.toMatchObject({ code: "UNSAFE_PATH" });
+
+    const unsafeFileRoot = await mkdtemp(join(tmpdir(), "nanosync-unsafe-file-"));
+    roots.push(unsafeFileRoot);
+    const fileFilesystem = new LocalFilesystem(unsafeFileRoot);
+    await writeFile(join(unsafeFileRoot, "object"), "hello", { mode: 0o644 });
+    await expect(fileFilesystem.existsBatch(["object"])).rejects.toMatchObject({ code: "UNSAFE_PATH" });
+
+    const hardLinkRoot = await mkdtemp(join(tmpdir(), "nanosync-hard-link-"));
+    roots.push(hardLinkRoot);
+    const hardLinkFilesystem = new LocalFilesystem(hardLinkRoot);
+    await writeFile(join(hardLinkRoot, "object"), "hello", { mode: 0o600 });
+    await link(join(hardLinkRoot, "object"), join(hardLinkRoot, "alias"));
+    await expect(hardLinkFilesystem.existsBatch(["object"])).rejects.toMatchObject({ code: "UNSAFE_PATH" });
   });
 });

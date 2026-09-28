@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, type Dirent, type Stats } from "node:fs";
 import {
-  chmod,
   link,
   lstat,
   mkdir,
@@ -22,7 +21,8 @@ export type ObjectStorageErrorCode =
   | "CHECKSUM_MISMATCH"
   | "OBJECT_CONFLICT"
   | "RANGE_NOT_SATISFIABLE"
-  | "SIZE_LIMIT_EXCEEDED";
+  | "SIZE_LIMIT_EXCEEDED"
+  | "UNSAFE_PATH";
 
 export class ObjectStorageError extends Error {
   readonly code: ObjectStorageErrorCode;
@@ -96,6 +96,7 @@ export class LocalFilesystem implements Filesystem {
   private readonly tempDirectory: string;
   private readonly maximumObjectSize: number;
   private readonly ready: Promise<void>;
+  private readonly activePublications = new Map<string, number>();
 
   constructor(root: string, options: LocalFilesystemOptions = {}) {
     this.root = resolve(root);
@@ -115,7 +116,10 @@ export class LocalFilesystem implements Filesystem {
     const destination = join(this.root, ...parts);
 
     const existing = await this.inspectObject(destination, key, true);
-    if (existing) return this.verifyExisting(key, destination, checksum, existing.size);
+    if (existing) {
+      cancelStreamWithoutWaiting(source);
+      return this.verifyExisting(key, destination, checksum, existing.size);
+    }
 
     const temporaryPath = join(this.tempDirectory, randomUUID());
     let temporary: FileHandle | undefined;
@@ -128,7 +132,6 @@ export class LocalFilesystem implements Filesystem {
         constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollowFlag(),
         0o600,
       );
-      const hash = createHash("sha256");
       while (true) {
         const next = await reader.read();
         if (next.done) {
@@ -144,15 +147,14 @@ export class LocalFilesystem implements Filesystem {
             key,
           );
         }
-        hash.update(next.value);
         await writeAll(temporary, next.value);
       }
       await temporary.sync();
       await temporary.close();
       temporary = undefined;
 
-      const actualChecksum = hash.digest("hex");
-      if (actualChecksum !== checksum) {
+      const actual = await hashFile(temporaryPath, key, false);
+      if (actual.checksum !== checksum) {
         throw new ObjectStorageError(
           "CHECKSUM_MISMATCH",
           `Ciphertext checksum mismatch for ${key}`,
@@ -160,22 +162,29 @@ export class LocalFilesystem implements Filesystem {
         );
       }
 
+      this.beginPublication(destination);
       try {
         // A hard link is the publication point: unlike rename, it cannot replace destination.
         await link(temporaryPath, destination);
+        await unlink(temporaryPath);
+        await syncDirectory(this.tempDirectory);
+        const published = await lstat(destination);
+        validateObject(published, key, false);
         await syncDirectory(dirname(destination));
         return { status: "stored", size, checksum };
       } catch (error) {
         if (!hasCode(error, "EEXIST")) throw error;
         return await this.verifyExisting(key, destination, checksum);
+      } finally {
+        this.endPublication(destination);
       }
     } finally {
-      if (!sourceComplete) await reader.cancel().catch(() => undefined);
-      reader.releaseLock();
       if (temporary) await temporary.close().catch(() => undefined);
       await unlink(temporaryPath).catch((error: unknown) => {
         if (!hasCode(error, "ENOENT")) throw error;
       });
+      if (!sourceComplete) cancelReaderWithoutWaiting(reader);
+      reader.releaseLock();
     }
   }
 
@@ -185,7 +194,7 @@ export class LocalFilesystem implements Filesystem {
     const handle = await openFile(path, constants.O_RDONLY | noFollowFlag());
     try {
       const stats = await handle.stat();
-      if (!stats.isFile()) throw new ObjectStorageError("NOT_REGULAR_FILE", `Object is not a regular file: ${key}`, key);
+      validateObject(stats, key, this.isPublishing(path));
       const range = validateRange(requestedRange ?? { start: 0, endExclusive: stats.size }, stats.size, key);
       return { stream: fileStream(handle, range), size: stats.size, range };
     } catch (error) {
@@ -200,7 +209,7 @@ export class LocalFilesystem implements Filesystem {
     const handle = await openFile(path, constants.O_RDONLY | noFollowFlag());
     try {
       const stats = await handle.stat();
-      if (!stats.isFile()) throw new ObjectStorageError("NOT_REGULAR_FILE", `Object is not a regular file: ${key}`, key);
+      validateObject(stats, key, this.isPublishing(path));
       return { size: stats.size, modifiedAtMs: stats.mtimeMs };
     } finally {
       await handle.close();
@@ -215,8 +224,7 @@ export class LocalFilesystem implements Filesystem {
       try {
         await this.assertSafePath(parts, key);
         const stats = await lstat(path);
-        if (stats.isSymbolicLink()) throw symlinkError(key);
-        if (!stats.isFile()) throw new ObjectStorageError("NOT_REGULAR_FILE", `Object is not a regular file: ${key}`, key);
+        validateObject(stats, key, this.isPublishing(path));
         return true;
       } catch (error) {
         if (hasCode(error, "ENOENT")) return false;
@@ -232,8 +240,7 @@ export class LocalFilesystem implements Filesystem {
     try {
       await this.assertSafePath(parts, key);
       const stats = await lstat(path);
-      if (stats.isSymbolicLink()) throw symlinkError(key);
-      if (!stats.isFile()) throw new ObjectStorageError("NOT_REGULAR_FILE", `Object is not a regular file: ${key}`, key);
+      validateObject(stats, key, this.isPublishing(path));
       await unlink(path);
       await syncDirectory(dirname(path));
       return { deleted: true };
@@ -255,15 +262,12 @@ export class LocalFilesystem implements Filesystem {
       if (!options.cursor.startsWith(prefix)) throw new ObjectStorageError("INVALID_KEY", "List cursor does not match prefix");
     }
 
-    const keys: string[] = [];
-    await this.collectKeys(this.root, "", keys);
-    const matching = keys
-      .filter((key) => key.startsWith(prefix) && (options.cursor === undefined || key > options.cursor))
-      .sort();
-    const page = matching.slice(0, limit);
+    const matches: string[] = [];
+    await this.collectPage(this.root, "", prefix, options.cursor, limit + 1, matches);
+    const page = matches.slice(0, limit);
     return {
       keys: page,
-      cursor: matching.length > limit ? page.at(-1)! : null,
+      cursor: matches.length > limit ? page.at(-1)! : null,
     };
   }
 
@@ -271,18 +275,16 @@ export class LocalFilesystem implements Filesystem {
     await mkdir(this.root, { recursive: true, mode: 0o700 });
     const rootStats = await lstat(this.root);
     if (rootStats.isSymbolicLink()) throw symlinkError("<root>");
-    if (!rootStats.isDirectory()) throw new Error(`Object storage root is not a directory: ${this.root}`);
+    validateDirectory(rootStats, "<root>");
     if (await realpath(this.root) !== this.root) {
       throw new Error(`Object storage root resolves through a symbolic link: ${this.root}`);
     }
-    await chmod(this.root, 0o700);
     await mkdir(this.tempDirectory, { mode: 0o700 }).catch((error: unknown) => {
       if (!hasCode(error, "EEXIST")) throw error;
     });
     const tempStats = await lstat(this.tempDirectory);
     if (tempStats.isSymbolicLink()) throw symlinkError(TEMP_DIRECTORY);
-    if (!tempStats.isDirectory()) throw new Error(`Temporary object path is not a directory: ${this.tempDirectory}`);
-    await chmod(this.tempDirectory, 0o700);
+    validateDirectory(tempStats, TEMP_DIRECTORY);
   }
 
   private async ensureParents(parts: string[], key: string): Promise<void> {
@@ -293,7 +295,7 @@ export class LocalFilesystem implements Filesystem {
       try {
         const stats = await lstat(current);
         if (stats.isSymbolicLink()) throw symlinkError(key);
-        if (!stats.isDirectory()) throw new ObjectStorageError("NOT_REGULAR_FILE", `Object parent is not a directory: ${key}`, key);
+        validateDirectory(stats, key);
       } catch (error) {
         if (!hasCode(error, "ENOENT")) throw error;
         await mkdir(current, { mode: 0o700 }).catch((mkdirError: unknown) => {
@@ -301,7 +303,7 @@ export class LocalFilesystem implements Filesystem {
         });
         const stats = await lstat(current);
         if (stats.isSymbolicLink()) throw symlinkError(key);
-        if (!stats.isDirectory()) throw new ObjectStorageError("NOT_REGULAR_FILE", `Object parent is not a directory: ${key}`, key);
+        validateDirectory(stats, key);
         await syncDirectory(parent);
       }
     }
@@ -309,10 +311,11 @@ export class LocalFilesystem implements Filesystem {
 
   private async assertSafePath(parts: string[], key: string): Promise<void> {
     let current = this.root;
-    for (const part of parts) {
+    for (const [index, part] of parts.entries()) {
       current = join(current, part);
       const stats = await lstat(current);
       if (stats.isSymbolicLink()) throw symlinkError(key);
+      if (index < parts.length - 1) validateDirectory(stats, key);
     }
   }
 
@@ -322,7 +325,7 @@ export class LocalFilesystem implements Filesystem {
     try {
       await this.assertSafePath(parts, key);
       const stats = await lstat(path);
-      if (!stats.isFile()) throw new ObjectStorageError("NOT_REGULAR_FILE", `Object is not a regular file: ${key}`, key);
+      validateObject(stats, key, this.isPublishing(path));
       return path;
     } catch (error) {
       if (hasCode(error, "ENOENT")) throw new ObjectStorageError("NOT_FOUND", `Object not found: ${key}`, key, { cause: error });
@@ -333,8 +336,7 @@ export class LocalFilesystem implements Filesystem {
   private async inspectObject(path: string, key: string, missingAllowed: boolean): Promise<{ size: number } | undefined> {
     try {
       const stats = await lstat(path);
-      if (stats.isSymbolicLink()) throw symlinkError(key);
-      if (!stats.isFile()) throw new ObjectStorageError("NOT_REGULAR_FILE", `Object is not a regular file: ${key}`, key);
+      validateObject(stats, key, this.isPublishing(path));
       return { size: stats.size };
     } catch (error) {
       if (missingAllowed && hasCode(error, "ENOENT")) return undefined;
@@ -343,7 +345,7 @@ export class LocalFilesystem implements Filesystem {
   }
 
   private async verifyExisting(key: string, path: string, checksum: string, knownSize?: number): Promise<PutResult> {
-    const actual = await hashFile(path, key);
+    const actual = await hashFile(path, key, this.isPublishing(path));
     if (actual.checksum !== checksum) {
       throw new ObjectStorageError(
         "OBJECT_CONFLICT",
@@ -354,18 +356,80 @@ export class LocalFilesystem implements Filesystem {
     return { status: "already-present", size: knownSize ?? actual.size, checksum };
   }
 
-  private async collectKeys(directory: string, prefix: string, output: string[]): Promise<void> {
-    const entries = await readdir(directory, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!prefix && entry.name === TEMP_DIRECTORY) continue;
-      const key = prefix ? `${prefix}/${entry.name}` : entry.name;
-      const path = join(directory, entry.name);
+  private async collectPage(
+    directory: string,
+    keyPrefix: string,
+    requestedPrefix: string,
+    cursor: string | undefined,
+    maximum: number,
+    output: string[],
+  ): Promise<boolean> {
+    interface DirectoryFrame {
+      directory: string;
+      keyPrefix: string;
+      entries: Dirent[];
+      index: number;
+    }
+    interface Candidate {
+      frame: DirectoryFrame;
+      entry: DirectoryFrame["entries"][number];
+      key: string;
+    }
+
+    const candidates: Candidate[] = [];
+    const pushNext = (frame: DirectoryFrame): void => {
+      while (frame.index < frame.entries.length) {
+        const entry = frame.entries[frame.index++]!;
+        if (!frame.keyPrefix && entry.name === TEMP_DIRECTORY) continue;
+        const key = frame.keyPrefix ? `${frame.keyPrefix}/${entry.name}` : entry.name;
+        candidates.push({ frame, entry, key });
+        candidates.sort((left, right) => compareNames(right.key, left.key));
+        return;
+      }
+    };
+    const openFrame = async (path: string, prefix: string): Promise<DirectoryFrame> => ({
+      directory: path,
+      keyPrefix: prefix,
+      entries: (await readdir(path, { withFileTypes: true })).sort((left, right) => compareNames(left.name, right.name)),
+      index: 0,
+    });
+
+    pushNext(await openFrame(directory, keyPrefix));
+    while (candidates.length > 0) {
+      const candidate = candidates.pop()!;
+      pushNext(candidate.frame);
+      const { entry, key } = candidate;
+      const path = join(candidate.frame.directory, entry.name);
       const stats = await lstat(path);
       if (stats.isSymbolicLink()) throw symlinkError(key);
-      if (stats.isDirectory()) await this.collectKeys(path, key, output);
-      else if (stats.isFile()) output.push(key);
-      else throw new ObjectStorageError("NOT_REGULAR_FILE", `Unsupported object-store entry: ${key}`, key);
+      if (stats.isDirectory()) {
+        validateDirectory(stats, key);
+        if (prefixesCanOverlap(key, requestedPrefix)) pushNext(await openFrame(path, key));
+      } else if (stats.isFile()) {
+        validateObject(stats, key, this.isPublishing(path));
+        if (key.startsWith(requestedPrefix) && (cursor === undefined || compareNames(key, cursor) > 0)) {
+          output.push(key);
+          if (output.length >= maximum) return true;
+        }
+      } else {
+        throw new ObjectStorageError("NOT_REGULAR_FILE", `Unsupported object-store entry: ${key}`, key);
+      }
     }
+    return false;
+  }
+
+  private beginPublication(path: string): void {
+    this.activePublications.set(path, (this.activePublications.get(path) ?? 0) + 1);
+  }
+
+  private endPublication(path: string): void {
+    const remaining = (this.activePublications.get(path) ?? 1) - 1;
+    if (remaining === 0) this.activePublications.delete(path);
+    else this.activePublications.set(path, remaining);
+  }
+
+  private isPublishing(path: string): boolean {
+    return this.activePublications.has(path);
   }
 }
 
@@ -451,14 +515,14 @@ async function writeAll(handle: FileHandle, bytes: Uint8Array): Promise<void> {
   }
 }
 
-async function hashFile(path: string, key: string): Promise<{ checksum: string; size: number }> {
+async function hashFile(path: string, key: string, allowPublicationLink: boolean): Promise<{ checksum: string; size: number }> {
   const handle = await openFile(path, constants.O_RDONLY | noFollowFlag());
   const hash = createHash("sha256");
   const buffer = new Uint8Array(IO_CHUNK_SIZE);
   let size = 0;
   try {
     const stats = await handle.stat();
-    if (!stats.isFile()) throw new ObjectStorageError("NOT_REGULAR_FILE", `Object is not a regular file: ${key}`, key);
+    validateObject(stats, key, allowPublicationLink);
     while (true) {
       const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, null);
       if (bytesRead === 0) break;
@@ -490,4 +554,56 @@ function symlinkError(key: string): ObjectStorageError {
 
 function hasCode(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && error.code === code;
+}
+
+function cancelReaderWithoutWaiting(reader: { cancel(reason?: unknown): Promise<void> }): void {
+  try {
+    void reader.cancel().catch(() => undefined);
+  } catch {
+    // Cancellation is advisory; storage cleanup has already completed.
+  }
+}
+
+function cancelStreamWithoutWaiting(stream: ReadableStream<Uint8Array>): void {
+  try {
+    void stream.cancel().catch(() => undefined);
+  } catch {
+    // A locked or hostile source must not delay an idempotent result.
+  }
+}
+
+function validateDirectory(stats: Stats, key: string): void {
+  if (!stats.isDirectory()) throw new ObjectStorageError("NOT_REGULAR_FILE", `Object parent is not a directory: ${key}`, key);
+  validateOwnershipAndMode(stats, key, 0o700);
+}
+
+function validateObject(stats: Stats, key: string, allowPublicationLink: boolean): void {
+  if (stats.isSymbolicLink()) throw symlinkError(key);
+  if (!stats.isFile()) throw new ObjectStorageError("NOT_REGULAR_FILE", `Object is not a regular file: ${key}`, key);
+  validateOwnershipAndMode(stats, key, 0o600);
+  const maximumLinks = allowPublicationLink ? 2 : 1;
+  if (stats.nlink < 1 || stats.nlink > maximumLinks) {
+    throw new ObjectStorageError("UNSAFE_PATH", `Unsafe hard-link count for object: ${key}`, key);
+  }
+}
+
+function validateOwnershipAndMode(stats: Stats, key: string, expectedMode: number): void {
+  const currentUid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  if ((currentUid !== undefined && stats.uid !== currentUid) || (stats.mode & 0o777) !== expectedMode) {
+    throw new ObjectStorageError(
+      "UNSAFE_PATH",
+      `Unsafe owner or permissions for object-store path: ${key}`,
+      key,
+    );
+  }
+}
+
+function prefixesCanOverlap(directoryKey: string, requestedPrefix: string): boolean {
+  return requestedPrefix === ""
+    || directoryKey.startsWith(requestedPrefix)
+    || requestedPrefix.startsWith(`${directoryKey}/`);
+}
+
+function compareNames(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
