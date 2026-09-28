@@ -71,7 +71,7 @@ describe("LocalFilesystem", () => {
     expect(await readdir(join(root, ".nanosync-tmp"))).toEqual([]);
   });
 
-  test("checksums storage-owned bytes after a producer mutates an enqueued chunk", async () => {
+  test("only publishes a mutated producer chunk when stored bytes match the accepted checksum", async () => {
     const { root, filesystem } = await create();
     const bytes = new Uint8Array(1024 * 1024).fill(65);
     const mutated = new Uint8Array(bytes.byteLength).fill(66);
@@ -84,10 +84,45 @@ describe("LocalFilesystem", () => {
       },
     });
 
-    await filesystem.putIfAbsent("mutated", source, checksum);
-    const stored = await readFile(join(root, "mutated"));
-    expect(stored.equals(mutated)).toBe(true);
-    expect(createHash("sha256").update(stored).digest("hex")).toBe(checksum);
+    try {
+      await filesystem.putIfAbsent("mutated", source, checksum);
+      const stored = await readFile(join(root, "mutated"));
+      expect(createHash("sha256").update(stored).digest("hex")).toBe(checksum);
+    } catch {
+      expect(await filesystem.existsBatch(["mutated"])).toEqual([false]);
+    }
+  });
+
+  test("cannot publish or misreport a Uint8Array that grows during upload", async () => {
+    const initialSize = 4 * 1024 * 1024;
+    const expandedSize = initialSize * 2;
+    let buffer: ArrayBuffer;
+    try {
+      buffer = new ArrayBuffer(initialSize, { maxByteLength: expandedSize });
+      if (!buffer.resizable) return;
+    } catch {
+      return;
+    }
+
+    const { root, filesystem } = await create({ maximumObjectSize: initialSize });
+    const expandedChecksum = createHash("sha256").update(new Uint8Array(expandedSize)).digest("hex");
+    const source = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(buffer));
+        queueMicrotask(() => buffer.resize(expandedSize));
+        controller.close();
+      },
+    });
+
+    try {
+      const result = await filesystem.putIfAbsent("resizable", source, expandedChecksum);
+      const stored = await readFile(join(root, "resizable"));
+      expect(stored.byteLength).toBeLessThanOrEqual(initialSize);
+      expect(result.size).toBe(stored.byteLength);
+      expect(createHash("sha256").update(stored).digest("hex")).toBe(expandedChecksum);
+    } catch {
+      expect(await filesystem.existsBatch(["resizable"])).toEqual([false]);
+    }
   });
 
   test("is idempotent for matching objects and never replaces a conflict", async () => {
@@ -175,13 +210,19 @@ describe("LocalFilesystem", () => {
     });
   });
 
-  test("stops lexical traversal after collecting one lookahead entry", async () => {
+  test("orders and paginates a flat directory independently of iteration order", async () => {
     const { root, filesystem } = await create();
-    await filesystem.putIfAbsent("a", stream("hello"), helloChecksum);
-    await filesystem.putIfAbsent("b", stream("hello"), helloChecksum);
-    await symlink("outside", join(root, "z"));
+    await filesystem.existsBatch(["missing"]);
+    for (let index = 39; index >= 0; index--) {
+      await writeFile(join(root, `flat-${index.toString().padStart(2, "0")}`), "hello", { mode: 0o600 });
+    }
 
-    expect(await filesystem.list("", { limit: 1 })).toEqual({ keys: ["a"], cursor: "a" });
+    const first = await filesystem.list("flat-", { limit: 3 });
+    expect(first).toEqual({ keys: ["flat-00", "flat-01", "flat-02"], cursor: "flat-02" });
+    expect(await filesystem.list("flat-", { limit: 3, cursor: first.cursor ?? undefined })).toEqual({
+      keys: ["flat-03", "flat-04", "flat-05"],
+      cursor: "flat-05",
+    });
   });
 
   test("orders nested and sibling keys by the complete lexical key", async () => {

@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants, type Dirent, type Stats } from "node:fs";
+import { constants, type Stats } from "node:fs";
 import {
   link,
   lstat,
   mkdir,
   open as openFile,
-  readdir,
+  opendir,
   realpath,
   unlink,
   type FileHandle,
@@ -139,21 +139,29 @@ export class LocalFilesystem implements Filesystem {
           break;
         }
         if (!(next.value instanceof Uint8Array)) throw new TypeError("Object stream must yield Uint8Array chunks");
-        size += next.value.byteLength;
-        if (size > this.maximumObjectSize) {
+        const incomingLength = next.value.byteLength;
+        if (incomingLength > this.maximumObjectSize - size) {
           throw new ObjectStorageError(
             "SIZE_LIMIT_EXCEEDED",
             `Object exceeds the ${this.maximumObjectSize} byte limit`,
             key,
           );
         }
-        await writeAll(temporary, next.value);
+        for (let offset = 0; offset < incomingLength; offset += IO_CHUNK_SIZE) {
+          const length = Math.min(IO_CHUNK_SIZE, incomingLength - offset);
+          const owned = copyIncomingRange(next.value, offset, length);
+          size += owned.byteLength;
+          await writeAll(temporary, owned);
+        }
       }
       await temporary.sync();
       await temporary.close();
       temporary = undefined;
 
       const actual = await hashFile(temporaryPath, key, false);
+      if (actual.size !== size || actual.size > this.maximumObjectSize) {
+        throw new Error("Temporary object size differs from accounted stream bytes");
+      }
       if (actual.checksum !== checksum) {
         throw new ObjectStorageError(
           "CHECKSUM_MISMATCH",
@@ -171,7 +179,7 @@ export class LocalFilesystem implements Filesystem {
         const published = await lstat(destination);
         validateObject(published, key, false);
         await syncDirectory(dirname(destination));
-        return { status: "stored", size, checksum };
+        return { status: "stored", size: actual.size, checksum };
       } catch (error) {
         if (!hasCode(error, "EEXIST")) throw error;
         return await this.verifyExisting(key, destination, checksum);
@@ -363,59 +371,30 @@ export class LocalFilesystem implements Filesystem {
     cursor: string | undefined,
     maximum: number,
     output: string[],
-  ): Promise<boolean> {
-    interface DirectoryFrame {
-      directory: string;
-      keyPrefix: string;
-      entries: Dirent[];
-      index: number;
-    }
-    interface Candidate {
-      frame: DirectoryFrame;
-      entry: DirectoryFrame["entries"][number];
-      key: string;
-    }
-
-    const candidates: Candidate[] = [];
-    const pushNext = (frame: DirectoryFrame): void => {
-      while (frame.index < frame.entries.length) {
-        const entry = frame.entries[frame.index++]!;
-        if (!frame.keyPrefix && entry.name === TEMP_DIRECTORY) continue;
-        const key = frame.keyPrefix ? `${frame.keyPrefix}/${entry.name}` : entry.name;
-        candidates.push({ frame, entry, key });
-        candidates.sort((left, right) => compareNames(right.key, left.key));
-        return;
-      }
-    };
-    const openFrame = async (path: string, prefix: string): Promise<DirectoryFrame> => ({
-      directory: path,
-      keyPrefix: prefix,
-      entries: (await readdir(path, { withFileTypes: true })).sort((left, right) => compareNames(left.name, right.name)),
-      index: 0,
-    });
-
-    pushNext(await openFrame(directory, keyPrefix));
-    while (candidates.length > 0) {
-      const candidate = candidates.pop()!;
-      pushNext(candidate.frame);
-      const { entry, key } = candidate;
-      const path = join(candidate.frame.directory, entry.name);
+  ): Promise<void> {
+    const entries = await opendir(directory);
+    for await (const entry of entries) {
+      if (!keyPrefix && entry.name === TEMP_DIRECTORY) continue;
+      const key = keyPrefix ? `${keyPrefix}/${entry.name}` : entry.name;
+      const path = join(directory, entry.name);
       const stats = await lstat(path);
       if (stats.isSymbolicLink()) throw symlinkError(key);
       if (stats.isDirectory()) {
         validateDirectory(stats, key);
-        if (prefixesCanOverlap(key, requestedPrefix)) pushNext(await openFrame(path, key));
+        if (prefixesCanOverlap(key, requestedPrefix)) {
+          await this.collectPage(path, key, requestedPrefix, cursor, maximum, output);
+        }
       } else if (stats.isFile()) {
         validateObject(stats, key, this.isPublishing(path));
         if (key.startsWith(requestedPrefix) && (cursor === undefined || compareNames(key, cursor) > 0)) {
           output.push(key);
-          if (output.length >= maximum) return true;
+          output.sort(compareNames);
+          if (output.length > maximum) output.pop();
         }
       } else {
         throw new ObjectStorageError("NOT_REGULAR_FILE", `Unsupported object-store entry: ${key}`, key);
       }
     }
-    return false;
   }
 
   private beginPublication(path: string): void {
@@ -512,6 +491,17 @@ async function writeAll(handle: FileHandle, bytes: Uint8Array): Promise<void> {
     const { bytesWritten } = await handle.write(bytes, offset, bytes.byteLength - offset);
     if (bytesWritten === 0) throw new Error("Unable to make progress writing object");
     offset += bytesWritten;
+  }
+}
+
+function copyIncomingRange(bytes: Uint8Array, offset: number, length: number): Uint8Array {
+  try {
+    const source = new Uint8Array(bytes.buffer, bytes.byteOffset + offset, length);
+    const owned = new Uint8Array(length);
+    owned.set(source);
+    return owned;
+  } catch (error) {
+    throw new TypeError("Object stream chunk changed size while being consumed", { cause: error });
   }
 }
 
