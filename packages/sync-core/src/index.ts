@@ -6,6 +6,7 @@ import {
   type RevisionEnvelope, type ObjectId, type VaultId, type RecoveryWrapV1, type VisibleObjectReference,
 } from "@nanosync/protocol";
 export { MAX_FILE_BYTES, parseManifest, encodeManifest, decodeManifest, validateManifestReferences, encryptManifest, decryptManifest, type ManifestV1, type ManifestEntry, type ManifestChunk } from "./manifest.ts";
+export { HttpRemote, RemoteError, type RemoteOptions, type ChunkJournal } from "./remote.ts";
 
 const text = new TextEncoder();
 const ZERO_NONCE = new Uint8Array(12);
