@@ -269,6 +269,11 @@ function verifyIntegrity(database: Database): void {
       throw new MetadataError("CORRUPT_SCHEMA", "Metadata schema is incomplete");
     }
   }
+  if (pragmaNumber(database, "user_version") >= 2) {
+    const required = ["accounts", "bootstrap_state", "initial_devices", "recovery_wraps", "account_identity_immutable", "account_verifier_transition", "bootstrap_identity_immutable", "bootstrap_seal_once", "initial_device_immutable", "recovery_wrap_immutable"];
+    const present = executeAll<{ name: string }>(database, "SELECT name FROM sqlite_schema WHERE (type = 'table' OR type = 'trigger') ORDER BY name", []).map((row) => row.name);
+    if (required.some((name) => !present.includes(name))) throw new MetadataError("CORRUPT_SCHEMA", "Metadata schema is incomplete");
+  }
 }
 
 function validateSidecars(filename: string): void {

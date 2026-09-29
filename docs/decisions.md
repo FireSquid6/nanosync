@@ -45,6 +45,7 @@ These choices are part of persistent format `1` and protocol `1`. Details and li
 | Filesystems | Regular files/directories plus owner-executable bit only. Reject links, special files, and unsafe names visibly; no xattr, ACL, or sparse fidelity. |
 | Retention/GC | UTC buckets select newest accepted revision; 24-hour grace plus recheck; current/conflicts/transfers/needed merge bases remain protected. |
 | Network/admin | Loopback by default, acknowledged non-loopback exposure and external TLS; CLI-only administration uses the same server API. |
+| Bootstrap | Explicit injected authorization; staged singleton initialization, normal streaming object validation, then atomic zero-parent genesis publication and permanent sealing. No credential is issued in this stage. |
 
 ### Immutable encrypted objects
 

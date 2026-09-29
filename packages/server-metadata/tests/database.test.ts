@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   __unsafeOpenWithMigrationsForTests,
+  BootstrapRepository,
   METADATA_MIGRATIONS,
   MetadataError,
   ObjectCatalogRepository,
@@ -79,14 +80,13 @@ describe("metadata initialization", () => {
       busyTimeoutMs: 5000,
       journalMode: "wal",
       synchronous: 2,
-      userVersion: 1,
+      userVersion: 2,
     });
-    expect(db.get<{ version: number; name: string }>("SELECT version, name FROM metadata_migrations")).toEqual({
-      version: 1,
-      name: "initial_metadata_schema",
-    });
+    expect(db.all<{ version: number; name: string }>("SELECT version, name FROM metadata_migrations ORDER BY version")).toEqual([
+      { version: 1, name: "initial_metadata_schema" }, { version: 2, name: "account_and_bootstrap" },
+    ]);
     expect(db.all<{ name: string }>("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name").map((row) => row.name)).toEqual([
-      "idempotency_records", "metadata_migrations", "object_catalog", "revision_objects", "revision_parents",
+      "accounts", "bootstrap_state", "idempotency_records", "initial_devices", "metadata_migrations", "object_catalog", "recovery_wraps", "revision_objects", "revision_parents",
       "revisions", "server_state", "upload_sessions",
     ]);
     insertObject(db);
@@ -238,6 +238,24 @@ describe("object repository", () => {
 });
 
 describe("schema invariants", () => {
+  test("keeps account identity immutable while permitting one complete bounded verifier replacement", () => {
+    const db = new ServerMetadataDatabase(":memory:");
+    const repository = new BootstrapRepository(db);
+    const legacy = { algorithm: "argon2id" as const, version: 19 as const, memoryKiB: 32_768, iterations: 2, parallelism: 1, salt: new Uint8Array(16).fill(1), hash: new Uint8Array(32).fill(2) };
+    db.writeTransaction((tx) => tx.run(`INSERT INTO accounts(singleton, principal_id, password_algorithm, password_version, password_memory_kib, password_iterations, password_parallelism, password_salt, password_hash, created_at_ms, password_updated_at_ms) VALUES (1, ?, 'argon2id', 19, 32768, 2, 1, ?, ?, 10, 10)`, [device, legacy.salt, legacy.hash]));
+    expect(repository.passwordVerifier()).toEqual(legacy);
+    expect(() => db.writeTransaction((tx) => tx.run("UPDATE accounts SET principal_id = ? WHERE singleton = 1", [vault]))).toThrow();
+    expect(() => db.writeTransaction((tx) => tx.run("UPDATE accounts SET password_memory_kib = 1048577, password_updated_at_ms = 11 WHERE singleton = 1"))).toThrow();
+    expect(() => db.writeTransaction((tx) => tx.run("UPDATE accounts SET password_hash = ?, password_updated_at_ms = 11 WHERE singleton = 1", [new Uint8Array(31)]))).toThrow();
+    const weakReplacement = { ...legacy, salt: new Uint8Array(16).fill(3), hash: new Uint8Array(32).fill(4) };
+    expect(() => repository.replacePasswordVerifier(weakReplacement, 11)).toThrow(expect.objectContaining({ code: "INVARIANT" }));
+    const replacement = { algorithm: "argon2id" as const, version: 19 as const, memoryKiB: 65_536, iterations: 3, parallelism: 1, salt: new Uint8Array(16).fill(5), hash: new Uint8Array(32).fill(6) };
+    repository.replacePasswordVerifier(replacement, 11);
+    expect(repository.passwordVerifier()).toEqual(replacement);
+    expect(() => repository.replacePasswordVerifier({ ...replacement, hash: new Uint8Array(32).fill(7) }, 12)).toThrow();
+    expect(db.get<{ principal_id: string; created_at_ms: number; password_updated_at_ms: number }>("SELECT principal_id, created_at_ms, password_updated_at_ms FROM accounts")).toEqual({ principal_id: device, created_at_ms: 10, password_updated_at_ms: 11 });
+    db.close();
+  });
   test("rejects malformed object identity, type, length, and duplicate identity", () => {
     const db = new ServerMetadataDatabase(":memory:");
     db.writeTransaction((tx) => tx.run(
@@ -374,17 +392,30 @@ describe("schema invariants", () => {
 });
 
 describe("migration safety", () => {
+  test("keeps migration 1 immutable and upgrades an actual v1 database", async () => {
+    expect(METADATA_MIGRATIONS[0]?.checksum).toBe("9aed4c9f2ee3577b1349c78c097f885fa7bb54ad35f25a00143977a113e5dbb7");
+    expect(METADATA_MIGRATIONS[1]?.checksum).toBe("aad9dd2ec61e0d72a0dd5c20622da5ca519bf91d7db402c87db6bbbc28c728e5");
+    const { path } = await pathFor("v1.sqlite");
+    __unsafeOpenWithMigrationsForTests(path, [METADATA_MIGRATIONS[0]!]).close();
+    let db = __unsafeOpenWithMigrationsForTests(path, [METADATA_MIGRATIONS[0]!]);
+    expect(db.pragmas().userVersion).toBe(1);
+    db.close();
+    db = new ServerMetadataDatabase(path);
+    expect(db.pragmas().userVersion).toBe(2);
+    expect(db.get<{ count: number }>("SELECT count(*) AS count FROM sqlite_schema WHERE name = 'bootstrap_state'")?.count).toBe(1);
+    db.close();
+  });
   test("rolls schema, ledger, and user_version back after a migration failure", async () => {
     const { path } = await pathFor();
     new ServerMetadataDatabase(path).close();
     const sql = "CREATE TABLE should_rollback(value TEXT) STRICT; INSERT INTO table_that_does_not_exist VALUES (1);";
-    const failing: MetadataMigration = { version: 2, name: "injected_failure", sql, checksum: migrationChecksum(2, "injected_failure", sql) };
+    const failing: MetadataMigration = { version: 3, name: "injected_failure", sql, checksum: migrationChecksum(3, "injected_failure", sql) };
     expect(() => __unsafeOpenWithMigrationsForTests(path, [...METADATA_MIGRATIONS, failing])).toThrow(
       expect.objectContaining({ code: "MIGRATION_FAILURE" }),
     );
     const db = new ServerMetadataDatabase(path);
-    expect(db.pragmas().userVersion).toBe(1);
-    expect(db.get<{ count: number }>("SELECT count(*) AS count FROM metadata_migrations")?.count).toBe(1);
+    expect(db.pragmas().userVersion).toBe(2);
+    expect(db.get<{ count: number }>("SELECT count(*) AS count FROM metadata_migrations")?.count).toBe(2);
     expect(db.get<{ count: number }>("SELECT count(*) AS count FROM sqlite_schema WHERE name = 'should_rollback'")?.count).toBe(0);
     db.close();
   });
@@ -392,7 +423,7 @@ describe("migration safety", () => {
   test("refuses future, gapped, and tampered migration metadata", async () => {
     const future = await pathFor("future.sqlite");
     let db = new ServerMetadataDatabase(future.path);
-    db.writeTransaction((tx) => tx.run("PRAGMA user_version = 2"));
+    db.writeTransaction((tx) => tx.run("PRAGMA user_version = 3"));
     db.close();
     expect(() => new ServerMetadataDatabase(future.path)).toThrow(expect.objectContaining({ code: "UNSUPPORTED_SCHEMA" }));
 
@@ -409,6 +440,12 @@ describe("migration safety", () => {
     db.writeTransaction((tx) => tx.run("UPDATE metadata_migrations SET checksum = ? WHERE version = 1", ["f".repeat(64)]));
     db.close();
     expect(() => new ServerMetadataDatabase(tampered.path)).toThrow(expect.objectContaining({ code: "CORRUPT_SCHEMA" }));
+
+    const tamperedV2 = await pathFor("tampered-v2.sqlite");
+    db = new ServerMetadataDatabase(tamperedV2.path);
+    db.writeTransaction((tx) => tx.run("UPDATE metadata_migrations SET checksum = ? WHERE version = 2", ["a".repeat(64)]));
+    db.close();
+    expect(() => new ServerMetadataDatabase(tamperedV2.path)).toThrow(expect.objectContaining({ code: "CORRUPT_SCHEMA" }));
   });
 
   test("refuses a ledger/version pair whose required schema is incomplete", async () => {
@@ -417,5 +454,21 @@ describe("migration safety", () => {
     db.writeTransaction((tx) => tx.run("DROP TRIGGER server_state_valid_head_update"));
     db.close();
     expect(() => new ServerMetadataDatabase(path)).toThrow(expect.objectContaining({ code: "CORRUPT_SCHEMA" }));
+
+    const missingV2 = await pathFor("partial-v2.sqlite");
+    const v2 = new ServerMetadataDatabase(missingV2.path);
+    v2.writeTransaction((tx) => tx.run("DROP TRIGGER account_verifier_transition"));
+    v2.close();
+    expect(() => new ServerMetadataDatabase(missingV2.path)).toThrow(expect.objectContaining({ code: "CORRUPT_SCHEMA" }));
+  });
+
+  test("fails closed after migrating initialized legacy v1 state without v2 identities", async () => {
+    const { path } = await pathFor("legacy-initialized.sqlite");
+    const legacy = __unsafeOpenWithMigrationsForTests(path, [METADATA_MIGRATIONS[0]!]);
+    legacy.writeTransaction((tx) => tx.run("INSERT INTO server_state(singleton, vault_id, current_head_revision_id, current_sequence) VALUES (1, ?, NULL, 0)", [vault]));
+    legacy.close();
+    const upgraded = new ServerMetadataDatabase(path);
+    expect(() => new BootstrapRepository(upgraded).status()).toThrow(expect.objectContaining({ code: "INVARIANT" }));
+    upgraded.close();
   });
 });

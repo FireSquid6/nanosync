@@ -182,6 +182,74 @@ BEGIN
 END;
 `;
 
+const V2_SQL = `
+CREATE TABLE accounts (
+  singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+  principal_id TEXT NOT NULL UNIQUE CHECK(${uuid("principal_id")}),
+  password_algorithm TEXT NOT NULL CHECK(password_algorithm = 'argon2id'),
+  password_version INTEGER NOT NULL CHECK(password_version = 19),
+  password_memory_kib INTEGER NOT NULL CHECK(password_memory_kib BETWEEN 1 AND 1048576),
+  password_iterations INTEGER NOT NULL CHECK(password_iterations BETWEEN 1 AND 10),
+  password_parallelism INTEGER NOT NULL CHECK(password_parallelism BETWEEN 1 AND 8),
+  password_salt BLOB NOT NULL CHECK(typeof(password_salt) = 'blob' AND length(password_salt) BETWEEN 16 AND 64),
+  password_hash BLOB NOT NULL CHECK(typeof(password_hash) = 'blob' AND length(password_hash) BETWEEN 32 AND 64),
+  created_at_ms INTEGER NOT NULL CHECK(${timestamp("created_at_ms")}),
+  password_updated_at_ms INTEGER NOT NULL CHECK(${timestamp("password_updated_at_ms")} AND password_updated_at_ms >= created_at_ms)
+) STRICT;
+
+CREATE TABLE initial_devices (
+  singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+  device_id TEXT NOT NULL UNIQUE CHECK(${uuid("device_id")}),
+  principal_id TEXT NOT NULL UNIQUE,
+  vault_id TEXT NOT NULL UNIQUE CHECK(${uuid("vault_id")}),
+  created_at_ms INTEGER NOT NULL CHECK(${timestamp("created_at_ms")}),
+  FOREIGN KEY (principal_id) REFERENCES accounts(principal_id),
+  FOREIGN KEY (vault_id) REFERENCES server_state(vault_id)
+) STRICT;
+
+CREATE TABLE recovery_wraps (
+  singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+  vault_id TEXT NOT NULL UNIQUE CHECK(${uuid("vault_id")}),
+  wrap_version INTEGER NOT NULL CHECK(wrap_version = 1),
+  algorithm TEXT NOT NULL CHECK(algorithm = 'A256GCM'),
+  nonce BLOB NOT NULL CHECK(typeof(nonce) = 'blob' AND length(nonce) = 12),
+  ciphertext BLOB NOT NULL CHECK(typeof(ciphertext) = 'blob' AND length(ciphertext) = 48),
+  FOREIGN KEY (vault_id) REFERENCES server_state(vault_id)
+) STRICT;
+
+CREATE TABLE bootstrap_state (
+  singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+  vault_id TEXT NOT NULL UNIQUE CHECK(${uuid("vault_id")}),
+  principal_id TEXT NOT NULL UNIQUE,
+  initial_device_id TEXT NOT NULL UNIQUE,
+  lifecycle TEXT NOT NULL CHECK(lifecycle IN ('initialized', 'sealed')),
+  initialized_at_ms INTEGER NOT NULL CHECK(${timestamp("initialized_at_ms")}),
+  sealed_at_ms INTEGER CHECK(sealed_at_ms IS NULL OR (${timestamp("sealed_at_ms")})),
+  CHECK((lifecycle = 'initialized' AND sealed_at_ms IS NULL) OR (lifecycle = 'sealed' AND sealed_at_ms IS NOT NULL)),
+  FOREIGN KEY (vault_id) REFERENCES server_state(vault_id),
+  FOREIGN KEY (principal_id) REFERENCES accounts(principal_id),
+  FOREIGN KEY (initial_device_id) REFERENCES initial_devices(device_id)
+) STRICT;
+
+CREATE TRIGGER account_identity_immutable BEFORE UPDATE OF singleton, principal_id, created_at_ms ON accounts
+BEGIN SELECT RAISE(ABORT, 'account identity is immutable'); END;
+CREATE TRIGGER account_verifier_transition BEFORE UPDATE OF password_algorithm, password_version, password_memory_kib,
+  password_iterations, password_parallelism, password_salt, password_hash, password_updated_at_ms ON accounts
+WHEN NEW.password_updated_at_ms <= OLD.password_updated_at_ms
+  OR NEW.password_salt = OLD.password_salt
+BEGIN SELECT RAISE(ABORT, 'password verifier replacement is invalid'); END;
+CREATE TRIGGER recovery_wrap_immutable BEFORE UPDATE ON recovery_wraps
+BEGIN SELECT RAISE(ABORT, 'recovery wrap is immutable'); END;
+CREATE TRIGGER initial_device_immutable BEFORE UPDATE ON initial_devices
+BEGIN SELECT RAISE(ABORT, 'initial device is immutable'); END;
+CREATE TRIGGER bootstrap_identity_immutable
+BEFORE UPDATE OF vault_id, principal_id, initial_device_id, initialized_at_ms ON bootstrap_state
+BEGIN SELECT RAISE(ABORT, 'bootstrap identity is immutable'); END;
+CREATE TRIGGER bootstrap_seal_once BEFORE UPDATE OF lifecycle, sealed_at_ms ON bootstrap_state
+WHEN NOT (OLD.lifecycle = 'initialized' AND NEW.lifecycle = 'sealed' AND OLD.sealed_at_ms IS NULL AND NEW.sealed_at_ms IS NOT NULL)
+BEGIN SELECT RAISE(ABORT, 'bootstrap transition is invalid'); END;
+`;
+
 export function migrationChecksum(version: number, name: string, sql: string): string {
   return createHash("sha256").update(`${version}\0${name}\0${sql}`, "utf8").digest("hex");
 }
@@ -192,4 +260,5 @@ function migration(version: number, name: string, sql: string): MetadataMigratio
 
 export const METADATA_MIGRATIONS: readonly MetadataMigration[] = Object.freeze([
   migration(1, "initial_metadata_schema", V1_SQL),
+  migration(2, "account_and_bootstrap", V2_SQL),
 ]);

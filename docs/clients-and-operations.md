@@ -147,6 +147,10 @@ Version 1 needs an explicit bootstrap flow:
 5. Mark the first device approved.
 6. Disable bootstrap endpoints permanently unless the server is reset through an offline administrative procedure.
 
+The v1 implementation stages steps 2–5: an explicitly bootstrap-authorized initialize request records the account verifier, opaque recovery wrap, singleton vault, and designated first-device identity; bootstrap-authorized encrypted objects are then streamed through the ordinary validated object path; completion atomically publishes the zero-parent genesis and seals bootstrap. Status is public but reveals only `uninitialized`, `initializedWithoutHead`, or `sealed`. A crash before completion leaves no head and permits repair/retry. Sealing is irreversible through the network API. First-device credential issuance, password login, approval, enrollment, and revocation are Step 6 work and are intentionally not provided by bootstrap.
+
+Migration 2 treats an empty migration-1 database as uninitialized and ready for bootstrap. A legacy migration-1 database that already contains `server_state` but lacks the migration-2 account/device/recovery/bootstrap identity set fails bootstrap status and initialization closed; it requires an offline operator migration or reset rather than guessing identities through the network API.
+
 Administrative capabilities include:
 
 - Review and approve device requests.

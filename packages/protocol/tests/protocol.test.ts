@@ -5,6 +5,7 @@ import {
   parseIdempotencyKey, parseProtocolErrorEnvelope, parseReferenceSetMac, parseRevisionEnvelope,
   parseObjectFrameHeader, parsePresenceRequest,
   canonicalizeAdvanceHeadIdentity, canonicalizeRevisionEnvelope,
+  decodeCanonicalBase64Url, parseBootstrapInitializeRequest, parseRecoveryWrap,
 } from "../src/index.ts";
 
 const vaultId = "123e4567-e89b-12d3-a456-426614174000";
@@ -106,6 +107,25 @@ describe("revision envelopes", () => {
 });
 
 describe("other protocol messages", () => {
+  test("strictly parses canonical recovery wraps and isolates bootstrap input", () => {
+    const wrap = { version: 1, algorithm: "A256GCM", nonce: Buffer.alloc(12, 1).toString("base64url"), ciphertext: Buffer.alloc(48, 2).toString("base64url") };
+    const input = { protocolVersion: 1, principalId: parent, vaultId, initialDeviceId: deviceId, password: "correct horse", recoveryWrap: wrap };
+    const parsed = parseBootstrapInitializeRequest(input);
+    wrap.nonce = "mutated";
+    expect(parsed.recoveryWrap.nonce).toBe(Buffer.alloc(12, 1).toString("base64url"));
+    for (const invalid of [
+      { ...parsed.recoveryWrap, nonce: Buffer.alloc(11).toString("base64url") },
+      { ...parsed.recoveryWrap, ciphertext: `${Buffer.alloc(48).toString("base64url") }=` },
+      { ...parsed.recoveryWrap, nonce: "+" + parsed.recoveryWrap.nonce.slice(1) },
+      { ...parsed.recoveryWrap, ciphertext: "/" + parsed.recoveryWrap.ciphertext.slice(1) },
+      { ...parsed.recoveryWrap, algorithm: "AES-GCM" }, { ...parsed.recoveryWrap, version: 2 },
+      { ...parsed.recoveryWrap, extra: true }, Object.create(parsed.recoveryWrap),
+    ]) expect(() => parseRecoveryWrap(invalid)).toThrow(ProtocolValidationError);
+    expect(() => decodeCanonicalBase64Url("AB", 1)).toThrow(ProtocolValidationError);
+    expect(() => decodeCanonicalBase64Url("AA=", 1)).toThrow(ProtocolValidationError);
+    expect(() => parseBootstrapInitializeRequest({ ...input, password: "x".repeat(1025) })).toThrow();
+    expect(() => parseBootstrapInitializeRequest(Object.create(input))).toThrow(ProtocolValidationError);
+  });
   test("parses a request and isolates its nested envelope", () => {
     const proposedRevision = envelope();
     const parsed = parseAdvanceHeadRequest({ protocolVersion: 1, vaultId, expectedRevisionId: parent, proposedRevision, idempotencyKey: "publish-1" });

@@ -6,9 +6,10 @@ import type {
   ReferenceSetMac,
   RevisionId,
   VaultId,
+  PrincipalId,
 } from "@nanosync/protocol";
 
-export const METADATA_SCHEMA_VERSION = 1 as const;
+export const METADATA_SCHEMA_VERSION = 2 as const;
 export const MAX_SQLITE_TIMESTAMP_MS = 9_007_199_254_740_991;
 
 export type IntegrityStatus = "unchecked" | "verified" | "corrupt" | "missing";
@@ -66,7 +67,7 @@ export interface RevisionObjectRow {
 }
 
 export interface IdempotencyRecordRow {
-  principal_id: string;
+  principal_id: PrincipalId;
   device_id: DeviceId;
   operation: string;
   idempotency_key: string;
@@ -80,7 +81,7 @@ export interface IdempotencyRecordRow {
 export interface UploadSessionRow {
   vault_id: VaultId;
   session_id: string;
-  principal_id: string;
+  principal_id: PrincipalId;
   device_id: DeviceId;
   object_id: ObjectId;
   object_type: ObjectType;
@@ -95,4 +96,15 @@ export interface MigrationLedgerRow {
   name: string;
   checksum: string;
   applied_at_ms: number;
+}
+
+export type BootstrapLifecycle = "initialized" | "sealed";
+export interface BootstrapStateRow {
+  singleton: 1;
+  vault_id: VaultId;
+  principal_id: PrincipalId;
+  initial_device_id: DeviceId;
+  lifecycle: BootstrapLifecycle;
+  initialized_at_ms: number;
+  sealed_at_ms: number | null;
 }

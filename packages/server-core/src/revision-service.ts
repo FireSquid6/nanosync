@@ -58,22 +58,7 @@ export class RevisionService {
     if (!this.repositoryCall(() => this.options.revisions.parentIdsExist(context.vaultId, parents))) return json(invalid("PARENT_NOT_FOUND"));
     const missing = new Set<ObjectId>(this.repositoryCall(() => this.options.revisions.missingCatalogReferences(context.vaultId, request.proposedRevision)));
     const candidates = request.proposedRevision.references.filter((reference) => !missing.has(reference.objectId));
-    for (let offset = 0; offset < candidates.length; offset += STORAGE_BATCH) {
-      const batch = candidates.slice(offset, offset + STORAGE_BATCH);
-      const keys = batch.map((reference) => objectKey(reference.objectType, reference.objectId));
-      const exists = await this.options.filesystem.existsBatch(keys);
-      if (exists.length !== batch.length) throw new ApiError(500, "INTERNAL", "Request failed");
-      await forEachBounded(batch, REVISION_STAT_CONCURRENCY, async (reference, index) => {
-        if (!exists[index]) { missing.add(reference.objectId); return; }
-        try {
-          const stat = await this.options.filesystem.stat(keys[index]!);
-          if (stat.size !== reference.ciphertextLength) missing.add(reference.objectId);
-        } catch (error) {
-          if (error instanceof ObjectStorageError && error.code === "NOT_FOUND") { missing.add(reference.objectId); return; }
-          throw error;
-        }
-      });
-    }
+    for (const id of await verifyReferenceStorage(this.options.filesystem, candidates)) missing.add(id);
     if (missing.size) return json({ status: "missingObjects", objectIds: [...missing].sort() } satisfies AdvanceHeadResult);
 
     const result = this.repositoryCall(() => this.options.revisions.advance({
@@ -99,6 +84,27 @@ export class RevisionService {
       throw error;
     }
   }
+}
+
+export async function verifyReferenceStorage(filesystem: Filesystem, candidates: readonly { objectId: ObjectId; objectType: "chunk" | "manifest" | "revision-private"; ciphertextLength: number }[]): Promise<ObjectId[]> {
+  const missing = new Set<ObjectId>();
+  for (let offset = 0; offset < candidates.length; offset += STORAGE_BATCH) {
+      const batch = candidates.slice(offset, offset + STORAGE_BATCH);
+      const keys = batch.map((reference) => objectKey(reference.objectType, reference.objectId));
+      const exists = await filesystem.existsBatch(keys);
+      if (exists.length !== batch.length) throw new ApiError(500, "INTERNAL", "Request failed");
+      await forEachBounded(batch, REVISION_STAT_CONCURRENCY, async (reference, index) => {
+        if (!exists[index]) { missing.add(reference.objectId); return; }
+        try {
+          const stat = await filesystem.stat(keys[index]!);
+          if (stat.size !== reference.ciphertextLength) missing.add(reference.objectId);
+        } catch (error) {
+          if (error instanceof ObjectStorageError && error.code === "NOT_FOUND") { missing.add(reference.objectId); return; }
+          throw error;
+        }
+      });
+    }
+  return [...missing].sort();
 }
 
 function invalid(reasonCode: string): AdvanceHeadResult { return { status: "invalidRevision", reasonCode }; }
