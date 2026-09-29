@@ -183,6 +183,58 @@ export class ClientLocal implements ChunkJournal {
     if (detail !== "{}") throw new Error("operation detail must not contain secrets");
     this.work("operations", id, [kind, entryId, "pending", detail]);
   }
+  /** Durable, secret-free apply intent. Pending/running work is a recovery barrier. */
+  prepareApply(id: string, revision: string, sequence: number, plan?: string) {
+    uuid(id); uuid(revision); integer(sequence);
+    if (plan !== undefined && (typeof plan !== "string" || Buffer.byteLength(plan) > 8_000_000 || !plan.length)) throw new Error("invalid apply plan");
+    if (!sequence || this.head("accepted").revisionId !== revision || this.head("accepted").sequence !== sequence)
+      throw new Error("apply requires accepted head");
+    this.work("operations", id, ["apply", null, "pending", JSON.stringify({ revision, sequence, ...(plan === undefined ? {} : { plan }) })]);
+  }
+  applyPlan(id: string): string | null {
+    uuid(id);
+    const r = row<{ detail: string }>(this.db, "SELECT detail FROM operations WHERE id=? AND kind='apply'", id);
+    if (!r) throw new Error("missing apply intent");
+    const detail = JSON.parse(r.detail) as { plan?: string };
+    return detail.plan ?? null;
+  }
+  pendingApplies(): { id: string; revision: string; sequence: number; state: string }[] {
+    return this.listWork("operations").filter(r => r.kind === "apply" && r.state !== "done").map(r => {
+      const detail = JSON.parse(r.detail as string) as { revision: string; sequence: number };
+      uuid(detail.revision); integer(detail.sequence);
+      return { id: r.id as string, revision: detail.revision, sequence: detail.sequence, state: r.state as string };
+    });
+  }
+  /** Commit metadata and applied head together after the filesystem is durable. */
+  finishApply(id: string, head: Head, entries: Entry[], identities: { entryId: string; device: string; inode: string }[]) {
+    uuid(id);
+    const accepted = this.head("accepted"), applied = this.head("applied");
+    if (!head.revisionId || accepted.sequence < head.sequence ||
+        accepted.sequence === head.sequence && accepted.revisionId !== head.revisionId || applied.sequence >= head.sequence)
+      throw new Error("invalid accepted/applied head for intent");
+    const intent = this.pendingApplies().find(p => p.id === id);
+    if (!intent || intent.revision !== head.revisionId || intent.sequence !== head.sequence || intent.state !== "running") throw new Error("missing running apply intent");
+    for (const e of entries) { uuid(e.id); this.path(e.path); if (e.fingerprint !== null) hex(e.fingerprint); }
+    for (const item of identities) { uuid(item.entryId); if (!/^\d+$/.test(item.device) || !/^\d+$/.test(item.inode)) throw new Error("invalid inode"); }
+    this.write(() => {
+      for (const old of all<{ id: string; path: string }>(this.db, "SELECT id,path FROM entries"))
+        if (!entries.some(e => e.id === old.id && e.path === old.path && e.kind === "file" && e.hydration === "downloaded"))
+          run(this.db, "DELETE FROM suppression WHERE path=?", old.path);
+      for (const e of entries) run(this.db, "UPDATE entries SET path=? WHERE id=?", `.apply-${e.id}`, e.id);
+      run(this.db, "DELETE FROM file_identity");
+      for (const old of all<{ id: string }>(this.db, "SELECT id FROM entries")) if (!entries.some(e => e.id === old.id)) {
+        if (row<{ id: string }>(this.db, "SELECT id FROM operations WHERE entry_id=? UNION SELECT id FROM conflicts WHERE entry_id=? LIMIT 1", old.id, old.id))
+          run(this.db, "UPDATE entries SET path=?,kind='tombstone',fingerprint=NULL,hydration='downloaded' WHERE id=?", `.retired-${old.id}`, old.id);
+        else run(this.db, "DELETE FROM entries WHERE id=?", old.id);
+      }
+      for (const e of entries) run(this.db, "INSERT INTO entries VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,kind=excluded.kind,fingerprint=excluded.fingerprint,hydration=excluded.hydration,revision=excluded.revision", e.id, e.path, e.kind, e.fingerprint, e.hydration, e.revision);
+      for (const item of identities) run(this.db, "INSERT INTO file_identity VALUES(?,?,?)", item.entryId, item.device, item.inode);
+      for (const e of entries) if (e.kind === "file" && e.hydration === "downloaded")
+        run(this.db, "INSERT INTO suppression VALUES(?,?,?) ON CONFLICT(path) DO UPDATE SET fingerprint=excluded.fingerprint,operation_id=excluded.operation_id", e.path, e.fingerprint, id);
+      run(this.db, "INSERT INTO heads VALUES('applied',?,?) ON CONFLICT(kind) DO UPDATE SET revision=excluded.revision,sequence=excluded.sequence", head.revisionId, head.sequence);
+      run(this.db, "UPDATE operations SET state='done' WHERE id=?", id);
+    });
+  }
   enqueueTransfer(id: string, objectId: string, direction: "upload" | "download") { parseObjectId(objectId); this.work("transfers", id, [objectId, direction, "pending", 0]); }
   addConflict(id: string, entryId: string, sourceRevision: string) { uuid(sourceRevision); this.work("conflicts", id, [entryId, sourceRevision, "open"]); }
   listWork(table: "operations" | "transfers" | "conflicts") { return all<Record<string, unknown>>(this.db, `SELECT * FROM ${table} ORDER BY id`); }

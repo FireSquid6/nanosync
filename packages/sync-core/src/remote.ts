@@ -6,7 +6,7 @@ import {
   type ObjectType, type RevisionEnvelope, type VisibleObjectReference,
 } from "@nanosync/protocol";
 import {
-  decryptObject, encryptChunk, encryptManifest, referenceSetMac, verifyReferenceSetMac,
+  decryptObject, decryptManifest, encryptChunk, encryptManifest, referenceSetMac, verifyReferenceSetMac,
   type EncryptedObject,
 } from "./index.ts";
 import { parseManifest, validateManifestReferences, type ManifestV1 } from "./manifest.ts";
@@ -238,11 +238,9 @@ export class HttpRemote {
     });
   }
 
-  async download(reference: VisibleObjectReference, master: Uint8Array, vaultIdInput: string): Promise<Uint8Array> {
+  private async downloadFrame(reference: VisibleObjectReference, vaultIdInput: string): Promise<Uint8Array> {
     const vaultId = parseVaultId(vaultIdInput), stableReference = { ...reference };
     validateReference(stableReference);
-    if (!(master instanceof Uint8Array) || master.byteLength !== 32) throw new Error("invalid master key");
-    const stableMaster = master.slice();
     const caps = await this.negotiated();
     if (!caps.objectTypes.includes(stableReference.objectType) || stableReference.ciphertextLength > caps.limits.maximumObjectCiphertextBytes ||
         stableReference.ciphertextLength > MAX_FRAME) throw new Error("object exceeds bounded decrypt limit");
@@ -267,8 +265,24 @@ export class HttpRemote {
       finally { reader.releaseLock(); }
       if (offset !== frame.length) throw new RetryableDownloadError("truncated download");
       validateFrame(frame, stableReference, vaultId);
-      return decryptObject(frame, stableMaster, vaultId, stableReference);
+      return frame;
     });
+  }
+
+  async download(reference: VisibleObjectReference, master: Uint8Array, vaultIdInput: string): Promise<Uint8Array> {
+    if (reference.objectType !== "chunk") throw new Error("use authenticated manifest fetch for manifest objects");
+    if (!(master instanceof Uint8Array) || master.byteLength !== 32) throw new Error("invalid master key");
+    const stableMaster = master.slice(), stableReference = { ...reference };
+    return decryptObject(await this.downloadFrame(stableReference, vaultIdInput), stableMaster, vaultIdInput, stableReference);
+  }
+
+  /** MAC-authenticate the envelope before downloading its manifest frame; bind the plaintext to the envelope. */
+  async manifest(id: string, master: Uint8Array): Promise<{ manifest: ManifestV1; revision: RevisionEnvelope; sequence: number | null }> {
+    const { revision, sequence } = await this.revision(id, master);
+    const reference = revision.references.find(ref => ref.objectId === revision.encryptedManifestObjectId);
+    if (!reference || reference.objectType !== "manifest") throw new Error("missing manifest reference");
+    const frame = await this.downloadFrame(reference, revision.vaultId);
+    return { manifest: await decryptManifest(frame, revision, master), revision, sequence };
   }
 
   /** Each yielded chunk is fully authenticated; retries never restart an exposed chunk. */

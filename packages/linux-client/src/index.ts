@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { CHUNK_SIZE, parseDeviceId, parseRevisionId, parseVaultId } from "@nanosync/protocol";
 import { encryptChunk, MAX_FILE_BYTES, parseManifest, type EncryptedObject, type ManifestEntry, type ManifestV1 } from "@nanosync/sync-core";
 import { ClientLocal, type Entry } from "@nanosync/client-local";
+export { applyNewFiles, applyNewFiles as applyManifest } from "./apply.ts";
 
 const FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
 type Identity = { entryId: string; device: string; inode: string };

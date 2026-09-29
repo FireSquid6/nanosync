@@ -17,6 +17,35 @@ const dirs: string[] = [];
 function directory() { const dir = mkdtempSync(join(tmpdir(), "nanosync-client-")); chmodSync(dir, 0o700); dirs.push(dir); return dir; }
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
+test("apply intent survives restart and commits applied head, entries and suppression atomically", () => {
+  const dir = directory(); let db = new ClientLocal(dir, vault, device);
+  db.recordHead("accepted", { revisionId: rev, sequence: 1 });
+  expect(() => db.prepareApply(other, other, 1)).toThrow();
+  db.prepareApply(other, rev, 1); db.transition("operations", other, "running"); db.close();
+  db = new ClientLocal(dir, vault, device);
+  expect(db.pendingApplies()).toEqual([{ id: other, revision: rev, sequence: 1, state: "running" }]);
+  const entry = { id: other, path: "new.txt", kind: "file" as const, fingerprint: "a".repeat(64), hydration: "downloaded" as const, revision: rev };
+  db.finishApply(other, { revisionId: rev, sequence: 1 }, [entry], [{ entryId: other, device: "1", inode: "2" }]);
+  expect(db.pendingApplies()).toEqual([]);
+  expect(db.head("applied")).toEqual({ revisionId: rev, sequence: 1 });
+  expect(db.matchesSuppression("new.txt", entry.fingerprint)).toBe(true);
+  expect(db.identities()[0]?.entryId).toBe(other);
+  db.close();
+});
+
+test("older durable apply intent can finish after accepted head advances without rewinding it", () => {
+  const db = new ClientLocal(directory(), vault, device);
+  db.recordHead("accepted", { revisionId: rev, sequence: 1 });
+  db.prepareApply(other, rev, 1, JSON.stringify({ staged: true }));
+  db.transition("operations", other, "running");
+  db.recordHead("accepted", { revisionId: other, sequence: 2 });
+  db.finishApply(other, { revisionId: rev, sequence: 1 }, [], []);
+  expect(db.head("accepted").revisionId).toBe(other);
+  expect(db.head("applied").revisionId).toBe(rev);
+  expect(db.applyPlan(other)).toBe('{"staged":true}');
+  db.close();
+});
+
 test("reopens durable identity, heads, entries, work and watcher suppression without rolling back", () => {
   const dir = directory(); let db = new ClientLocal(dir, vault, device);
   expect(db.pragmas()).toEqual({ synchronous: 2, version: 3 });
