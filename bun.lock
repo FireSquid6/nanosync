@@ -32,6 +32,15 @@
         "typescript": "^5",
       },
     },
+    "packages/linux-daemon": {
+      "name": "@nanosync/linux-daemon",
+      "dependencies": {
+        "@nanosync/client-local": "workspace:*",
+        "@nanosync/linux-client": "workspace:*",
+        "@nanosync/protocol": "workspace:*",
+        "@nanosync/sync-core": "workspace:*",
+      },
+    },
     "packages/protocol": {
       "name": "@nanosync/protocol",
       "peerDependencies": {
@@ -85,6 +94,8 @@
     "@nanosync/client-local": ["@nanosync/client-local@workspace:packages/client-local"],
 
     "@nanosync/linux-client": ["@nanosync/linux-client@workspace:packages/linux-client"],
+
+    "@nanosync/linux-daemon": ["@nanosync/linux-daemon@workspace:packages/linux-daemon"],
 
     "@nanosync/protocol": ["@nanosync/protocol@workspace:packages/protocol"],
 

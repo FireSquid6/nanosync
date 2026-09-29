@@ -296,6 +296,15 @@ export class ClientLocal implements ChunkJournal {
     });
   }
   clearProposal() { this.write(() => { const p = this.proposal(); if (p && p.state !== "accepted") throw new Error("unresolved proposal cannot be discarded"); run(this.db, "DELETE FROM proposals"); }); }
+  /** Only a definitive stale-head response permits replacing a prepared request. */
+  discardStaleProposal(revisionId: string) {
+    uuid(revisionId);
+    this.write(() => {
+      const p = this.proposal();
+      if (!p || p.state !== "prepared" || p.request.proposedRevision.revisionId !== revisionId) throw new Error("not a stale prepared proposal");
+      run(this.db, "DELETE FROM proposals WHERE id=1");
+    });
+  }
 
   private chunkPath(id: string) { return join(this.cache, id); }
   private validateRef(vault: string, ref: VisibleObjectReference): number {

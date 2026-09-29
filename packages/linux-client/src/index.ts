@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants, closeSync, fstatSync, lstatSync, openSync, readSync, readdirSync, realpathSync, watch, type FSWatcher, type Stats } from "node:fs";
 import { resolve } from "node:path";
 import { CHUNK_SIZE, parseDeviceId, parseRevisionId, parseVaultId } from "@nanosync/protocol";
-import { encryptChunk, MAX_FILE_BYTES, parseManifest, type EncryptedObject, type ManifestEntry, type ManifestV1 } from "@nanosync/sync-core";
+import { encryptChunk, manifestPaths, MAX_FILE_BYTES, parseManifest, type EncryptedObject, type ManifestEntry, type ManifestV1 } from "@nanosync/sync-core";
 import { ClientLocal, type Entry } from "@nanosync/client-local";
 export { applyNewFiles, applyNewFiles as applyManifest } from "./apply.ts";
 
@@ -120,7 +120,7 @@ export class LinuxScanner {
         this.options.maxConcurrent < 1 || this.options.maxConcurrent > 8) throw new Error("invalid scanner options");
   }
   snapshot() { checkedRoot(this.root); return inventory(this.root); }
-  async plan(priorInput: ManifestV1, revisionId: string, deviceId: string, master: Uint8Array): Promise<ScanPlan> {
+  async plan(priorInput: ManifestV1, revisionId: string, deviceId: string, master: Uint8Array, identityHints?: ManifestV1): Promise<ScanPlan> {
     const prior = parseManifest(priorInput), revision = parseRevisionId(revisionId), device = parseDeviceId(deviceId);
     parseVaultId(prior.vaultId);
     if (revision === prior.revisionId || !(master instanceof Uint8Array) || master.length !== 32) throw new Error("invalid scan context");
@@ -132,6 +132,7 @@ export class LinuxScanner {
       return [index(parent), e.name].filter(Boolean).join("/");
     }
     for (const e of prior.entries) priorPath.set(index(e), e);
+    const hints = identityHints ? manifestPaths(parseManifest(identityHints)) : new Map<string, ManifestEntry>();
     const localEntries = this.local.entries(), localPath = new Map(localEntries.map(e => [e.path, e]));
     const idByIdentity = new Map<string, string[]>();
     for (const item of this.local.identities()) {
@@ -143,7 +144,7 @@ export class LinuxScanner {
     for (const file of files) {
       if (localPath.get(file.path)?.hydration === "evicted")
         throw new Error("evicted name collision; reconcile before scanning");
-      const atPath = priorPath.get(file.path) ?? (localPath.get(file.path) && old.get(localPath.get(file.path)!.id));
+      const atPath = priorPath.get(file.path) ?? (localPath.get(file.path) && old.get(localPath.get(file.path)!.id)) ?? hints.get(file.path);
       const candidates = idByIdentity.get(file.identity) ?? [];
       // Identity wins over path for atomic replacement / rename only if one-to-one.
       const byInode = candidates.length === 1 && occurrence.get(file.identity) === 1 ? old.get(candidates[0]!) : undefined;
@@ -159,7 +160,7 @@ export class LinuxScanner {
     if (used.size !== files.length) throw new Error("ambiguous rename; manual resolution required");
     const entries: ManifestEntry[] = [], updates: Entry[] = [], identities: Identity[] = [], suppressed: string[] = [];
     const planned = new Map<string, Found>();
-    const operationId = randomUUID(); this.local.enqueueOperation(operationId, "scan");
+    const operationId = randomUUID();
     const fileResults = new Map<string, { size: number; sha256: string; chunks: { objectId: string; length: number }[] }>();
     let cursor = 0;
     await Promise.all(Array.from({ length: Math.min(this.options.maxConcurrent, files.length) }, async () => {
@@ -247,7 +248,14 @@ export class LinuxScanner {
       updates.push({ id: entry.id, path: nextPath(entry), kind: "tombstone", fingerprint: null, hydration: "downloaded", revision });
     const manifest = parseManifest({ version: 1, vaultId: prior.vaultId, revisionId: revision, parents: [prior.revisionId], creatingDeviceId: device, entries });
     const scanner = this;
-    return { manifest, suppressed, commit: () => { scanner.local.recordScan(updates, identities); for (const path of suppressed) scanner.local.consumeSuppression(path, updates.find(e => e.path === path)!.fingerprint!); scanner.local.transition("operations", operationId, "running"); scanner.local.transition("operations", operationId, "done"); },
+    return { manifest, suppressed, commit: () => {
+      const current = scanner.snapshot();
+      if (current.length !== files.length || current.some((file, i) => file.path !== files[i]!.path || !same(file.stat, files[i]!.stat)))
+        throw new Error("local tree changed before scan commit");
+      scanner.local.enqueueOperation(operationId, "scan");
+      scanner.local.recordScan(updates, identities);
+      for (const path of suppressed) scanner.local.consumeSuppression(path, updates.find(e => e.path === path)!.fingerprint!);
+      scanner.local.transition("operations", operationId, "running"); scanner.local.transition("operations", operationId, "done"); },
       async *chunks(knownObjectIds: ReadonlySet<string> = new Set()) {
         const yielded = new Set<string>();
         for (const entry of manifest.entries) {
@@ -272,6 +280,7 @@ export class LinuxScanner {
 /** Watch notifications are hints only: overflow, restart and every settled batch use a full scan. */
 export class LinuxWatcher {
   private watchers: FSWatcher[] = [];
+  private watched: string[] = [];
   private pending = 0;
   private last = 0;
   private baseline?: string;
@@ -285,13 +294,18 @@ export class LinuxWatcher {
   }
   start() {
     this.close();
-    for (const dir of this.scanner.snapshot().filter(f => f.kind === "directory")) {
-      const watcher = watch(resolve(this.scanner.root, dir.path), () => this.notify());
+    this.watched = this.scanner.snapshot().filter(f => f.kind === "directory").map(f => f.path);
+    for (const path of this.watched) {
+      const watcher = watch(resolve(this.scanner.root, path), () => this.notify());
       watcher.on("error", () => this.notify()); this.watchers.push(watcher);
     }
     this.notify();
   }
-  close() { for (const watcher of this.watchers) watcher.close(); this.watchers = []; }
+  refresh() {
+    const paths = this.scanner.snapshot().filter(f => f.kind === "directory").map(f => f.path);
+    if (paths.length !== this.watched.length || paths.some((path, i) => path !== this.watched[i])) this.start();
+  }
+  close() { for (const watcher of this.watchers) watcher.close(); this.watchers = []; this.watched = []; }
   /** Returns false until debounce AND an identical full snapshot spans stabilityMs. */
   ready(now = Date.now()): boolean {
     if (!this.pending || now - this.last < (this.options.debounceMs ?? 250)) return false;

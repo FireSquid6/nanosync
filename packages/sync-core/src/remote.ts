@@ -343,7 +343,8 @@ export class HttpRemote {
   /** Reuse authenticated prior references without bytes; consume only new frames. */
   async publish(manifestInput: ManifestV1, knownReferences: readonly VisibleObjectReference[],
     newChunks: AsyncIterable<EncryptedObject> | Iterable<EncryptedObject>, master: Uint8Array,
-    expectedRevisionId: string, createdAt: string): Promise<AdvanceHeadResult> {
+    expectedRevisionId: string, createdAt: string,
+    beforeAdvance?: (request: AdvanceHeadRequest, encryptedManifestFrame: Uint8Array) => void | Promise<void>): Promise<AdvanceHeadResult> {
     const manifest = parseManifest(manifestInput), expected = parseRevisionId(expectedRevisionId);
     if (!manifest.parents.includes(expected)) throw new Error("expected head must be a manifest parent");
     const required = new Map<string, number>();
@@ -417,6 +418,7 @@ export class HttpRemote {
     const key = Array.from(keyBytes, byte => byte.toString(16).padStart(2, "0")).join("").slice(0, caps.limits.maximumIdempotencyKeyLength);
     const request = parseAdvanceHeadRequest({ protocolVersion: 1, vaultId: manifest.vaultId,
       expectedRevisionId: expected, proposedRevision, idempotencyKey: key });
+    await beforeAdvance?.(request, encrypted.frame.slice());
     return this.advance(request);
   }
 }
