@@ -31,9 +31,20 @@
 | Transport security | External reverse proxy, VPN, or trusted network; no built-in TLS |
 | CLI role | Continuous daemon plus status, history, restore, and management commands |
 
-## Recommended architectural decisions
+## Frozen version 1 implementation decisions
 
-These recommendations follow from the confirmed requirements but should be explicitly accepted during implementation planning.
+These choices are part of persistent format `1` and protocol `1`. Details and limits are normative in [formats.md](formats.md), [security.md](security.md), and [threat-model.md](threat-model.md).
+
+| Area | Version 1 decision |
+|---|---|
+| Runtime | Bun/TypeScript for server and Linux CLI; shared core uses portable Web Crypto and WHATWG interfaces. Android integration is later platform work. |
+| Chunking | Fixed 4 MiB, recorded per file/format; only the final chunk may be smaller; all 50 GB paths stream. |
+| Crypto | SHA-256 ciphertext checksums, HMAC-SHA-256 vault chunk IDs, HKDF-SHA-256 domain derivation, and AES-256-GCM as specified in `security.md`; independent review is required. |
+| Authentication | Argon2id password verifier and independent random 256-bit per-device bearer credentials; no v1 credential expiry, rotation on re-enrollment. |
+| Metadata DB | SQLite through `bun:sqlite`, WAL, foreign keys, 5-second busy timeout, `synchronous=FULL`, and explicit `BEGIN IMMEDIATE` writes. |
+| Filesystems | Regular files/directories plus owner-executable bit only. Reject links, special files, and unsafe names visibly; no xattr, ACL, or sparse fidelity. |
+| Retention/GC | UTC buckets select newest accepted revision; 24-hour grace plus recheck; current/conflicts/transfers/needed merge bases remain protected. |
+| Network/admin | Loopback by default, acknowledged non-loopback exposure and external TLS; CLI-only administration uses the same server API. |
 
 ### Immutable encrypted objects
 
@@ -45,7 +56,7 @@ Require every revision proposal to name its expected base head. A stale proposal
 
 ### Encrypted manifests
 
-Encrypt names, paths, supported metadata, plaintext digests, and chunk lists. Allow the server to observe object sizes, timing, revision relationships required for coordination, and vault-scoped equality.
+Encrypt names, paths, supported metadata, plaintext digests, and chunk lists. The canonical visible reference set allows the server to observe exact per-revision membership, object types/sizes, timing, graph relationships, reuse, and vault-scoped equality.
 
 ### Transactional embedded metadata database
 
@@ -55,77 +66,19 @@ Use a transactional embedded database for account, device, revision, upload, ret
 
 Keep protocol, cryptography, merge logic, and local metadata semantics in a reusable core with Linux and Android adapters.
 
-## Unresolved implementation decisions
+## Remaining implementation decisions
 
-### Chunk size
+### Authentication operations
 
-Choose a fixed size after benchmarking:
+Set concrete password-login and enrollment rate limits, backoff/lockout behavior, administrative account-recovery procedure, session lifetime, and audit retention. These operational values are not cryptographic format parameters and were not frozen by this slice.
 
-- Small-note workloads.
-- 50 GB sequential files.
-- Encryption and hashing overhead.
-- Request overhead and server memory.
-- Interrupted-transfer behavior.
+### Trusted proxies and transport deployment
 
-The format must record its chunking parameters so they can evolve without reinterpreting old objects.
+Define trusted-proxy address matching, accepted forwarding headers, reverse-proxy body/time limits, external TLS deployment examples, and detection/warnings for unsafe exposure.
 
-### Cryptographic primitives
+### Database lifecycle and backups
 
-Select and review:
-
-- Authenticated-encryption construction.
-- Key-derivation function and context labels.
-- Recovery-key encoding and derivation.
-- Vault-scoped deterministic chunk identifier.
-- Safe deterministic per-chunk encryption for deduplication.
-- Manifest authenticity and revision-parent binding.
-
-This decision requires a written threat-model review rather than only a library choice.
-
-### Password and device credentials
-
-Decide:
-
-- Password hashing primitive and versioned parameters.
-- Whether device authentication uses opaque bearer credentials or public-key signatures.
-- Credential rotation and expiry behavior.
-- Login rate limits and administrative recovery procedure.
-
-### Server metadata database
-
-Select the database and define:
-
-- Transaction boundaries.
-- Migration behavior.
-- Backup snapshot procedure.
-- Concurrency and durability settings.
-- Corruption recovery behavior.
-
-### Wire protocol
-
-Specify:
-
-- Endpoint shapes and error model.
-- Capability negotiation.
-- Idempotency semantics.
-- Pagination and batch-presence limits.
-- Streaming and range behavior.
-- Request-size and resource limits.
-- Authentication headers.
-
-### Filesystem semantics
-
-Define version 1 behavior for:
-
-- Symbolic and hard links.
-- Executable bits and modes.
-- Extended attributes and ACLs.
-- Special files.
-- Case-only renames.
-- Invalid or oversized names.
-- Sparse files.
-
-A safe initial choice is to support regular files, directories, and a minimal executable hint while rejecting unsupported entries visibly.
+Specify transactional migration/resume rules, supported SQLite online snapshot procedure, the object-store consistency point paired with a snapshot, restore sequencing, integrity checks, and corruption recovery/operator escalation. The WAL and transaction durability settings do not by themselves settle backup consistency.
 
 ### Save debouncing
 
@@ -137,38 +90,9 @@ Determine:
 - Treatment of constantly changing files.
 - Revision grouping across several paths.
 
-### Retention boundaries
-
-Specify:
-
-- Timezone used for daily and monthly buckets.
-- Which revision represents a bucket.
-- Whether named checkpoints can override pruning.
-- Grace period before deleting unreachable objects.
-- Protection of merge bases and interrupted uploads.
-
 ### Conflict naming
 
 Choose a deterministic, Linux-safe convention that includes enough information to identify the source device and time without causing repeated collisions.
-
-### Administration surface
-
-Decide whether account setup, device approval, revocation, and maintenance use:
-
-- A small web console.
-- CLI-only administration.
-- Both, backed by the same administrative API.
-
-### Technology stack
-
-Choose implementation languages and UI toolkits only after establishing:
-
-- Shared-core portability to Linux and Android.
-- Cryptographic library quality.
-- Reliable streaming of large files.
-- Filesystem watcher support.
-- Embedded database support.
-- Packaging and cross-compilation requirements.
 
 ## Deferred design areas
 

@@ -28,6 +28,8 @@ Nanosync is a self-hosted, client-encrypted file synchronization system for Linu
 - [System architecture](architecture.md)
 - [Data model and sync protocol](sync-protocol.md)
 - [Security and trust model](security.md)
+- [Version 1 formats and protocol contract](formats.md)
+- [Version 1 threat model](threat-model.md)
 - [Clients and operations](clients-and-operations.md)
 - [Decisions and open questions](decisions.md)
 

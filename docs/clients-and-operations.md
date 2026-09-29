@@ -53,7 +53,7 @@ Version 1 is optimized for Linux. The implementation still needs explicit rules 
 - Case-only renames.
 - Invalid or oversized names.
 
-Recommended initial boundary: synchronize regular files, directories, and a minimal executable hint; reject or visibly skip other entry types rather than following links or silently flattening semantics.
+Version 1 synchronizes only regular files, directories, and the owner-executable bit. It rejects symlinks, hard-linked files, sockets, devices, FIFOs, and unsafe/invalid names visibly rather than following or skipping them. Extended attributes, ACLs, sparse-file fidelity, and other mode bits are not preserved.
 
 ## Android client
 
@@ -155,6 +155,8 @@ Administrative capabilities include:
 - Run retention and garbage-collection dry runs.
 - Trigger integrity scans.
 - Export diagnostics that exclude secrets and plaintext names.
+
+Administration is CLI-only in version 1, backed by the same authenticated server API used for administration rather than a privileged side channel.
 
 ## Backup and restore
 

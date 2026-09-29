@@ -4,7 +4,7 @@
 
 ### Vault-scoped chunk
 
-A chunk is an immutable encrypted segment of a file.
+A chunk is an immutable encrypted segment of a file. Version 1 uses 4 MiB fixed chunks, with only the final chunk smaller; the parameter is recorded per file/format and processing is streaming.
 
 ```text
 Chunk {
@@ -53,6 +53,7 @@ Paths are derived from parent relationships and names. Stable IDs allow renames 
 
 ```text
 Revision {
+    protocol_version
     revision_id
     parent_revision_ids
     encrypted_manifest_object_id
@@ -60,10 +61,12 @@ Revision {
     client_timestamp
     server_sequence?
     format_version
+    visible_object_references
+    reference_set_mac
 }
 ```
 
-The revision envelope exposes only the coordination metadata required by the server. The tree manifest remains encrypted.
+The sorted, unique visible reference array gives object ID, type, SHA-256 ciphertext checksum, ciphertext length, and object format for every object needed by the revision. The server verifies this list before publication and uses it for GC. A domain-separated revision MAC binds the exact canonical envelope/reference set for client verification without requiring an encrypted object to contain its own checksum. This exposes revision graph, object membership, type, size, equality, and reuse to the server while names and contents remain encrypted; see [formats.md](formats.md).
 
 ## Normal change flow
 
@@ -128,16 +131,18 @@ The server may retain unreferenced chunks from abandoned transfers until a garba
 The server exposes an atomic operation equivalent to:
 
 ```text
-advance_head(expected_revision, proposed_revision, idempotency_key)
+advanceHead(expectedRevisionId, proposedRevision, idempotencyKey)
 ```
 
 Possible results:
 
 - `accepted`: the proposed revision is now head.
-- `already_accepted`: the same idempotent request previously succeeded.
-- `stale_head`: another revision is current; the client must merge.
-- `missing_objects`: one or more referenced immutable objects are unavailable.
-- `invalid_revision`: structure, authorization, size, or format validation failed.
+- `alreadyAccepted`: the same idempotent request previously succeeded.
+- `staleHead`: another revision is current; the client must merge.
+- `missingObjects`: one or more referenced immutable objects are unavailable.
+- `invalidRevision`: structure, authorization, size, or format validation failed.
+
+These camelCase names are the exact JSON wire spellings. General failures use the versioned error envelope and stable code vocabulary in [formats.md](formats.md).
 
 ## Concurrent edit reconciliation
 
@@ -220,7 +225,7 @@ Default protected revisions are selected as follows:
 - One representative revision per month through one year.
 - The current head regardless of age.
 
-The exact boundary timezone and the representative chosen within a day or month remain implementation decisions. Retention should be deterministic and visible in a dry-run report.
+Day and month buckets use UTC and retain the newest server-accepted revision in each bucket. Retention is deterministic and visible in a dry-run report. Current state, unresolved conflicts, active transfers, and merge bases still needed by clients are always protected.
 
 ## Garbage collection
 
@@ -236,7 +241,7 @@ flowchart TD
     DELETE --> REPORT[Record GC report]
 ```
 
-Active upload sessions, recent unreferenced objects, and revisions used as merge bases must be protected. If reachability is uncertain, retain the object.
+Active upload sessions, recent unreferenced objects, and revisions used as merge bases must be protected. Deletion waits a 24-hour grace period and then rechecks reachability and protections. If reachability is uncertain, retain the object.
 
 ## Protocol evolution
 

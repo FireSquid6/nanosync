@@ -4,7 +4,7 @@
   "workspaces": ["packages/*"],
   "scripts": {
     "test": "bun test",
-    "typecheck": "bun run --cwd packages/server-object-storage typecheck"
+    "typecheck": "bun run --filter '*' typecheck"
   },
   "devDependencies": {
     "@types/bun": "1.3.14"

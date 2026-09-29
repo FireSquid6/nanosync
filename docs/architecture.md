@@ -56,6 +56,8 @@ flowchart LR
 
 ## Architectural principles
 
+The version 1 server and Linux CLI use Bun and TypeScript. Portable shared code is restricted to Web Crypto and WHATWG interfaces rather than Bun APIs; Android integration is later platform-adapter work.
+
 ### Immutable data, mutable pointers
 
 Chunks, file objects, manifests, and revisions are immutable. The principal mutable synchronization value is the vault head. This limits partial-write failure modes and makes retries idempotent.
@@ -110,6 +112,8 @@ The database contains operational metadata, not plaintext vault contents:
 - Object existence and integrity metadata.
 - Upload sessions and idempotency records.
 - Retention and garbage-collection state.
+
+Version 1 uses SQLite through `bun:sqlite` with WAL mode, foreign keys enabled, a 5-second busy timeout, and `synchronous=FULL`. Every write group uses an explicit `BEGIN IMMEDIATE` transaction. A crash may lose unfinished work but must not expose a head without its revision/idempotency metadata. The supported online snapshot and object-store consistency procedure remains to be completed before operational release.
 
 ### Object storage
 
