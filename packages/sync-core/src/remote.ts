@@ -248,7 +248,11 @@ export class HttpRemote {
       const response = await this.request(`/v1/objects/${stableReference.objectType}/${stableReference.objectId}`);
       if (response.status !== 200) { await this.body(response); throw new Error("unexpected object status"); }
       const headers = response.headers;
-      if (headers.get("content-type") !== "application/octet-stream" || headers.get("content-length") !== String(stableReference.ciphertextLength) ||
+      // Bun serves streaming responses with transfer-encoding: chunked even when
+      // the handler specifies Content-Length. The authenticated reference still
+      // bounds and checks the exact number of bytes read below.
+      if (headers.get("content-type") !== "application/octet-stream" ||
+          (headers.has("content-length") && headers.get("content-length") !== String(stableReference.ciphertextLength)) ||
           headers.get("x-nanosync-protocol-version") !== "1" || headers.get("x-nanosync-object-format-version") !== "1" ||
           headers.get("x-nanosync-object-type") !== stableReference.objectType || headers.get("x-nanosync-ciphertext-sha256") !== stableReference.ciphertextChecksum || !response.body) {
         void response.body?.cancel().catch(() => {});

@@ -5,6 +5,7 @@ import { CHUNK_SIZE, parseDeviceId, parseRevisionId, parseVaultId } from "@nanos
 import { encryptChunk, manifestPaths, MAX_FILE_BYTES, parseManifest, type EncryptedObject, type ManifestEntry, type ManifestV1 } from "@nanosync/sync-core";
 import { ClientLocal, type Entry } from "@nanosync/client-local";
 export { applyNewFiles, applyNewFiles as applyManifest } from "./apply.ts";
+export { hydrateFile } from "./hydration.ts";
 
 const FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
 type Identity = { entryId: string; device: string; inode: string };

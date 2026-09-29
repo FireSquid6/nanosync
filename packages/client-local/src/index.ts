@@ -23,7 +23,9 @@ CREATE TABLE chunks(object_id TEXT PRIMARY KEY, checksum TEXT NOT NULL, cipherte
 `;
 const schema2 = `CREATE TABLE suppression(path TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, operation_id TEXT NOT NULL, FOREIGN KEY(operation_id) REFERENCES operations(id)) STRICT;`;
 const schema3 = `CREATE TABLE file_identity(entry_id TEXT PRIMARY KEY, device TEXT NOT NULL, inode TEXT NOT NULL, FOREIGN KEY(entry_id) REFERENCES entries(id)) STRICT;`;
-const migrations = [schema1, schema2, schema3];
+const schema4 = `CREATE TABLE hydration(id TEXT PRIMARY KEY, entry_id TEXT NOT NULL REFERENCES entries(id), revision TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence>0), direction TEXT NOT NULL CHECK(direction IN ('evict','download')), root_device TEXT NOT NULL, root_inode TEXT NOT NULL, file_device TEXT, file_inode TEXT, CHECK((direction='evict' AND file_device IS NOT NULL AND file_inode IS NOT NULL) OR (direction='download' AND file_device IS NULL AND file_inode IS NULL))) STRICT;`;
+const schema5 = `CREATE TABLE restores(singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision TEXT NOT NULL, base_revision TEXT NOT NULL) STRICT;`;
+const migrations = [schema1, schema2, schema3, schema4, schema5];
 const schemaDigest = (db: Database) => hash(db.query<{ sql: string }, []>("SELECT sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY type,name").all().map(r => r.sql).join("\n"));
 let expectedSchema: string | undefined;
 function expectedDigest(): string {
@@ -54,6 +56,7 @@ function run(db: Database, sql: string, ...params: (string | number | Uint8Array
 export interface Head { revisionId: string | null; sequence: number }
 export interface Entry { id: string; path: string; kind: "file" | "directory" | "tombstone"; fingerprint: string | null; hydration: "downloaded" | "evicted"; revision: string | null }
 export interface Work { id: string; state: "pending" | "running" | "done" | "blocked" }
+export interface HydrationIntent { id: string; entryId: string; revision: string; sequence: number; direction: "evict" | "download"; rootDevice: string; rootInode: string; fileDevice: string | null; fileInode: string | null }
 export class ClientLocal implements ChunkJournal {
   private readonly db: Database;
   private readonly root: string;
@@ -150,6 +153,59 @@ export class ClientLocal implements ChunkJournal {
   entries(): Entry[] { return all<Entry>(this.db, "SELECT * FROM entries ORDER BY path"); }
   identities(): { entryId: string; device: string; inode: string }[] {
     return all<{ entryId: string; device: string; inode: string }>(this.db, "SELECT entry_id entryId,device,inode FROM file_identity");
+  }
+  pendingHydration(): HydrationIntent | null {
+    const record = row<{ id: string; entry_id: string; revision: string; sequence: number; direction: "evict" | "download"; root_device: string; root_inode: string; file_device: string | null; file_inode: string | null }>(this.db, "SELECT * FROM hydration LIMIT 1");
+    if (!record) return null;
+    uuid(record.id); uuid(record.entry_id); uuid(record.revision); integer(record.sequence);
+    if (!/^[0-9]+$/.test(record.root_device) || !/^[0-9]+$/.test(record.root_inode) ||
+        record.file_device !== null && !/^[0-9]+$/.test(record.file_device) || record.file_inode !== null && !/^[0-9]+$/.test(record.file_inode)) throw new Error("corrupt hydration intent");
+    return { id: record.id, entryId: record.entry_id, revision: record.revision, sequence: record.sequence, direction: record.direction,
+      rootDevice: record.root_device, rootInode: record.root_inode, fileDevice: record.file_device, fileInode: record.file_inode };
+  }
+  beginHydration(intent: HydrationIntent) {
+    uuid(intent.id); uuid(intent.entryId); uuid(intent.revision); integer(intent.sequence);
+    if (!intent.sequence || !/^[0-9]+$/.test(intent.rootDevice) || !/^[0-9]+$/.test(intent.rootInode) ||
+        intent.direction === "evict" && (!intent.fileDevice || !intent.fileInode || !/^[0-9]+$/.test(intent.fileDevice) || !/^[0-9]+$/.test(intent.fileInode)) ||
+        intent.direction === "download" && (intent.fileDevice !== null || intent.fileInode !== null)) throw new Error("invalid hydration intent");
+    this.write(() => {
+      if (this.pendingHydration() || this.pendingApplies().length || this.proposal()) throw new Error("other local work must finish before hydration");
+      if (this.head("applied").revisionId !== intent.revision || this.head("applied").sequence !== intent.sequence ||
+          this.head("accepted").revisionId !== intent.revision || this.head("accepted").sequence !== intent.sequence) throw new Error("hydration head changed");
+      const entry = this.entry(intent.entryId);
+      if (!entry || entry.kind !== "file" || entry.revision !== intent.revision || entry.hydration !== (intent.direction === "evict" ? "downloaded" : "evicted")) throw new Error("hydration entry changed");
+      if (intent.direction === "evict") {
+        const identity = row<{ device: string; inode: string }>(this.db, "SELECT device,inode FROM file_identity WHERE entry_id=?", intent.entryId);
+        if (!identity || identity.device !== intent.fileDevice || identity.inode !== intent.fileInode) throw new Error("hydration file identity changed");
+      }
+      run(this.db, "INSERT INTO hydration VALUES(?,?,?,?,?,?,?,?,?)", intent.id, intent.entryId, intent.revision, intent.sequence, intent.direction,
+        intent.rootDevice, intent.rootInode, intent.fileDevice, intent.fileInode);
+      run(this.db, "INSERT INTO operations VALUES(?,?,?,'running','{}')", intent.id, intent.direction, intent.entryId);
+    });
+  }
+  finishHydration(intent: HydrationIntent, device?: string, inode?: string) {
+    this.write(() => {
+      const current = this.pendingHydration();
+      if (!current || JSON.stringify(current) !== JSON.stringify(intent)) throw new Error("hydration intent changed");
+      if (this.head("applied").revisionId !== intent.revision || this.head("applied").sequence !== intent.sequence ||
+          this.head("accepted").revisionId !== intent.revision || this.head("accepted").sequence !== intent.sequence) throw new Error("hydration head changed");
+      const entry = this.entry(intent.entryId);
+      if (!entry || entry.kind !== "file" || entry.revision !== intent.revision ||
+          entry.hydration !== (intent.direction === "evict" ? "downloaded" : "evicted")) throw new Error("hydration entry changed");
+      if (intent.direction === "download") {
+        if (!device || !inode || !/^[0-9]+$/.test(device) || !/^[0-9]+$/.test(inode)) throw new Error("invalid installed file identity");
+        run(this.db, "INSERT INTO file_identity VALUES(?,?,?)", intent.entryId, device, inode);
+        const entry = this.entry(intent.entryId)!;
+        if (!entry.fingerprint) throw new Error("missing file fingerprint");
+        run(this.db, "INSERT INTO suppression VALUES(?,?,?) ON CONFLICT(path) DO UPDATE SET fingerprint=excluded.fingerprint,operation_id=excluded.operation_id", entry.path, entry.fingerprint, intent.id);
+      } else {
+        run(this.db, "DELETE FROM file_identity WHERE entry_id=?", intent.entryId);
+        run(this.db, "DELETE FROM suppression WHERE path=(SELECT path FROM entries WHERE id=?)", intent.entryId);
+      }
+      run(this.db, "UPDATE entries SET hydration=? WHERE id=?", intent.direction === "evict" ? "evicted" : "downloaded", intent.entryId);
+      run(this.db, "UPDATE operations SET state='done' WHERE id=?", intent.id);
+      run(this.db, "DELETE FROM hydration WHERE id=?", intent.id);
+    });
   }
   /** Call only after a plan has been accepted/applied. Replaces identities atomically. */
   recordScan(entries: Entry[], identities: { entryId: string; device: string; inode: string }[]) {
@@ -275,6 +331,45 @@ export class ClientLocal implements ChunkJournal {
       const existing = row<{ digest: string }>(this.db, "SELECT digest FROM proposals WHERE id=1");
       if (existing) { if (existing.digest !== digest) throw new Error("proposal already frozen"); return; }
       run(this.db, "INSERT INTO proposals VALUES(1,?,?,?,?,'prepared',NULL)", parsed.proposedRevision.revisionId, requestJson, manifest, digest);
+    });
+  }
+  /** Atomically mark a frozen proposal as a restore before the first advance. */
+  freezeRestoreProposal(request: AdvanceHeadRequest, encryptedManifestFrame: Uint8Array, baseRevision: string) {
+    uuid(baseRevision);
+    if (request.expectedRevisionId !== baseRevision || this.head("applied").revisionId !== baseRevision ||
+        this.pendingHydration()) throw new Error("restore base changed");
+    // freezeProposal validates the wire bytes; the outer transaction below
+    // persists the same authenticated request and its restore classification.
+    const parsed = parseAdvanceHeadRequest(request);
+    const ref = parsed.proposedRevision.references.find(r => r.objectId === parsed.proposedRevision.encryptedManifestObjectId);
+    if (!ref || !frameMatches(encryptedManifestFrame, ref, this.vault) || parsed.proposedRevision.creatingDeviceId !== row<{ device: string }>(this.db, "SELECT device FROM identity")?.device)
+      throw new Error("invalid restore proposal");
+    const requestJson = JSON.stringify(parsed), frame = encryptedManifestFrame.slice(), digest = hash(requestJson + "\0" + hash(frame));
+    this.write(() => {
+      if (this.proposal() || this.restoreProposal()) throw new Error("proposal already frozen");
+      run(this.db, "INSERT INTO proposals VALUES(1,?,?,?,?,'prepared',NULL)", parsed.proposedRevision.revisionId, requestJson, frame, digest);
+      run(this.db, "INSERT INTO restores VALUES(1,?,?)", parsed.proposedRevision.revisionId, baseRevision);
+    });
+  }
+  restoreProposal(): { revision: string; baseRevision: string } | null {
+    const value = row<{ revision: string; base_revision: string }>(this.db, "SELECT revision,base_revision FROM restores WHERE singleton=1");
+    if (!value) return null;
+    uuid(value.revision); uuid(value.base_revision);
+    if (this.proposal()?.request.proposedRevision.revisionId !== value.revision) throw new Error("restore proposal identity conflict");
+    return { revision: value.revision, baseRevision: value.base_revision };
+  }
+  finishRestoreProposal() {
+    this.write(() => {
+      const restore = this.restoreProposal(), proposal = this.proposal();
+      if (!restore || proposal?.state !== "accepted" || this.head("applied").revisionId !== restore.revision) throw new Error("restore not applied");
+      run(this.db, "DELETE FROM restores"); run(this.db, "DELETE FROM proposals");
+    });
+  }
+  discardStaleRestore() {
+    this.write(() => {
+      const restore = this.restoreProposal();
+      if (!restore || this.proposal()?.state !== "prepared") throw new Error("restore not stale");
+      run(this.db, "DELETE FROM restores"); run(this.db, "DELETE FROM proposals");
     });
   }
   proposal(): { request: AdvanceHeadRequest; encryptedManifestFrame: Uint8Array; state: "prepared" | "accepted"; acceptedSequence: number | null } | null {

@@ -2,9 +2,9 @@ import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { constants, chmodSync, closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ClientLocal } from "@nanosync/client-local";
-import { applyNewFiles, LinuxScanner, LinuxWatcher, type ScanOptions, type ScanPlan } from "@nanosync/linux-client";
-import { decryptManifest, HttpRemote, mergeManifests, verifyReferenceSetMac, type ManifestV1, type RemoteOptions } from "@nanosync/sync-core";
-import { parseDeviceId, parseVaultId, type RevisionEnvelope, type VisibleObjectReference } from "@nanosync/protocol";
+import { applyNewFiles, hydrateFile, LinuxScanner, LinuxWatcher, type ScanOptions, type ScanPlan } from "@nanosync/linux-client";
+import { decryptManifest, HttpRemote, mergeManifests, verifyReferenceSetMac, history, planRestore, restoreReferences, type ManifestV1, type RemoteOptions } from "@nanosync/sync-core";
+import { parseDeviceId, parseRevisionId, parseVaultId, type RevisionEnvelope, type VisibleObjectReference } from "@nanosync/protocol";
 import { acquireStartupGate, type FileIdentity } from "./startup-lock.ts";
 
 type Verified = { manifest: ManifestV1; revision: RevisionEnvelope; sequence: number | null };
@@ -32,6 +32,8 @@ export interface DaemonStatus {
   pendingProposal: boolean;
   pendingApplies: number;
   pendingOperations: number;
+  remoteOnlyFiles: number;
+  downloadedFiles: number;
   lastSuccessMs: number | null;
 }
 
@@ -60,6 +62,12 @@ function secret(path: string): string {
 }
 function sameTree(a: ManifestV1, b: ManifestV1): boolean { return JSON.stringify(a.entries) === JSON.stringify(b.entries); }
 function refs(revision: RevisionEnvelope): VisibleObjectReference[] { return revision.references.filter(r => r.objectType === "chunk"); }
+function validIpcPath(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value === value.normalize("NFC") && Buffer.byteLength(value) <= 512 &&
+    !value.startsWith("/") && value.split("/").every(part => part && part !== "." && part !== ".." && Buffer.byteLength(part) <= 255 &&
+      !/[\u0000-\u001f\u007f-\u009f\\:*?"<>|]/u.test(part) && !/[. ]$/u.test(part) &&
+      !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(part));
+}
 
 export class LinuxDaemon {
   readonly socketPath: string;
@@ -77,6 +85,8 @@ export class LinuxDaemon {
   private server?: ReturnType<typeof Bun.serve>;
   private timer?: ReturnType<typeof setInterval>;
   private active?: Promise<void>;
+  private mutation?: Promise<unknown>;
+  private restoring = false;
   private paused = false;
   private stopped = false;
   private phase: DaemonStatus["phase"] = "starting";
@@ -130,6 +140,9 @@ export class LinuxDaemon {
         if (!secured.isSocket() || secured.uid !== st.uid || secured.dev !== st.dev || secured.ino !== st.ino || secured.mode & 0o177)
           throw new Error("unsafe IPC socket");
       } finally { release(); }
+      // A linked download stage has nlink=2 and is intentionally rejected by
+      // the normal scanner. Replay its durable intent before watcher inventory.
+      await daemon.recoverHydration();
       daemon.watcher.start();
       let lastPoll = Date.now();
       daemon.timer = setInterval(() => {
@@ -150,18 +163,72 @@ export class LinuxDaemon {
     const observed = this.local.head("observed"), accepted = this.local.head("accepted"), applied = this.local.head("applied");
     const pendingProposal = !!this.local.proposal(), pendingApplies = this.local.pendingApplies().length;
     const pendingOperations = this.local.listWork("operations").filter(item => item.state !== "done").length;
+    const files = this.local.entries().filter(item => item.kind === "file");
     return { phase: this.phase, paused: this.paused, error: this.error, observed,
       headsConverged: this.phase === "idle" && !pendingProposal && !pendingApplies && !pendingOperations && !!applied.revisionId &&
         observed.revisionId === accepted.revisionId && accepted.revisionId === applied.revisionId &&
         observed.sequence === accepted.sequence && accepted.sequence === applied.sequence,
-      accepted, applied, pendingProposal, pendingApplies, pendingOperations, lastSuccessMs: this.lastSuccessMs };
+      accepted, applied, pendingProposal, pendingApplies, pendingOperations,
+      remoteOnlyFiles: files.filter(item => item.hydration === "evicted").length,
+      downloadedFiles: files.filter(item => item.hydration === "downloaded").length, lastSuccessMs: this.lastSuccessMs };
   }
   pause() { this.paused = true; this.phase = "paused"; }
   resume() { this.paused = false; this.watcher.notify(0); this.phase = "idle"; void this.sync().catch(() => {}); }
+  private tracked<T>(action: () => Promise<T>): Promise<T> {
+    if (this.mutation) return Promise.reject(new Error("local mutation already in progress"));
+    const work = action(); this.mutation = work;
+    void work.finally(() => { if (this.mutation === work) this.mutation = undefined; }).catch(() => {});
+    return work;
+  }
+  private async history(path?: string) {
+    const head = await this.remote.head();
+    if (!head.revisionId) throw new Error("vault has no head");
+    return history(this.remote, head.revisionId, this.key, path);
+  }
+  private async hydrate(direction: "evict" | "download", path: string) {
+    if (this.paused || this.restoring) throw new Error("daemon busy or paused");
+    this.restoring = true;
+    try {
+      await this.sync(true);
+      const applied = this.local.head("applied"), remoteHead = await this.remote.head();
+      if (!applied.revisionId || applied.revisionId !== remoteHead.revisionId || applied.sequence !== remoteHead.sequence ||
+          this.local.head("accepted").revisionId !== applied.revisionId || this.local.proposal()) throw new Error("accepted revision changed; synchronize before hydration");
+      const verified = await this.verified(applied.revisionId);
+      const result = await hydrateFile(this.scanner.root, this.local, this.remote, verified.manifest, verified.revision, this.key, direction, path);
+      this.watcher.notify(0);
+      return result;
+    } finally { this.restoring = false; }
+  }
+  private async restore(revisionId: string, path: string) {
+    if (this.paused) throw new Error("daemon paused");
+    if (this.restoring) throw new Error("restore already in progress");
+    this.restoring = true;
+    try {
+    // Settle local edits first; restoration must branch from the accepted head.
+    await this.sync(true);
+    const head = await this.remote.head();
+    if (!head.revisionId || head.revisionId !== this.local.head("applied").revisionId || this.local.proposal()) throw new Error("head changed during restore");
+    const current = await this.verified(head.revisionId), old = await this.verified(revisionId);
+    if (old.sequence === null) throw new Error("revision was not accepted");
+    const planned = planRestore(current.manifest, old.manifest, path, randomUUID(), this.device, head.revisionId);
+    const references = await restoreReferences(planned, [{ manifest: current.manifest, envelope: current.revision }, { manifest: old.manifest, envelope: old.revision }], this.key);
+    const result = await this.remote.publish(planned, references, [], this.key, head.revisionId, new Date().toISOString(),
+      (request, frame) => this.local.freezeRestoreProposal(request, frame, head.revisionId!));
+    if (result.status === "accepted" || result.status === "alreadyAccepted") this.local.acceptProposal(result.sequence);
+    else { if (result.status === "staleHead") this.local.discardStaleRestore(); throw new Error(`restore not accepted: ${result.status}`); }
+    // Apply the accepted historical file through the durable apply journal.
+    // The generic proposal replay assumes its local branch differs from its base,
+    // which is not true for a server-side restore of unchanged local files.
+    await applyNewFiles(this.scanner.root, this.local, this.remote, planned, result.sequence, this.key);
+    this.local.finishRestoreProposal();
+    return { revisionId: planned.revisionId, sequence: result.sequence };
+    } finally { this.restoring = false; }
+  }
   async stop() {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.watcher?.close();
+    await this.mutation?.catch(() => {});
     await this.active?.catch(() => {});
     if (this.server) {
       // Bun.stop unlinks its configured pathname without checking the inode.
@@ -200,8 +267,9 @@ export class LinuxDaemon {
     this.local.close(); this.key.fill(0);
   }
   /** Serialized manual/automatic pass. A failed pass remains visibly failed until a later successful pass. */
-  sync(): Promise<void> {
+  sync(internalRestore = false): Promise<void> {
     if (this.stopped) return Promise.reject(new Error("daemon stopped"));
+    if (this.restoring && !internalRestore) return Promise.reject(new Error("restore in progress"));
     if (this.paused) return Promise.reject(new Error("daemon paused"));
     if (this.active) return this.active;
     this.phase = "syncing";
@@ -226,6 +294,20 @@ export class LinuxDaemon {
     if (result.manifest.vaultId !== this.vault || result.revision.vaultId !== this.vault ||
         result.manifest.creatingDeviceId !== result.revision.creatingDeviceId) throw new Error("vault or device binding mismatch");
     return result;
+  }
+  private async recoverHydration() {
+    const hydration = this.local.pendingHydration();
+    if (!hydration) return;
+    await this.remote.capabilities();
+    const head = this.local.head("applied"), remoteHead = await this.remote.head();
+    if (head.revisionId !== hydration.revision || head.sequence !== hydration.sequence ||
+        this.local.head("accepted").revisionId !== hydration.revision ||
+        remoteHead.sequence < hydration.sequence || remoteHead.sequence === hydration.sequence && remoteHead.revisionId !== hydration.revision)
+      throw new Error("hydration recovery requires unchanged accepted revision");
+    const verified = await this.verified(hydration.revision);
+    if (verified.sequence !== hydration.sequence) throw new Error("hydration accepted sequence changed");
+    await hydrateFile(this.scanner.root, this.local, this.remote, verified.manifest, verified.revision, this.key, hydration.direction,
+      this.local.entry(hydration.entryId)?.path ?? "", hydration);
   }
   private async replay(): Promise<{ stale: Verified | null; local: Verified | null }> {
     const proposal = this.local.proposal();
@@ -269,6 +351,9 @@ export class LinuxDaemon {
       if (response.revisionId !== request.proposedRevision.revisionId) throw new Error("accepted wrong revision");
       this.local.acceptProposal(response.sequence);
       return { stale: null, local: await this.verified(response.revisionId) };
+    }
+    if (response.status === "staleHead" && this.local.restoreProposal()) {
+      this.local.discardStaleRestore(); throw new Error("restore head changed; retry against the current accepted revision");
     }
     if (response.status !== "staleHead" || !response.currentRevisionId) throw new Error(`proposal not accepted: ${response.status}`);
     const local = await this.verified(request.proposedRevision.revisionId);
@@ -378,6 +463,7 @@ export class LinuxDaemon {
 
   private async run() {
     await this.remote.capabilities();
+    await this.recoverHydration();
     // A partially applied filesystem is never scanned or overwritten.
     for (const pending of this.local.pendingApplies()) {
       const verified = await this.verified(pending.revision);
@@ -388,6 +474,12 @@ export class LinuxDaemon {
     const applied = this.local.head("applied");
     const base = applied.revisionId ? await this.verified(applied.revisionId) : null;
     if (base && base.sequence !== applied.sequence) throw new Error("applied sequence mismatch");
+    const restore = this.local.restoreProposal();
+    if (restore && proposed && !stale) {
+      if (base?.manifest.revisionId !== restore.baseRevision && applied.revisionId !== restore.revision) throw new Error("restore base changed during recovery");
+      if (applied.revisionId !== restore.revision) await applyNewFiles(this.scanner.root, this.local, this.remote, proposed.manifest, proposed.sequence!, this.key);
+      this.local.finishRestoreProposal(); proposed = null;
+    }
     if (proposed && !stale && this.local.proposal()?.state === "accepted" && base) {
       // On a lost response the scan plan is reconstructed against the old applied
       // tree; never treat a remote merge as a local-only revision.
@@ -462,10 +554,16 @@ export class LinuxDaemon {
     if (request.headers.get("content-length") && Number(request.headers.get("content-length")) > 1024)
       return Response.json({ error: "request too large" }, { status: 413 });
     const url = new URL(request.url);
-    const commands: Record<string, () => Promise<unknown> | unknown> = {
+    const commands: Record<string, (body: Record<string, unknown>) => Promise<unknown> | unknown> = {
       status: () => this.status(), pause: () => { this.pause(); return this.status(); },
       resume: () => { this.resume(); return this.status(); },
       sync: async () => { await this.sync(); return this.status(); },
+      conflicts: () => this.local.listWork("conflicts").filter(item => item.state === "open"),
+      history: body => this.history(body.path as string | undefined),
+      restore: body => this.tracked(() => this.restore(body.revision as string, body.path as string)),
+      evict: body => this.tracked(() => this.hydrate("evict", body.path as string)),
+      download: body => this.tracked(() => this.hydrate("download", body.path as string)),
+      doctor: async () => ({ status: this.status(), capabilities: await this.remote.capabilities() }),
     };
     if (request.method !== "POST" || !Object.hasOwn(commands, url.pathname.slice(1)) || url.search || request.headers.get("content-type") !== "application/json")
       return Response.json({ error: "invalid command" }, { status: 400 });
@@ -482,18 +580,29 @@ export class LinuxDaemon {
         }
       } finally { reader.releaseLock(); }
       const body = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
-      if (body !== "{}") throw new Error("invalid command body");
-      return Response.json(await commands[url.pathname.slice(1)]!());
+      for (const key of ["path", "revision"]) if ([...body.matchAll(new RegExp(`"${key}"\\s*:`, "g"))].length > 1) throw new Error("duplicate command field");
+      const value = JSON.parse(body) as Record<string, unknown>;
+      if (!value || Array.isArray(value) || typeof value !== "object") throw new Error("invalid command body");
+      const command = url.pathname.slice(1);
+      const fields = command === "history" || command === "evict" || command === "download" ? ["path"] : command === "restore" ? ["path", "revision"] : [];
+      if (Object.keys(value).some(key => !fields.includes(key))) throw new Error("invalid command fields");
+      if (value.path !== undefined && !validIpcPath(value.path)) throw new Error("invalid relative path");
+      if (command === "restore") {
+        parseRevisionId(value.revision);
+        if (typeof value.path !== "string") throw new Error("restore requires a file path");
+      }
+      if ((command === "evict" || command === "download") && typeof value.path !== "string") throw new Error("file path required");
+      return Response.json(await commands[command]!(value));
     } catch (error) { return Response.json({ error: error instanceof Error ? error.message : "failed" }, { status: 409 }); }
   }
 }
 
 export async function startDaemon(options: DaemonOptions) { return LinuxDaemon.start(options); }
 export async function stopDaemon(daemon: LinuxDaemon) { await daemon.stop(); }
-export async function daemonCommand(clientDirectory: string, command: "status" | "pause" | "resume" | "sync"): Promise<DaemonStatus> {
+export async function daemonCommand(clientDirectory: string, command: "status" | "pause" | "resume" | "sync" | "history" | "restore" | "conflicts" | "doctor" | "evict" | "download", args: { path?: string; revision?: string } = {}): Promise<any> {
   const root = privateDirectory(clientDirectory), token = secret(join(root, "ipc.secret"));
   const response = await fetch(`http://localhost/${command}`, { unix: join(root, "daemon.sock"), method: "POST",
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: "{}" } as RequestInit & { unix: string });
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(args) } as RequestInit & { unix: string });
   const result = await response.json() as DaemonStatus | { error: string };
   if (!response.ok) throw new Error((result as { error: string }).error);
   return result as DaemonStatus;

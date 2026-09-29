@@ -1,0 +1,15 @@
+{
+  "name": "@nanosync/cli",
+  "private": true,
+  "type": "module",
+  "bin": { "nanosync": "./src/main.ts" },
+  "scripts": { "typecheck": "tsc -p tsconfig.json --noEmit" },
+  "dependencies": {
+    "@nanosync/protocol": "workspace:*",
+    "@nanosync/sync-core": "workspace:*",
+    "@nanosync/linux-daemon": "workspace:*",
+    "@nanosync/server-core": "workspace:*",
+    "@nanosync/server-metadata": "workspace:*",
+    "@nanosync/server-object-storage": "workspace:*"
+  }
+}

@@ -11,6 +11,20 @@
         "typescript": "^5",
       },
     },
+    "packages/cli": {
+      "name": "@nanosync/cli",
+      "bin": {
+        "nanosync": "./src/main.ts",
+      },
+      "dependencies": {
+        "@nanosync/linux-daemon": "workspace:*",
+        "@nanosync/protocol": "workspace:*",
+        "@nanosync/server-core": "workspace:*",
+        "@nanosync/server-metadata": "workspace:*",
+        "@nanosync/server-object-storage": "workspace:*",
+        "@nanosync/sync-core": "workspace:*",
+      },
+    },
     "packages/client-local": {
       "name": "@nanosync/client-local",
       "dependencies": {
@@ -90,6 +104,8 @@
     "@emnapi/runtime": ["@emnapi/runtime@1.11.3", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-Xz4Tpyki7XyrpbUK1jR1AhdAdaXyhhY4lZ3neLodmhpuWfy2PAQN5B46sAiU4liOXGLkHypn/qU+jvfWSCYYLA=="],
 
     "@emnapi/wasi-threads": ["@emnapi/wasi-threads@1.2.3", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-ELEBe8PsLvvJ6QMr0zLt8ffvOHW/dc1m3CEzNMg7aJUv3bMaoDtw2TXyDAwkYBuroxxuHEwhRTLJSe5sya547g=="],
+
+    "@nanosync/cli": ["@nanosync/cli@workspace:packages/cli"],
 
     "@nanosync/client-local": ["@nanosync/client-local@workspace:packages/client-local"],
 
