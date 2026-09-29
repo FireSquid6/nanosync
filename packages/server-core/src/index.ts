@@ -3,22 +3,26 @@ import {
   MAX_PRESENCE_QUERY, MAX_REFERENCES_PER_REVISION, OBJECT_FORMAT_VERSION, OBJECT_TYPES,
   PROTOCOL_VERSION, REVISION_FORMAT_VERSION, parseDeviceId, parsePrincipalId, parseVaultId,
 } from "@nanosync/protocol";
-import { ObjectCatalogRepository } from "@nanosync/server-metadata";
+import { ObjectCatalogRepository, RevisionRepository } from "@nanosync/server-metadata";
 import type { Filesystem } from "@nanosync/server-object-storage";
 import { createServerConfig, type ServerConfig } from "./config.ts";
 import { ApiError, errorResponse, json } from "./http.ts";
 import { handleObjectRoute } from "./object-routes.ts";
 import { ObjectService, type AuthorizationContext } from "./object-service.ts";
+import { handleRevisionRoute } from "./revision-routes.ts";
+import { RevisionService } from "./revision-service.ts";
 
 export * from "./config.ts";
 export * from "./http.ts";
 export * from "./object-service.ts";
+export * from "./revision-service.ts";
 
 export interface RawAuthorizationContext { principalId: unknown; deviceId: unknown; vaultId: unknown; }
 export type Authorize = (request: Request) => Promise<RawAuthorizationContext>;
 export interface ServerDependencies {
   filesystem: Filesystem;
   catalog: ObjectCatalogRepository;
+  revisions: RevisionRepository;
   authorize: Authorize;
   config?: ServerConfig;
   clock?: () => number;
@@ -27,6 +31,7 @@ export interface ServerDependencies {
 export function createServerHandler(dependencies: ServerDependencies): (request: Request) => Promise<Response> {
   const config = dependencies.config ?? createServerConfig();
   const service = new ObjectService({ filesystem: dependencies.filesystem, catalog: dependencies.catalog, maximumObjectSize: config.maximumObjectSize, clock: dependencies.clock });
+  const revisionService = new RevisionService({ filesystem: dependencies.filesystem, revisions: dependencies.revisions, clock: dependencies.clock });
   return async (request: Request): Promise<Response> => {
     try {
       const url = new URL(request.url); const pathname = url.pathname;
@@ -50,6 +55,10 @@ export function createServerHandler(dependencies: ServerDependencies): (request:
       if (pathname === "/v1/objects" || pathname.startsWith("/v1/objects/")) {
         const context = await authorize(dependencies.authorize, request);
         return await handleObjectRoute(request, pathname, context, service);
+      }
+      if (pathname === "/v1/head" || pathname.startsWith("/v1/head/") || pathname === "/v1/revisions" || pathname.startsWith("/v1/revisions/")) {
+        const context = await authorize(dependencies.authorize, request);
+        return await handleRevisionRoute(request, pathname, context, revisionService);
       }
       throw new ApiError(404, "NOT_FOUND", "Route not found");
     } catch (error) { return errorResponse(error); }

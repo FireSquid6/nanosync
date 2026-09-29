@@ -4,7 +4,7 @@ import { mkdtemp, rm, truncate } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OBJECT_TYPE_CODES, parseCapabilityResponse } from "@nanosync/protocol";
-import { ObjectCatalogRepository, ServerMetadataDatabase } from "@nanosync/server-metadata";
+import { ObjectCatalogRepository, RevisionRepository, ServerMetadataDatabase } from "@nanosync/server-metadata";
 import { LocalFilesystem } from "@nanosync/server-object-storage";
 import { ApiError, createServerConfig, createServerHandler, errorResponse, objectKey } from "../src/index.ts";
 
@@ -23,7 +23,8 @@ async function setup(authorize: (request: Request) => Promise<any> = async () =>
     "INSERT INTO server_state(singleton, vault_id, current_head_revision_id, current_sequence) VALUES (1, ?, NULL, 0)", [vaultId],
   ));
   const catalog = new ObjectCatalogRepository(database);
-  return { root, filesystem, database, catalog, handle: createServerHandler({ filesystem, catalog, authorize }) };
+  const revisions = new RevisionRepository(database);
+  return { root, filesystem, database, catalog, revisions, handle: createServerHandler({ filesystem, catalog, revisions, authorize }) };
 }
 function uuidBytes(uuid: string): Uint8Array { return Uint8Array.from(uuid.replaceAll("-", "").match(/../g)!, (part) => Number.parseInt(part, 16)); }
 function frame(type: "chunk" | "manifest" | "revision-private" = "chunk", id = objectId, payloadLength = 5): Uint8Array {
@@ -73,7 +74,7 @@ describe("configuration and public boundary", () => {
 
     const initialized = await setup();
     const otherVault = "423e4567-e89b-12d3-a456-426614174000";
-    const otherHandle = createServerHandler({ filesystem: initialized.filesystem, catalog: initialized.catalog, authorize: async () => ({ vaultId: otherVault, deviceId, principalId }) });
+    const otherHandle = createServerHandler({ filesystem: initialized.filesystem, catalog: initialized.catalog, revisions: initialized.revisions, authorize: async () => ({ vaultId: otherVault, deviceId, principalId }) });
     expect((await otherHandle(putRequest(bytes, "other-vault"))).status).toBe(403);
     const presence = new Request("http://local/v1/objects/presence", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ protocolVersion: 1, objectType: "chunk", objectIds: [objectId] }) });
     expect((await otherHandle(presence)).status).toBe(403);

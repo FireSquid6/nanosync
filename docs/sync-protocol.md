@@ -144,6 +144,8 @@ Possible results:
 
 These camelCase names are the exact JSON wire spellings. General failures use the versioned error envelope and stable code vocabulary in [formats.md](formats.md).
 
+The protected endpoints are `GET /v1/head`, `GET /v1/revisions/{revisionId}`, and `POST /v1/head/advance`. Revision retrieval includes the immutable normalized public envelope and a separate accepted sequence (or null for a prepared stale proposal), leaving MAC-covered fields unchanged. The normal advance endpoint never creates genesis. It retains valid stale proposals so a later two-parent merge can name both the current head and stale proposal; it does not perform the client-side merge.
+
 ## Concurrent edit reconciliation
 
 ```mermaid

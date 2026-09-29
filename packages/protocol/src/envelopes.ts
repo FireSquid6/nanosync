@@ -129,10 +129,21 @@ function parseReference(value: unknown, path: string): VisibleObjectReference {
 }
 
 export function parseRevisionEnvelope(value: unknown, path = "revision"): RevisionEnvelope {
+  return parseRevisionEnvelopeParents(value, path, 1);
+}
+
+/** Persistence reader for bootstrap's sole zero-parent genesis as well as normal revisions. */
+export function parsePersistedRevisionEnvelope(value: unknown, path = "revision"): RevisionEnvelope {
+  return parseRevisionEnvelopeParents(value, path, 0);
+}
+
+function parseRevisionEnvelopeParents(value: unknown, path: string, minimumParents: 0 | 1): RevisionEnvelope {
   const fields = ["protocolVersion", "revisionFormatVersion", "vaultId", "revisionId", "parents", "creatingDeviceId", "createdAt", "encryptedManifestObjectId", "references", "referenceSetMac"];
   const v = object(value, path, fields);
   const rawParents = array(v.parents, `${path}.parents`);
-  if (rawParents.length < 1 || rawParents.length > MAX_PARENTS) throw new ProtocolValidationError("LIMIT_EXCEEDED", `${path}.parents`, "expected one or two parents");
+  if (rawParents.length < minimumParents || rawParents.length > MAX_PARENTS) {
+    throw new ProtocolValidationError("LIMIT_EXCEEDED", `${path}.parents`, minimumParents === 0 ? "expected zero through two parents" : "expected one or two parents");
+  }
   const parents = rawParents.map((item, index) => parseRevisionId(item, `${path}.parents[${index}]`));
   sortedUnique(parents, `${path}.parents`, String);
   const revisionId = parseRevisionId(v.revisionId, `${path}.revisionId`);
@@ -213,4 +224,39 @@ export function parseAdvanceHeadResult(value: unknown, path = "result"): Advance
     return { status, reasonCode: string(v.reasonCode, `${path}.reasonCode`, /^[A-Z][A-Z0-9_]{0,63}$/, "expected stable uppercase reason code") };
   }
   throw new ProtocolValidationError("INVALID_VALUE", `${path}.status`, "unknown result status");
+}
+
+/** RFC 8785/JCS for the deliberately restricted revision wire values. */
+export function canonicalizeRevisionEnvelope(value: RevisionEnvelope): string {
+  return canonicalJson(parseRevisionEnvelope(value));
+}
+
+/** Canonical persistence form, including bootstrap's zero-parent genesis. */
+export function canonicalizePersistedRevisionEnvelope(value: RevisionEnvelope): string {
+  return canonicalJson(parsePersistedRevisionEnvelope(value));
+}
+
+/** Canonical request identity. The idempotency key is intentionally excluded. */
+export function canonicalizeAdvanceHeadIdentity(value: AdvanceHeadRequest): string {
+  const parsed = parseAdvanceHeadRequest(value);
+  return canonicalJson({
+    expectedRevisionId: parsed.expectedRevisionId,
+    proposedRevision: parsed.proposedRevision,
+    protocolVersion: parsed.protocolVersion,
+    vaultId: parsed.vaultId,
+  });
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value === "boolean" || typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value)) throw new ProtocolValidationError("INVALID_TYPE", "canonicalValue", "expected safe integer");
+    return String(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
+  }
+  throw new ProtocolValidationError("INVALID_TYPE", "canonicalValue", "value cannot be canonicalized");
 }

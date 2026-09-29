@@ -4,6 +4,7 @@ import {
   parseAdvanceHeadRequest, parseAdvanceHeadResult, parseCapabilityResponse,
   parseIdempotencyKey, parseProtocolErrorEnvelope, parseReferenceSetMac, parseRevisionEnvelope,
   parseObjectFrameHeader, parsePresenceRequest,
+  canonicalizeAdvanceHeadIdentity, canonicalizeRevisionEnvelope,
 } from "../src/index.ts";
 
 const vaultId = "123e4567-e89b-12d3-a456-426614174000";
@@ -36,6 +37,15 @@ function error(value: unknown): ProtocolValidationError {
 }
 
 describe("revision envelopes", () => {
+  test("canonicalizes normalized envelopes and request identities independent of property order", () => {
+    const first = envelope();
+    const reversed = Object.fromEntries(Object.entries(first).reverse());
+    expect(canonicalizeRevisionEnvelope(parseRevisionEnvelope(first))).toBe(canonicalizeRevisionEnvelope(parseRevisionEnvelope(reversed)));
+    const requestA = parseAdvanceHeadRequest({ protocolVersion: 1, vaultId, expectedRevisionId: parent, proposedRevision: first, idempotencyKey: "one" });
+    const requestB = parseAdvanceHeadRequest({ idempotencyKey: "two", proposedRevision: reversed, expectedRevisionId: parent, vaultId, protocolVersion: 1 });
+    expect(canonicalizeAdvanceHeadIdentity(requestA)).toBe(canonicalizeAdvanceHeadIdentity(requestB));
+    expect(canonicalizeRevisionEnvelope(requestA.proposedRevision)).toStartWith('{"createdAt":');
+  });
   test("returns a normalized copy isolated from caller mutation", () => {
     const input = envelope();
     const parsed = parseRevisionEnvelope(input);
@@ -102,6 +112,8 @@ describe("other protocol messages", () => {
     expect(String(parsed.proposedRevision.revisionId)).toBe(revisionId);
     expect(() => parseAdvanceHeadRequest({ protocolVersion: 1, vaultId: deviceId, expectedRevisionId: null, proposedRevision, idempotencyKey: "x" })).toThrow();
     expect(() => parseAdvanceHeadRequest({ protocolVersion: 1, vaultId, expectedRevisionId: parent, proposedRevision, idempotencyKey: "contains space" })).toThrow();
+    expect(() => parseAdvanceHeadRequest({ protocolVersion: 1, vaultId, expectedRevisionId: parent, proposedRevision, idempotencyKey: "x", extra: true })).toThrow();
+    expect(() => parseAdvanceHeadRequest(Object.create({ protocolVersion: 1, vaultId, expectedRevisionId: parent, proposedRevision, idempotencyKey: "x" }))).toThrow();
   });
 
   test("validates idempotency keys and all result variants", () => {

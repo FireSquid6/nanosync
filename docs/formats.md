@@ -95,6 +95,34 @@ Exact JSON result status spellings are `accepted`/`alreadyAccepted` with revisio
 
 Server acceptance occurs in an explicit SQLite `BEGIN IMMEDIATE` transaction after object verification. A crash exposes either the old head or the complete new head and idempotency result, never a partial publication.
 
+The v1 revision HTTP contract is:
+
+- `GET /v1/head` returns `{"protocolVersion":1,"status":"head","revisionId":"...","sequence":N}` for an accepted head (`N` is positive), or `{"protocolVersion":1,"status":"initializedWithoutHead","revisionId":null,"sequence":0}` only during the bootstrap interval.
+- `GET /v1/revisions/{revisionId}` returns `{"protocolVersion":1,"revision":RevisionEnvelope,"sequence":N|null}`. A null sequence identifies a prepared stale proposal. Cross-vault IDs are indistinguishable from absent IDs.
+- `POST /v1/head/advance` requires `application/json`, the 8 MiB metadata limit, and the strict `AdvanceHeadRequest` shape in this section. Its HTTP status is 200 for every typed `AdvanceHeadResult`; malformed transport/protocol input uses a protocol error envelope.
+
+Exact request and result JSON members (with no additional members) are:
+
+```json
+{"protocolVersion":1,"vaultId":"<vault UUID>","expectedRevisionId":"<revision UUID>","proposedRevision":{"protocolVersion":1,"revisionFormatVersion":1,"vaultId":"<vault UUID>","revisionId":"<revision UUID>","parents":["<revision UUID>"],"creatingDeviceId":"<device UUID>","createdAt":"2026-01-02T03:04:05.006Z","encryptedManifestObjectId":"<64 lowercase hex>","references":[{"objectId":"<64 lowercase hex>","objectType":"manifest","ciphertextChecksum":"<64 lowercase hex>","ciphertextLength":109,"objectFormatVersion":1}],"referenceSetMac":"<64 lowercase hex>"},"idempotencyKey":"<visible ASCII>"}
+```
+
+```text
+{"status":"accepted","revisionId":"<revision UUID>","sequence":N}
+{"status":"alreadyAccepted","revisionId":"<revision UUID>","sequence":N}
+{"status":"staleHead","currentRevisionId":"<revision UUID>"}
+{"status":"missingObjects","objectIds":["<sorted object ID>"]}
+{"status":"invalidRevision","reasonCode":"<STABLE_CODE>"}
+```
+
+`currentRevisionId` can be null only for the initialized-without-head bootstrap interval. Normal publication never permits a null `expectedRevisionId`.
+
+The advance request digest is SHA-256 over JCS of `{expectedRevisionId,proposedRevision,protocolVersion,vaultId}`: the idempotency key alone is excluded. Idempotency is scoped to authenticated principal and device, operation `advance-head-v1`, and key. Accepted and stale outcomes are terminal and atomically recorded; replay of an accepted result is returned as `alreadyAccepted` with the original revision and sequence. `missingObjects` and `invalidRevision` are not recorded, so repair (notably uploading or restoring objects) may safely retry the same key. Key reuse with a different digest is HTTP 409 `IDEMPOTENCY_KEY_REUSE`.
+
+Normal publication rejects null `expectedRevisionId` as `invalidRevision/GENESIS_REQUIRES_BOOTSTRAP`. One-parent revisions must name the expected revision; sorted two-parent merges must include it. Every parent must already be stored in the vault, including a prepared stale proposal where applicable. Before transaction entry the server checks exact catalog metadata and non-failed integrity state, confirms storage existence in batches of at most 1,000, and confirms stored length. The transaction rechecks exact catalog metadata and integrity before inserting or accepting. A stale structurally valid proposal is retained with a null sequence.
+
+Storage itself cannot participate in the SQLite transaction. The object store is operator-exclusive, and no in-process GC exists in v1; future GC must coordinate with metadata transactions and recheck reachability before deletion. External object mutation is outside this contract. The server stores but cannot verify `referenceSetMac`; clients authenticate it. Server sequence and acceptance order are authoritative, while `createdAt` remains display metadata.
+
 ## Protocol errors
 
 General API failures use the strict JSON shape `{ protocolVersion: 1, code, message, retryAfterSeconds? }`; no other fields are allowed. `message` is safe public text of 1–512 UTF-8 bytes without control characters and must never contain secrets, SQL/filesystem details, stack traces, credentials, object plaintext, or internal exception text. `retryAfterSeconds`, when present, is a safe integer from 0 through 86,400.
