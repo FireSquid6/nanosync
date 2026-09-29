@@ -44,6 +44,15 @@
         "typescript": "^5",
       },
     },
+    "packages/sync-core": {
+      "name": "@nanosync/sync-core",
+      "dependencies": {
+        "@nanosync/protocol": "workspace:*",
+      },
+      "peerDependencies": {
+        "typescript": "^5",
+      },
+    },
   },
   "packages": {
     "@emnapi/core": ["@emnapi/core@1.11.3", "", { "dependencies": { "@emnapi/wasi-threads": "1.2.3", "tslib": "^2.4.0" } }, "sha512-zLpS5asjEb7lq8jYLq37N6XKaE41DIexlY1rF/z4/tIl3wo13Sqm28fRyfIsKZD+NZ8mM5RoKkpW/rBcuoSZSg=="],
@@ -59,6 +68,8 @@
     "@nanosync/server-metadata": ["@nanosync/server-metadata@workspace:packages/server-metadata"],
 
     "@nanosync/server-object-storage": ["@nanosync/server-object-storage@workspace:packages/server-object-storage"],
+
+    "@nanosync/sync-core": ["@nanosync/sync-core@workspace:packages/sync-core"],
 
     "@napi-rs/wasm-runtime": ["@napi-rs/wasm-runtime@0.2.12", "", { "dependencies": { "@emnapi/core": "^1.4.3", "@emnapi/runtime": "^1.4.3", "@tybys/wasm-util": "^0.10.0" } }, "sha512-ZVWUcfwY4E/yPitQJl481FjFo3K22D6qF0DuFH6Y/nbnE11GY5uguDxZMGXPQ8WQ0128MXQD7TnfHyK4oWoIJQ=="],
 

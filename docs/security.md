@@ -67,6 +67,8 @@ Version 1 uses HKDF-SHA-256 with the 16-byte UUID binary vault ID as salt, the 3
 
 The displayed form is lowercase unpadded RFC 4648 base32: 52 secret symbols followed by 7 checksum symbols, grouped from the left in groups of five (the final group may be shorter). Checksum version 1 is the first four bytes of `SHA-256(ASCII("nanosync/v1/recovery-checksum") || 0x00 || secret)`, base32-encoded canonically. Decoders reject noncanonical padding/bits before checking it. HKDF-SHA-256 derives the wrapping key directly from decoded high-entropy bytes using vault-ID salt and `nanosync/v1/recovery-wrap-key`; this is not password stretching. The vault master key is wrapped with AES-256-GCM, a random 96-bit nonce. Its AAD is JCS of `{"algorithm":"A256GCM","label":"nanosync/v1/aad/recovery-wrap","vaultId":"<canonical vault UUID>","version":1}`. The encrypted value is exactly 32 ciphertext bytes followed by the 16-byte GCM tag.
 
+The recovery-wrap AAD member names are exactly `algorithm`, `label`, `vaultId`, `version`; the JSON above is already in JCS order. No extra fields, alternate names, or terminators are permitted.
+
 A lost recovery key combined with the loss of every authorized device results in permanent data loss. The product must communicate this without implying that an administrator can reset encryption.
 
 ## Authentication and enrollment
@@ -150,7 +152,11 @@ Vault-scoped chunk IDs are HMAC-SHA-256 over plaintext under the chunk-identifie
 
 Manifests and revision-private payloads use their domain key, AES-256-GCM, and a fresh random 96-bit nonce. Their JCS AAD uses respectively `nanosync/v1/aad/manifest` or `nanosync/v1/aad/revision-private` plus object format, crypto format, vault ID, object type, object ID, and plaintext length. SHA-256 checksums cover ciphertext envelope bytes.
 
+**Normative v1 object AAD JSON:** for every object type, the exact seven member names, JCS ordering, and types are `{"cryptoFormatVersion":1,"label":"nanosync/v1/aad/<objectType>","objectFormatVersion":1,"objectId":"<64 lowercase hex>","objectType":"<objectType>","plaintextLength":<positive safe integer>,"vaultId":"<canonical lowercase UUID>"}`. Substitute `chunk`, `manifest`, or `revision-private` for `<objectType>` in both places; for chunks `objectId` is the keyed plaintext HMAC ID. Bracketed substitutions here describe values, not literal bytes. Use RFC 8785 JCS UTF-8 of the resulting JSON object as the complete AES-GCM AAD, with no NUL or header bytes appended. No other names (including `chunkId`, `objectFormat`, or `cryptoFormat`) or members are permitted.
+
 The revision-authentication key computes HMAC-SHA-256 over exact ASCII label `nanosync/v1/reference-set-mac`, one zero byte, and JCS of the public revision envelope excluding the MAC. This binds parents, identities, encrypted-manifest ID, and the complete server-visible reference entries without a self-checksum cycle.
+
+For this MAC, parse and validate the exact v1 `RevisionEnvelope` in [formats.md](formats.md), remove only `referenceSetMac`, then serialize the remaining object with RFC 8785 JCS as UTF-8. The top-level JCS member order is `createdAt`, `creatingDeviceId`, `encryptedManifestObjectId`, `parents`, `protocolVersion`, `references`, `revisionFormatVersion`, `revisionId`, `vaultId`; each visible reference uses `ciphertextChecksum`, `ciphertextLength`, `objectFormatVersion`, `objectId`, `objectType` in JCS order. Arrays retain their validated ordering. The MAC field itself and any whitespace, stringified JSON, or byte-order mark outside JCS are not part of the MAC input.
 
 ## Metadata exposure
 
