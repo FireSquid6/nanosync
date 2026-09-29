@@ -47,7 +47,7 @@ TreeEntry {
 }
 ```
 
-Paths are derived from parent relationships and names. Stable IDs allow renames and moves to preserve history. The unique root has an empty name and null parent; every other entry has a directory parent. Live files include size, whole-file SHA-256, and executable hint; tombstones retain ID/location/former kind but no content. Conflict copies have new IDs and optional source entry/revision lineage. Unsupported special filesystem entries are rejected rather than serialized.
+Paths are derived from parent relationships and names. Stable IDs allow renames and moves to preserve history. The unique root has an empty name and null parent; every other entry has a directory parent. Live files include size, whole-file SHA-256, and executable hint; tombstones retain ID/former kind but no content. Tombstone locations may be archived under a surviving directory when a new live file takes the old path or its parent is deleted; never reuse the tombstone ID for the new file. Archival names must satisfy normal path/name and sibling uniqueness limits. Conflict copies have new IDs and optional source entry/revision lineage. Unsupported special filesystem entries are rejected rather than serialized.
 
 ### Revision
 

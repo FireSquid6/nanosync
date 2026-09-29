@@ -22,7 +22,8 @@ CREATE TABLE proposals(id INTEGER PRIMARY KEY CHECK(id=1), revision TEXT NOT NUL
 CREATE TABLE chunks(object_id TEXT PRIMARY KEY, checksum TEXT NOT NULL, ciphertext_length INTEGER NOT NULL, plaintext_length INTEGER NOT NULL CHECK(plaintext_length BETWEEN 1 AND ${CHUNK_SIZE}), accessed INTEGER NOT NULL CHECK(accessed>=0)) STRICT;
 `;
 const schema2 = `CREATE TABLE suppression(path TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, operation_id TEXT NOT NULL, FOREIGN KEY(operation_id) REFERENCES operations(id)) STRICT;`;
-const migrations = [schema1, schema2];
+const schema3 = `CREATE TABLE file_identity(entry_id TEXT PRIMARY KEY, device TEXT NOT NULL, inode TEXT NOT NULL, FOREIGN KEY(entry_id) REFERENCES entries(id)) STRICT;`;
+const migrations = [schema1, schema2, schema3];
 const schemaDigest = (db: Database) => hash(db.query<{ sql: string }, []>("SELECT sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY type,name").all().map(r => r.sql).join("\n"));
 let expectedSchema: string | undefined;
 function expectedDigest(): string {
@@ -147,6 +148,28 @@ export class ClientLocal implements ChunkJournal {
   }
   entry(id: string): Entry | null { uuid(id); return row<Entry>(this.db, "SELECT id,path,kind,fingerprint,hydration,revision FROM entries WHERE id=?", id); }
   entries(): Entry[] { return all<Entry>(this.db, "SELECT * FROM entries ORDER BY path"); }
+  identities(): { entryId: string; device: string; inode: string }[] {
+    return all<{ entryId: string; device: string; inode: string }>(this.db, "SELECT entry_id entryId,device,inode FROM file_identity");
+  }
+  /** Call only after a plan has been accepted/applied. Replaces identities atomically. */
+  recordScan(entries: Entry[], identities: { entryId: string; device: string; inode: string }[]) {
+    for (const entry of entries) { uuid(entry.id); this.path(entry.path); if (entry.fingerprint !== null) hex(entry.fingerprint); if (entry.revision) uuid(entry.revision); }
+    for (const identity of identities) { uuid(identity.entryId); if (!/^\d+$/.test(identity.device) || !/^\d+$/.test(identity.inode)) throw new Error("invalid filesystem identity"); }
+    this.write(() => {
+      // Two-phase path replacement permits swaps without deleting referenced operation rows.
+      for (const entry of entries) run(this.db, "UPDATE entries SET path=? WHERE id=?", `.scan-${entry.id}`, entry.id);
+      run(this.db, "DELETE FROM file_identity");
+      for (const old of all<{ id: string }>(this.db, "SELECT id FROM entries")) if (!entries.some(entry => entry.id === old.id)) {
+        // Referenced work cannot lose its FK. Retire its path instead of allowing
+        // an omitted descendant of a deleted directory to block future reuse.
+        const referenced = row<{ id: string }>(this.db, "SELECT id FROM operations WHERE entry_id=? UNION SELECT id FROM conflicts WHERE entry_id=? LIMIT 1", old.id, old.id);
+        if (referenced) run(this.db, "UPDATE entries SET path=?,kind='tombstone',fingerprint=NULL,hydration='downloaded' WHERE id=?", `.retired-${old.id}`, old.id);
+        else run(this.db, "DELETE FROM entries WHERE id=?", old.id);
+      }
+      for (const entry of entries) run(this.db, `INSERT INTO entries VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,kind=excluded.kind,fingerprint=excluded.fingerprint,hydration=excluded.hydration,revision=excluded.revision`, entry.id, entry.path, entry.kind, entry.fingerprint, entry.hydration, entry.revision);
+      for (const item of identities) run(this.db, "INSERT INTO file_identity VALUES(?,?,?)", item.entryId, item.device, item.inode);
+    });
+  }
   private work(table: "operations" | "transfers" | "conflicts", id: string, fields: (string | number | null)[]) {
     uuid(id);
     this.write(() => {
@@ -177,6 +200,10 @@ export class ClientLocal implements ChunkJournal {
   suppress(path: string, fingerprint: string, operationId: string) {
     this.path(path); hex(fingerprint); uuid(operationId);
     this.write(() => run(this.db, "INSERT INTO suppression VALUES(?,?,?) ON CONFLICT(path) DO UPDATE SET fingerprint=excluded.fingerprint,operation_id=excluded.operation_id", path, fingerprint, operationId));
+  }
+  matchesSuppression(path: string, fingerprint: string): boolean {
+    this.path(path); hex(fingerprint);
+    return row<{ fingerprint: string }>(this.db, "SELECT fingerprint FROM suppression WHERE path=?", path)?.fingerprint === fingerprint;
   }
   consumeSuppression(path: string, fingerprint: string): boolean {
     this.path(path); hex(fingerprint);

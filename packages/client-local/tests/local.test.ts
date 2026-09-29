@@ -19,7 +19,7 @@ afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: tru
 
 test("reopens durable identity, heads, entries, work and watcher suppression without rolling back", () => {
   const dir = directory(); let db = new ClientLocal(dir, vault, device);
-  expect(db.pragmas()).toEqual({ synchronous: 2, version: 2 });
+  expect(db.pragmas()).toEqual({ synchronous: 2, version: 3 });
   const entry = { id: other, path: "notes/plan.md", kind: "file" as const, fingerprint: "a".repeat(64), hydration: "evicted" as const, revision: rev };
   db.upsertEntry(entry);
   db.enqueueOperation(rev, "evict", entry.id);
@@ -110,9 +110,9 @@ test("fails closed on unsafe modes, symlinks, altered migration and future schem
 test("migrates an interrupted pre-v2 installation and rejects modified schema", () => {
   const dir = directory(); let db = new ClientLocal(dir, vault, device); db.close();
   const filename = join(dir, "local.sqlite"); let sql = new Database(filename);
-  sql.exec("DROP TABLE suppression; DELETE FROM migrations WHERE version=2; PRAGMA user_version=1"); sql.close();
+  sql.exec("DROP TABLE file_identity; DROP TABLE suppression; DELETE FROM migrations WHERE version>=2; PRAGMA user_version=1"); sql.close();
   db = new ClientLocal(dir, vault, device);
-  expect(db.pragmas().version).toBe(2);
+  expect(db.pragmas().version).toBe(3);
   db.enqueueOperation(rev, "scan");
   db.suppress("hello", "a".repeat(64), rev);
   db.close();
