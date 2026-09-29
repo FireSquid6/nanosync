@@ -6,6 +6,7 @@ import {
   __unsafeOpenWithMigrationsForTests,
   METADATA_MIGRATIONS,
   MetadataError,
+  ObjectCatalogRepository,
   ServerMetadataDatabase,
   migrationChecksum,
   type MetadataMigration,
@@ -214,6 +215,25 @@ describe("transactions", () => {
     expect(() => db.all("SELECT 1")).toThrow(expect.objectContaining({ code: "CLOSED_DATABASE" }));
     expect(() => db.pragmas()).toThrow(expect.objectContaining({ code: "CLOSED_DATABASE" }));
     expect(() => db.writeTransaction(() => undefined)).toThrow(expect.objectContaining({ code: "CLOSED_DATABASE" }));
+  });
+});
+
+describe("object repository", () => {
+  test("rejects inconsistent persisted idempotency result shapes", () => {
+    const db = new ServerMetadataDatabase(":memory:");
+    db.writeTransaction((tx) => {
+      tx.run("INSERT INTO server_state(singleton, vault_id, current_head_revision_id, current_sequence) VALUES (1, ?, NULL, 0)", [vault]);
+      tx.run(
+        `INSERT INTO idempotency_records
+         (principal_id, device_id, operation, idempotency_key, request_digest, outcome, result_json, created_at_ms, expires_at_ms)
+         VALUES (?, ?, 'put-object-v1', 'key', ?, 'success', ?, 0, 1)`,
+        [device, device, digest, '{"protocolVersion":1,"status":"stored","extra":true}'],
+      );
+    });
+    const repository = new ObjectCatalogRepository(db);
+    expect(() => repository.idempotency({ principalId: device as any, deviceId: device as any, vaultId: vault as any, idempotencyKey: "key" as any, requestDigest: digest }))
+      .toThrow(expect.objectContaining({ code: "INVARIANT" }));
+    db.close();
   });
 });
 

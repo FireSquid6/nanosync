@@ -3,6 +3,7 @@ import {
   MAX_IDEMPOTENCY_KEY_LENGTH, MAX_OBJECT_CIPHERTEXT_BYTES, OBJECT_FORMAT_VERSION, ProtocolValidationError,
   parseAdvanceHeadRequest, parseAdvanceHeadResult, parseCapabilityResponse,
   parseIdempotencyKey, parseProtocolErrorEnvelope, parseReferenceSetMac, parseRevisionEnvelope,
+  parseObjectFrameHeader, parsePresenceRequest,
 } from "../src/index.ts";
 
 const vaultId = "123e4567-e89b-12d3-a456-426614174000";
@@ -120,7 +121,7 @@ describe("other protocol messages", () => {
     const capabilities = {
       protocolVersions: [1], revisionFormatVersions: [1], objectFormatVersions: [1],
       objectTypes: ["chunk", "manifest", "revision-private"],
-      limits: { maximumObjectCiphertextBytes: 1, maximumReferencesPerRevision: 1, maximumParents: 1, maximumPresenceQuery: 1, maximumPageSize: 1, maximumJsonMetadataBytes: 1, maximumIdempotencyKeyLength: 1 },
+      limits: { maximumObjectCiphertextBytes: 1, maximumReferencesPerRevision: 1, maximumParents: 1, maximumPresenceQuery: 1, maximumPageSize: 1, maximumJsonMetadataBytes: 1, maximumIdempotencyKeyLength: 1, chunkSizeBytes: 4194304 },
     };
     const parsed = parseCapabilityResponse(capabilities);
     (capabilities.objectTypes as string[])[0] = "changed";
@@ -150,5 +151,37 @@ describe("protocol error envelopes", () => {
       { ...valid, retryAfterSeconds: 1.5 },
     ];
     for (const value of cases) expect(() => parseProtocolErrorEnvelope(value)).toThrow(ProtocolValidationError);
+  });
+});
+
+describe("object HTTP protocol", () => {
+  function header(type = 1, nonce = 0, length = 1): Uint8Array {
+    const bytes = new Uint8Array(80); const view = new DataView(bytes.buffer);
+    bytes.set(new TextEncoder().encode("NSOBJ001")); view.setUint16(8, 1); view.setUint16(10, 1); view.setUint8(12, type); view.setUint8(13, nonce);
+    bytes.set(Uint8Array.from(vaultId.replaceAll("-", "").match(/../g)!, (part) => Number.parseInt(part, 16)), 16);
+    bytes.set(Uint8Array.from(chunkId.match(/../g)!, (part) => Number.parseInt(part, 16)), 32);
+    view.setBigUint64(64, BigInt(length)); view.setBigUint64(72, BigInt(length)); return bytes;
+  }
+  test("parses exact frame identity and complete length", () => {
+    expect(parseObjectFrameHeader(header())).toMatchObject({ objectType: "chunk", vaultId, objectId: chunkId, plaintextLength: 1, completeLength: 97 });
+    expect(parseObjectFrameHeader(header(2, 12, 20))).toMatchObject({ objectType: "manifest", completeLength: 128 });
+  });
+  test("rejects reserved flags, nonce/type/length mismatches, unsafe lengths, and malformed UUID bytes", () => {
+    const cases = [header(1, 12), header(99), header()]; new DataView(cases[2]!.buffer).setUint16(14, 1);
+    const unequal = header(); new DataView(unequal.buffer).setBigUint64(72, 2n); cases.push(unequal);
+    const unsafe = header(); new DataView(unsafe.buffer).setBigUint64(64, BigInt(Number.MAX_SAFE_INTEGER) + 1n); cases.push(unsafe);
+    const uuid = header(); uuid[22] = 0; cases.push(uuid);
+    for (const value of cases) expect(() => parseObjectFrameHeader(value)).toThrow(ProtocolValidationError);
+  });
+  test("requires sorted unique bounded presence IDs", () => {
+    const input = { protocolVersion: 1, objectType: "chunk", objectIds: [chunkId, manifestId] };
+    const parsed = parsePresenceRequest(input); input.objectIds[0] = "f".repeat(64);
+    expect(parsed.objectIds.map(String)).toEqual([chunkId, manifestId]);
+    const nullPrototype = Object.assign(Object.create(null), { protocolVersion: 1, objectType: "chunk", objectIds: [chunkId] });
+    expect(parsePresenceRequest(nullPrototype).objectIds.map(String)).toEqual([chunkId]);
+    expect(() => parsePresenceRequest(Object.create({ protocolVersion: 1, objectType: "chunk", objectIds: [chunkId] }))).toThrow();
+    expect(() => parsePresenceRequest({ protocolVersion: 1, objectType: "chunk", objectIds: [] })).toThrow();
+    expect(() => parsePresenceRequest({ protocolVersion: 1, objectType: "chunk", objectIds: [chunkId, chunkId] })).toThrow();
+    expect(() => parsePresenceRequest({ protocolVersion: 1, objectType: "chunk", objectIds: [manifestId, chunkId] })).toThrow();
   });
 });

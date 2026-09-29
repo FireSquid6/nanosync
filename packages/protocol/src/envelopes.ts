@@ -45,6 +45,7 @@ export interface CapabilityResponse {
     maximumPageSize: number;
     maximumJsonMetadataBytes: number;
     maximumIdempotencyKeyLength: number;
+    chunkSizeBytes: number;
   };
 }
 export interface AdvanceHeadRequest {
@@ -156,7 +157,7 @@ export function parseRevisionEnvelope(value: unknown, path = "revision"): Revisi
   };
 }
 
-const LIMIT_FIELDS = ["maximumObjectCiphertextBytes", "maximumReferencesPerRevision", "maximumParents", "maximumPresenceQuery", "maximumPageSize", "maximumJsonMetadataBytes", "maximumIdempotencyKeyLength"];
+const LIMIT_FIELDS = ["maximumObjectCiphertextBytes", "maximumReferencesPerRevision", "maximumParents", "maximumPresenceQuery", "maximumPageSize", "maximumJsonMetadataBytes", "maximumIdempotencyKeyLength", "chunkSizeBytes"];
 export function parseCapabilityResponse(value: unknown, path = "capabilities"): CapabilityResponse {
   const v = object(value, path, ["protocolVersions", "revisionFormatVersions", "objectFormatVersions", "objectTypes", "limits"]);
   const versions = (input: unknown, child: string, supported: number): number[] => {
@@ -176,6 +177,7 @@ export function parseCapabilityResponse(value: unknown, path = "capabilities"): 
     maximumPageSize: integer(limits.maximumPageSize, `${path}.limits.maximumPageSize`, 1, MAX_PAGE_SIZE),
     maximumJsonMetadataBytes: integer(limits.maximumJsonMetadataBytes, `${path}.limits.maximumJsonMetadataBytes`, 1, MAX_JSON_METADATA_BYTES),
     maximumIdempotencyKeyLength: integer(limits.maximumIdempotencyKeyLength, `${path}.limits.maximumIdempotencyKeyLength`, 1, MAX_IDEMPOTENCY_KEY_LENGTH),
+    chunkSizeBytes: integer(limits.chunkSizeBytes, `${path}.limits.chunkSizeBytes`, CHUNK_SIZE, CHUNK_SIZE),
   };
   return { protocolVersions: versions(v.protocolVersions, `${path}.protocolVersions`, 1), revisionFormatVersions: versions(v.revisionFormatVersions, `${path}.revisionFormatVersions`, 1), objectFormatVersions: versions(v.objectFormatVersions, `${path}.objectFormatVersions`, 1), objectTypes: types, limits: parsedLimits };
 }

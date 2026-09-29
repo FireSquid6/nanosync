@@ -4,6 +4,7 @@ import { MAX_IDEMPOTENCY_KEY_LENGTH } from "./versions.ts";
 declare const brand: unique symbol;
 type Branded<T extends string> = string & { readonly [brand]: T };
 export type VaultId = Branded<"VaultId">;
+export type PrincipalId = Branded<"PrincipalId">;
 export type DeviceId = Branded<"DeviceId">;
 export type RevisionId = Branded<"RevisionId">;
 export type ObjectId = Branded<"ObjectId">;
@@ -23,6 +24,8 @@ function parseString(value: unknown, path: string, pattern: RegExp, description:
 
 export const parseVaultId = (value: unknown, path = "vaultId"): VaultId =>
   parseString(value, path, UUID, "canonical lowercase UUID") as VaultId;
+export const parsePrincipalId = (value: unknown, path = "principalId"): PrincipalId =>
+  parseString(value, path, UUID, "canonical lowercase UUID") as PrincipalId;
 export const parseDeviceId = (value: unknown, path = "deviceId"): DeviceId =>
   parseString(value, path, UUID, "canonical lowercase UUID") as DeviceId;
 export const parseRevisionId = (value: unknown, path = "revisionId"): RevisionId =>

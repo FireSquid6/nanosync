@@ -17,6 +17,17 @@
         "typescript": "^5",
       },
     },
+    "packages/server-core": {
+      "name": "@nanosync/server-core",
+      "dependencies": {
+        "@nanosync/protocol": "workspace:*",
+        "@nanosync/server-metadata": "workspace:*",
+        "@nanosync/server-object-storage": "workspace:*",
+      },
+      "peerDependencies": {
+        "typescript": "^5",
+      },
+    },
     "packages/server-metadata": {
       "name": "@nanosync/server-metadata",
       "dependencies": {
@@ -35,6 +46,8 @@
   },
   "packages": {
     "@nanosync/protocol": ["@nanosync/protocol@workspace:packages/protocol"],
+
+    "@nanosync/server-core": ["@nanosync/server-core@workspace:packages/server-core"],
 
     "@nanosync/server-metadata": ["@nanosync/server-metadata@workspace:packages/server-metadata"],
 
