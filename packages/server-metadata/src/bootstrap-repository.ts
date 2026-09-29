@@ -53,6 +53,7 @@ export class BootstrapRepository {
       tx.run(`INSERT INTO accounts(singleton, principal_id, password_algorithm, password_version, password_memory_kib, password_iterations, password_parallelism, password_salt, password_hash, created_at_ms, password_updated_at_ms) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [input.principalId, verifier.algorithm, verifier.version, verifier.memoryKiB, verifier.iterations, verifier.parallelism, verifier.salt, verifier.hash, nowMs, nowMs]);
       tx.run("INSERT INTO initial_devices(singleton, device_id, principal_id, vault_id, created_at_ms) VALUES (1, ?, ?, ?, ?)", [input.initialDeviceId, input.principalId, input.vaultId, nowMs]);
+      tx.run("INSERT INTO devices(device_id, principal_id, vault_id, state, role, credential_digest, is_initial, created_at_ms) VALUES (?, ?, ?, 'pending', 'administrator', NULL, 1, ?)", [input.initialDeviceId, input.principalId, input.vaultId, nowMs]);
       tx.run("INSERT INTO recovery_wraps(singleton, vault_id, wrap_version, algorithm, nonce, ciphertext) VALUES (1, ?, 1, 'A256GCM', ?, ?)", [input.vaultId, decodeCanonicalBase64Url(input.recoveryWrap.nonce, 12), decodeCanonicalBase64Url(input.recoveryWrap.ciphertext, 48)]);
       tx.run("INSERT INTO bootstrap_state(singleton, vault_id, principal_id, initial_device_id, lifecycle, initialized_at_ms, sealed_at_ms) VALUES (1, ?, ?, ?, 'initialized', ?, NULL)", [input.vaultId, input.principalId, input.initialDeviceId, nowMs]);
       return "initialized";

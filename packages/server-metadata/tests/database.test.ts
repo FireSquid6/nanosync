@@ -80,14 +80,14 @@ describe("metadata initialization", () => {
       busyTimeoutMs: 5000,
       journalMode: "wal",
       synchronous: 2,
-      userVersion: 2,
+      userVersion: 3,
     });
     expect(db.all<{ version: number; name: string }>("SELECT version, name FROM metadata_migrations ORDER BY version")).toEqual([
-      { version: 1, name: "initial_metadata_schema" }, { version: 2, name: "account_and_bootstrap" },
+      { version: 1, name: "initial_metadata_schema" }, { version: 2, name: "account_and_bootstrap" }, { version: 3, name: "device_authentication" },
     ]);
     expect(db.all<{ name: string }>("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name").map((row) => row.name)).toEqual([
-      "accounts", "bootstrap_state", "idempotency_records", "initial_devices", "metadata_migrations", "object_catalog", "recovery_wraps", "revision_objects", "revision_parents",
-      "revisions", "server_state", "upload_sessions",
+      "accounts", "audit_events", "authentication_rate_limit", "bootstrap_state", "devices", "enrollment_requests", "idempotency_records", "initial_devices", "metadata_migrations", "object_catalog", "password_sessions", "recovery_wraps", "revision_objects", "revision_parents",
+      "revisions", "server_state", "sqlite_sequence", "upload_sessions",
     ]);
     insertObject(db);
     db.close();
@@ -401,21 +401,42 @@ describe("migration safety", () => {
     expect(db.pragmas().userVersion).toBe(1);
     db.close();
     db = new ServerMetadataDatabase(path);
-    expect(db.pragmas().userVersion).toBe(2);
+    expect(db.pragmas().userVersion).toBe(3);
     expect(db.get<{ count: number }>("SELECT count(*) AS count FROM sqlite_schema WHERE name = 'bootstrap_state'")?.count).toBe(1);
     db.close();
+  });
+  test("keeps migration checksums fixed and materializes an initialized v2 bootstrap device", async () => {
+    expect(METADATA_MIGRATIONS.map((item) => item.checksum)).toEqual([
+      "9aed4c9f2ee3577b1349c78c097f885fa7bb54ad35f25a00143977a113e5dbb7",
+      "aad9dd2ec61e0d72a0dd5c20622da5ca519bf91d7db402c87db6bbbc28c728e5",
+      "3493ba2effffbde6b897d69679385eab4214304cb50a66ff01978a18adbfea46",
+    ]);
+    const { path } = await pathFor("v2.sqlite");
+    const v2 = __unsafeOpenWithMigrationsForTests(path, METADATA_MIGRATIONS.slice(0, 2));
+    v2.writeTransaction((tx) => {
+      tx.run("INSERT INTO server_state(singleton,vault_id,current_head_revision_id,current_sequence) VALUES(1,?,NULL,0)", [vault]);
+      tx.run("INSERT INTO accounts(singleton,principal_id,password_algorithm,password_version,password_memory_kib,password_iterations,password_parallelism,password_salt,password_hash,created_at_ms,password_updated_at_ms) VALUES(1,?,'argon2id',19,65536,3,1,?,?,1,1)", [device, new Uint8Array(16), new Uint8Array(32)]);
+      tx.run("INSERT INTO initial_devices(singleton,device_id,principal_id,vault_id,created_at_ms) VALUES(1,?,?,?,1)", [device, device, vault]);
+      tx.run("INSERT INTO recovery_wraps(singleton,vault_id,wrap_version,algorithm,nonce,ciphertext) VALUES(1,?,1,'A256GCM',?,?)", [vault, new Uint8Array(12), new Uint8Array(48)]);
+      tx.run("INSERT INTO bootstrap_state(singleton,vault_id,principal_id,initial_device_id,lifecycle,initialized_at_ms,sealed_at_ms) VALUES(1,?,?,?,'initialized',1,NULL)", [vault, device, device]);
+    });
+    v2.close();
+    const upgraded = new ServerMetadataDatabase(path);
+    expect(upgraded.pragmas().userVersion).toBe(3);
+    expect(upgraded.get<{ device_id: string; state: string; role: string; is_initial: number }>("SELECT device_id,state,role,is_initial FROM devices")).toEqual({ device_id: device, state: "pending", role: "administrator", is_initial: 1 });
+    upgraded.close();
   });
   test("rolls schema, ledger, and user_version back after a migration failure", async () => {
     const { path } = await pathFor();
     new ServerMetadataDatabase(path).close();
     const sql = "CREATE TABLE should_rollback(value TEXT) STRICT; INSERT INTO table_that_does_not_exist VALUES (1);";
-    const failing: MetadataMigration = { version: 3, name: "injected_failure", sql, checksum: migrationChecksum(3, "injected_failure", sql) };
+    const failing: MetadataMigration = { version: 4, name: "injected_failure", sql, checksum: migrationChecksum(4, "injected_failure", sql) };
     expect(() => __unsafeOpenWithMigrationsForTests(path, [...METADATA_MIGRATIONS, failing])).toThrow(
       expect.objectContaining({ code: "MIGRATION_FAILURE" }),
     );
     const db = new ServerMetadataDatabase(path);
-    expect(db.pragmas().userVersion).toBe(2);
-    expect(db.get<{ count: number }>("SELECT count(*) AS count FROM metadata_migrations")?.count).toBe(2);
+    expect(db.pragmas().userVersion).toBe(3);
+    expect(db.get<{ count: number }>("SELECT count(*) AS count FROM metadata_migrations")?.count).toBe(3);
     expect(db.get<{ count: number }>("SELECT count(*) AS count FROM sqlite_schema WHERE name = 'should_rollback'")?.count).toBe(0);
     db.close();
   });
@@ -423,14 +444,14 @@ describe("migration safety", () => {
   test("refuses future, gapped, and tampered migration metadata", async () => {
     const future = await pathFor("future.sqlite");
     let db = new ServerMetadataDatabase(future.path);
-    db.writeTransaction((tx) => tx.run("PRAGMA user_version = 3"));
+    db.writeTransaction((tx) => tx.run("PRAGMA user_version = 4"));
     db.close();
     expect(() => new ServerMetadataDatabase(future.path)).toThrow(expect.objectContaining({ code: "UNSUPPORTED_SCHEMA" }));
 
     const gapped = await pathFor("gapped.sqlite");
     db = new ServerMetadataDatabase(gapped.path);
     db.writeTransaction((tx) => tx.run(
-      "INSERT INTO metadata_migrations(version, name, checksum, applied_at_ms) VALUES (3, 'gap', ?, 0)", ["e".repeat(64)],
+      "INSERT INTO metadata_migrations(version, name, checksum, applied_at_ms) VALUES (4, 'gap', ?, 0)", ["e".repeat(64)],
     ));
     db.close();
     expect(() => new ServerMetadataDatabase(gapped.path)).toThrow(expect.objectContaining({ code: "CORRUPT_SCHEMA" }));
@@ -460,6 +481,12 @@ describe("migration safety", () => {
     v2.writeTransaction((tx) => tx.run("DROP TRIGGER account_verifier_transition"));
     v2.close();
     expect(() => new ServerMetadataDatabase(missingV2.path)).toThrow(expect.objectContaining({ code: "CORRUPT_SCHEMA" }));
+
+    const missingV3 = await pathFor("partial-v3.sqlite");
+    const v3 = new ServerMetadataDatabase(missingV3.path);
+    v3.writeTransaction((tx) => tx.run("DROP TRIGGER device_transition_valid"));
+    v3.close();
+    expect(() => new ServerMetadataDatabase(missingV3.path)).toThrow(expect.objectContaining({ code: "CORRUPT_SCHEMA" }));
   });
 
   test("fails closed after migrating initialized legacy v1 state without v2 identities", async () => {

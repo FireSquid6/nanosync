@@ -6,6 +6,8 @@ import {
   parseObjectFrameHeader, parsePresenceRequest,
   canonicalizeAdvanceHeadIdentity, canonicalizeRevisionEnvelope,
   decodeCanonicalBase64Url, parseBootstrapInitializeRequest, parseRecoveryWrap,
+  parseAuthToken, parseDeviceActionRequest, parseEnrollmentCreateRequest, parsePasswordAuthenticationRequest,
+  parsePasswordAuthenticationResponse, parseDeviceListResponse, parseRecoveryWrapResponse,
 } from "../src/index.ts";
 
 const vaultId = "123e4567-e89b-12d3-a456-426614174000";
@@ -107,6 +109,29 @@ describe("revision envelopes", () => {
 });
 
 describe("other protocol messages", () => {
+  test("strictly parses authentication messages and canonical tokens", () => {
+    const fingerprint = Buffer.alloc(32, 7).toString("base64url");
+    const input = { protocolVersion: 1, deviceId, displayName: "Laptop", platform: "linux", clientVersion: "1.0.0", fingerprint };
+    const parsed = parseEnrollmentCreateRequest(input); input.displayName = "mutated";
+    expect(parsed as unknown).toEqual({ protocolVersion: 1, deviceId, displayName: "Laptop", platform: "linux", clientVersion: "1.0.0", fingerprint });
+    expect(parsePasswordAuthenticationRequest({ protocolVersion: 1, password: "secret" }).password).toBe("secret");
+    expect(parseDeviceActionRequest({ protocolVersion: 1 })).toEqual({ protocolVersion: 1 });
+    expect(parseAuthToken(Buffer.alloc(32, 1).toString("base64url"))).toHaveLength(43);
+    for (const invalid of [
+      { ...input, extra: true }, Object.create(input), { ...input, displayName: "bad\nname" }, { ...input, platform: "x".repeat(33) },
+      { ...input, fingerprint: fingerprint + "=" }, { ...input, fingerprint: Buffer.alloc(31).toString("base64url") },
+    ]) expect(() => parseEnrollmentCreateRequest(invalid)).toThrow(ProtocolValidationError);
+    expect(() => parsePasswordAuthenticationRequest({ protocolVersion: 1, password: "x".repeat(1025) })).toThrow(ProtocolValidationError);
+    expect(() => parseDeviceActionRequest({ protocolVersion: 1, deviceId })).toThrow(ProtocolValidationError);
+    for (const token of ["", "A".repeat(42), "A".repeat(43) + "=", "+" + "A".repeat(42)]) expect(() => parseAuthToken(token)).toThrow(ProtocolValidationError);
+    const token = Buffer.alloc(32, 9).toString("base64url");
+    expect(parsePasswordAuthenticationResponse({ protocolVersion: 1, status: "authenticated", sessionToken: token, expiresAtMs: 1 })).toEqual({ protocolVersion: 1, status: "authenticated", sessionToken: token, expiresAtMs: 1 });
+    const device = { deviceId, displayName: "Laptop", platform: "linux", clientVersion: "1", fingerprint, role: "administrator", state: "active", createdAtMs: 1, approvedAtMs: 2, revokedAtMs: null };
+    const listInput = { protocolVersion: 1, devices: [device] }; const list = parseDeviceListResponse(listInput); device.displayName = "changed";
+    expect(list.devices[0]?.displayName).toBe("Laptop");
+    expect(() => parseDeviceListResponse({ ...listInput, extra: true })).toThrow(ProtocolValidationError);
+    expect(parseRecoveryWrapResponse({ protocolVersion: 1, recoveryWrap: { version: 1, algorithm: "A256GCM", nonce: Buffer.alloc(12).toString("base64url"), ciphertext: Buffer.alloc(48).toString("base64url") } }).recoveryWrap.version).toBe(1);
+  });
   test("strictly parses canonical recovery wraps and isolates bootstrap input", () => {
     const wrap = { version: 1, algorithm: "A256GCM", nonce: Buffer.alloc(12, 1).toString("base64url"), ciphertext: Buffer.alloc(48, 2).toString("base64url") };
     const input = { protocolVersion: 1, principalId: parent, vaultId, initialDeviceId: deviceId, password: "correct horse", recoveryWrap: wrap };

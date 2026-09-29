@@ -45,7 +45,8 @@ These choices are part of persistent format `1` and protocol `1`. Details and li
 | Filesystems | Regular files/directories plus owner-executable bit only. Reject links, special files, and unsafe names visibly; no xattr, ACL, or sparse fidelity. |
 | Retention/GC | UTC buckets select newest accepted revision; 24-hour grace plus recheck; current/conflicts/transfers/needed merge bases remain protected. |
 | Network/admin | Loopback by default, acknowledged non-loopback exposure and external TLS; CLI-only administration uses the same server API. |
-| Bootstrap | Explicit injected authorization; staged singleton initialization, normal streaming object validation, then atomic zero-parent genesis publication and permanent sealing. No credential is issued in this stage. |
+| Bootstrap | Explicit injected authorization; staged singleton initialization, normal streaming object validation, then atomic zero-parent genesis publication and permanent sealing. No credential is issued in this stage. The external authorization boundary remains available only as an independent handoff for one-time initial-device activation; bootstrap mutations stay sealed. |
+| Authentication operations | Password sessions last 10 minutes before enrollment and 24 hours after binding. At most 64 live sessions, 32 pending enrollments, and 64 devices are retained. Five failures in 15 minutes lock login for 15 minutes. Argon2 work is limited to two concurrent jobs. Audit events are retained 365 days. Self-revocation and last-active-administrator revocation are forbidden. |
 
 ### Immutable encrypted objects
 
@@ -68,10 +69,6 @@ Use a transactional embedded database for account, device, revision, upload, ret
 Keep protocol, cryptography, merge logic, and local metadata semantics in a reusable core with Linux and Android adapters.
 
 ## Remaining implementation decisions
-
-### Authentication operations
-
-Set concrete password-login and enrollment rate limits, backoff/lockout behavior, administrative account-recovery procedure, session lifetime, and audit retention. These operational values are not cryptographic format parameters and were not frozen by this slice.
 
 ### Trusted proxies and transport deployment
 

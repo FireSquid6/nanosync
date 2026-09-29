@@ -1,7 +1,7 @@
 import { PROTOCOL_VERSION, type ProtocolErrorCode } from "@nanosync/protocol";
 
 export class ApiError extends Error {
-  constructor(readonly status: number, readonly code: ProtocolErrorCode, message: string, readonly headers?: ConstructorParameters<typeof Headers>[0]) {
+  constructor(readonly status: number, readonly code: ProtocolErrorCode, message: string, readonly headers?: ConstructorParameters<typeof Headers>[0], readonly retryAfterSeconds?: number) {
     super(message); this.name = "ApiError";
   }
 }
@@ -15,7 +15,9 @@ export function json(value: unknown, status = 200, headers?: ConstructorParamete
 export function errorResponse(error: unknown): Response {
   const known = error instanceof ApiError ? error : new ApiError(500, "INTERNAL", "Request failed");
   const message = safePublicMessage(known.message) ? known.message : "Request failed";
-  return json({ protocolVersion: PROTOCOL_VERSION, code: known.code, message }, known.status, known.headers);
+  const body: Record<string, unknown> = { protocolVersion: PROTOCOL_VERSION, code: known.code, message };
+  if (known.retryAfterSeconds !== undefined) body.retryAfterSeconds = known.retryAfterSeconds;
+  return json(body, known.status, known.headers);
 }
 
 export async function readStrictJson(request: Request, maximumBytes: number): Promise<unknown> {

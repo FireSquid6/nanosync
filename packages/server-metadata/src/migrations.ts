@@ -250,6 +250,102 @@ WHEN NOT (OLD.lifecycle = 'initialized' AND NEW.lifecycle = 'sealed' AND OLD.sea
 BEGIN SELECT RAISE(ABORT, 'bootstrap transition is invalid'); END;
 `;
 
+const V3_SQL = `
+CREATE TABLE devices (
+  device_id TEXT PRIMARY KEY CHECK(${uuid("device_id")}),
+  principal_id TEXT NOT NULL,
+  vault_id TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('pending', 'active', 'revoked')),
+  role TEXT NOT NULL CHECK(role IN ('administrator', 'member')),
+  credential_digest BLOB UNIQUE CHECK(credential_digest IS NULL OR (typeof(credential_digest) = 'blob' AND length(credential_digest) = 32)),
+  display_name TEXT CHECK(display_name IS NULL OR (length(CAST(display_name AS BLOB)) BETWEEN 1 AND 128 AND display_name NOT GLOB '*[' || char(0) || '-' || char(31) || char(127) || ']*')),
+  platform TEXT CHECK(platform IS NULL OR (length(CAST(platform AS BLOB)) BETWEEN 1 AND 32 AND platform NOT GLOB '*[' || char(0) || '-' || char(31) || char(127) || ']*')),
+  client_version TEXT CHECK(client_version IS NULL OR (length(CAST(client_version AS BLOB)) BETWEEN 1 AND 64 AND client_version NOT GLOB '*[' || char(0) || '-' || char(31) || char(127) || ']*')),
+  fingerprint BLOB CHECK(fingerprint IS NULL OR (typeof(fingerprint) = 'blob' AND length(fingerprint) = 32)),
+  is_initial INTEGER NOT NULL DEFAULT 0 CHECK(is_initial IN (0, 1)),
+  created_at_ms INTEGER NOT NULL CHECK(${timestamp("created_at_ms")}),
+  approved_at_ms INTEGER CHECK(approved_at_ms IS NULL OR (${timestamp("approved_at_ms")})),
+  revoked_at_ms INTEGER CHECK(revoked_at_ms IS NULL OR (${timestamp("revoked_at_ms")})),
+  CHECK((state = 'pending' AND credential_digest IS NULL AND approved_at_ms IS NULL AND revoked_at_ms IS NULL)
+     OR (state = 'active' AND credential_digest IS NOT NULL AND approved_at_ms IS NOT NULL AND revoked_at_ms IS NULL)
+     OR (state = 'revoked' AND credential_digest IS NULL AND approved_at_ms IS NOT NULL AND revoked_at_ms IS NOT NULL)),
+  CHECK(is_initial = 0 OR role = 'administrator'),
+  FOREIGN KEY (principal_id) REFERENCES accounts(principal_id),
+  FOREIGN KEY (vault_id) REFERENCES server_state(vault_id)
+) STRICT;
+CREATE UNIQUE INDEX one_initial_device ON devices(is_initial) WHERE is_initial = 1;
+
+CREATE TABLE password_sessions (
+  token_digest BLOB PRIMARY KEY CHECK(typeof(token_digest) = 'blob' AND length(token_digest) = 32),
+  principal_id TEXT NOT NULL,
+  device_id TEXT,
+  created_at_ms INTEGER NOT NULL CHECK(${timestamp("created_at_ms")}),
+  expires_at_ms INTEGER NOT NULL CHECK(${timestamp("expires_at_ms")} AND expires_at_ms > created_at_ms),
+  FOREIGN KEY (principal_id) REFERENCES accounts(principal_id),
+  FOREIGN KEY (device_id) REFERENCES devices(device_id)
+) STRICT;
+CREATE INDEX password_sessions_expiry ON password_sessions(expires_at_ms);
+CREATE TRIGGER password_session_digest_immutable BEFORE UPDATE OF token_digest, principal_id, created_at_ms ON password_sessions
+BEGIN SELECT RAISE(ABORT, 'password session identity is immutable'); END;
+
+CREATE TABLE enrollment_requests (
+  token_digest BLOB PRIMARY KEY CHECK(typeof(token_digest) = 'blob' AND length(token_digest) = 32),
+  device_id TEXT NOT NULL UNIQUE CHECK(${uuid("device_id")}),
+  display_name TEXT NOT NULL CHECK(length(CAST(display_name AS BLOB)) BETWEEN 1 AND 128),
+  platform TEXT NOT NULL CHECK(length(CAST(platform AS BLOB)) BETWEEN 1 AND 32),
+  client_version TEXT NOT NULL CHECK(length(CAST(client_version AS BLOB)) BETWEEN 1 AND 64),
+  fingerprint BLOB NOT NULL CHECK(typeof(fingerprint) = 'blob' AND length(fingerprint) = 32),
+  state TEXT NOT NULL CHECK(state IN ('pending', 'approved', 'denied')),
+  created_at_ms INTEGER NOT NULL CHECK(${timestamp("created_at_ms")}),
+  expires_at_ms INTEGER NOT NULL CHECK(${timestamp("expires_at_ms")} AND expires_at_ms > created_at_ms),
+  decided_at_ms INTEGER CHECK(decided_at_ms IS NULL OR (${timestamp("decided_at_ms")})),
+  CHECK((state = 'pending' AND decided_at_ms IS NULL) OR (state <> 'pending' AND decided_at_ms IS NOT NULL)),
+  FOREIGN KEY (token_digest) REFERENCES password_sessions(token_digest) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX enrollment_requests_state_created ON enrollment_requests(state, created_at_ms);
+
+CREATE TABLE authentication_rate_limit (
+  singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+  window_started_at_ms INTEGER NOT NULL CHECK(${timestamp("window_started_at_ms")}),
+  failed_attempts INTEGER NOT NULL CHECK(failed_attempts BETWEEN 0 AND 5),
+  locked_until_ms INTEGER NOT NULL CHECK(${timestamp("locked_until_ms")})
+) STRICT;
+
+CREATE TABLE audit_events (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_type TEXT NOT NULL CHECK(length(event_type) BETWEEN 1 AND 64 AND event_type NOT GLOB '*[^a-z0-9._-]*'),
+  actor_device_id TEXT CHECK(actor_device_id IS NULL OR (${uuid("actor_device_id")})),
+  subject_device_id TEXT CHECK(subject_device_id IS NULL OR (${uuid("subject_device_id")})),
+  occurred_at_ms INTEGER NOT NULL CHECK(${timestamp("occurred_at_ms")}),
+  details_json TEXT NOT NULL CHECK(length(CAST(details_json AS BLOB)) BETWEEN 2 AND 512 AND json_valid(details_json))
+) STRICT;
+CREATE INDEX audit_events_time ON audit_events(occurred_at_ms);
+CREATE TRIGGER audit_event_immutable BEFORE UPDATE ON audit_events
+BEGIN SELECT RAISE(ABORT, 'audit event is immutable'); END;
+
+CREATE TRIGGER device_identity_immutable BEFORE UPDATE OF device_id, principal_id, vault_id, is_initial, created_at_ms ON devices
+BEGIN SELECT RAISE(ABORT, 'device identity is immutable'); END;
+CREATE TRIGGER device_transition_valid BEFORE UPDATE ON devices
+WHEN NOT (
+  (OLD.state = 'pending' AND NEW.state = 'active' AND OLD.credential_digest IS NULL AND NEW.credential_digest IS NOT NULL)
+  OR (OLD.state = 'active' AND NEW.state = 'revoked' AND NEW.credential_digest IS NULL)
+  OR (OLD.state = 'revoked' AND OLD.role = 'member' AND OLD.is_initial = 0 AND NEW.state = 'active' AND OLD.credential_digest IS NULL AND NEW.credential_digest IS NOT NULL)
+) OR NEW.role <> OLD.role
+BEGIN SELECT RAISE(ABORT, 'device transition is invalid'); END;
+CREATE TRIGGER device_last_admin BEFORE UPDATE OF state ON devices
+WHEN OLD.state = 'active' AND OLD.role = 'administrator' AND NEW.state = 'revoked'
+  AND NOT EXISTS (SELECT 1 FROM devices d WHERE d.device_id <> OLD.device_id AND d.state = 'active' AND d.role = 'administrator')
+BEGIN SELECT RAISE(ABORT, 'last active administrator cannot be revoked'); END;
+CREATE TRIGGER enrollment_identity_immutable BEFORE UPDATE OF token_digest, device_id, display_name, platform, client_version, fingerprint, created_at_ms, expires_at_ms ON enrollment_requests
+BEGIN SELECT RAISE(ABORT, 'enrollment identity is immutable'); END;
+CREATE TRIGGER enrollment_transition_valid BEFORE UPDATE OF state, decided_at_ms ON enrollment_requests
+WHEN NOT (OLD.state = 'pending' AND NEW.state IN ('approved', 'denied') AND NEW.decided_at_ms IS NOT NULL)
+BEGIN SELECT RAISE(ABORT, 'enrollment transition is invalid'); END;
+
+INSERT INTO devices(device_id, principal_id, vault_id, state, role, credential_digest, is_initial, created_at_ms)
+SELECT device_id, principal_id, vault_id, 'pending', 'administrator', NULL, 1, created_at_ms FROM initial_devices;
+`;
+
 export function migrationChecksum(version: number, name: string, sql: string): string {
   return createHash("sha256").update(`${version}\0${name}\0${sql}`, "utf8").digest("hex");
 }
@@ -261,4 +357,5 @@ function migration(version: number, name: string, sql: string): MetadataMigratio
 export const METADATA_MIGRATIONS: readonly MetadataMigration[] = Object.freeze([
   migration(1, "initial_metadata_schema", V1_SQL),
   migration(2, "account_and_bootstrap", V2_SQL),
+  migration(3, "device_authentication", V3_SQL),
 ]);

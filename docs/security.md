@@ -99,6 +99,12 @@ The bootstrap authorization dependency is operator-supplied secret/authenticatio
 
 After approval, each device receives a unique opaque 256-bit random bearer credential. The server stores only `HMAC-SHA-256(server_credential_pepper, credential)` and compares digests in constant time. Credentials do not expire in v1; re-enrollment rotates them. Revocation invalidates subsequent requests and active sessions. The pepper is stored outside the database with least-privilege permissions and must be included in protected, access-controlled backups; loss invalidates all credentials.
 
+The password endpoint creates a random 256-bit token and stores only its pepper-HMAC digest. A token initially authenticates only enrollment creation/status. Enrollment extends its lifetime from 10 minutes to 24 hours. Approval transactionally promotes that digest into the device credential field, so no plaintext credential is persisted or delivered in a second lossy response; the already client-held token becomes the credential. The designated bootstrap device is activated exactly once only when its password session also carries an independently verified operator bootstrap handoff. Password plus knowledge of the initial UUID is insufficient. The handoff uses a separate header, is checked by the injected bootstrap authorizer after sealing, and does not reopen any bootstrap mutation route. Exact retries by the already promoted session do not consume a second handoff. Responses containing a token or recovery wrap use `Cache-Control: no-store`.
+
+Password failures use one persistent account-global bucket because v1 has one account and does not trust remote or forwarding addresses. Five failures in 15 minutes lock login for 15 minutes, including across restart. This permits unauthenticated denial of service; proxy/IP buckets may only be added after explicit proxy trust configuration. At most two Argon2 jobs run concurrently. Public failures do not distinguish wrong passwords, missing account state, verifier corruption, or internal verification errors.
+
+Successful login rechecks both the active lockout and the exact verifier tuple inside the session-creation transaction after asynchronous Argon2 verification. Establishing lockout invalidates unbound password sessions. This prevents a delayed successful verifier job or stale pre-upgrade verifier from committing after concurrent security state changed.
+
 ## Device approval
 
 Approval should show enough information to identify the request:
@@ -125,6 +131,8 @@ Revocation does not:
 - Remove a vault key already copied to it.
 - Prevent decryption of encrypted objects already downloaded.
 - Rotate the vault key or re-encrypt history.
+
+V1 rejects self-revocation and any revocation that would remove the last active administrator. Revocation clears the server credential digest and enrollment session in one transaction.
 
 The UI must describe this as access revocation, not data erasure.
 

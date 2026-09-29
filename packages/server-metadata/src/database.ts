@@ -274,6 +274,11 @@ function verifyIntegrity(database: Database): void {
     const present = executeAll<{ name: string }>(database, "SELECT name FROM sqlite_schema WHERE (type = 'table' OR type = 'trigger') ORDER BY name", []).map((row) => row.name);
     if (required.some((name) => !present.includes(name))) throw new MetadataError("CORRUPT_SCHEMA", "Metadata schema is incomplete");
   }
+  if (pragmaNumber(database, "user_version") >= 3) {
+    const required = ["devices", "password_sessions", "enrollment_requests", "authentication_rate_limit", "audit_events", "one_initial_device", "password_sessions_expiry", "enrollment_requests_state_created", "audit_events_time", "device_identity_immutable", "device_transition_valid", "device_last_admin", "password_session_digest_immutable", "audit_event_immutable", "enrollment_identity_immutable", "enrollment_transition_valid"];
+    const present = executeAll<{ name: string }>(database, "SELECT name FROM sqlite_schema WHERE type IN ('table', 'index', 'trigger') ORDER BY name", []).map((row) => row.name);
+    if (required.some((name) => !present.includes(name))) throw new MetadataError("CORRUPT_SCHEMA", "Metadata schema is incomplete");
+  }
 }
 
 function validateSidecars(filename: string): void {
