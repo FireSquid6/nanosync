@@ -13,6 +13,16 @@ The shared engine owns:
 - Three-way merge and conflict rules.
 - History inspection and restore logic.
 
+### Bun local journal contract (initial adapter)
+
+`packages/client-local` implements the portable `sync-core` `ChunkJournal` with Bun SQLite and private chunk files. Construct `new ClientLocal(privateDirectory, vaultId, deviceId, maxCacheBytes)` once per daemon process. The directory must already be owner-only if it exists; database, WAL/SHM and cache files must be owner-only regular files without symlinks or hardlinks. The adapter creates its own subdirectory and files and refuses conflicting identities, schema changes, malformed migration ledgers, and failed SQLite integrity checks. No vault master, recovery secret, password, or bearer credential belongs in this database or in operation detail; the adapter currently accepts only empty operation detail.
+
+Scanner/merge/daemon callers use `upsertEntry`/`entry`/`entries`, `recordHead`/`head`, `enqueueOperation`/`enqueueTransfer`/`addConflict`, `listWork`/`transition`, and `suppress`/`consumeSuppression`. Stable entry IDs survive path changes; evicted files retain metadata. Record durable eviction intent before removing a file. Operations and transfers retain running state across restart; the daemon decides which running operations to retry and must scan ambiguous filesystem changes. Head sequences never decrease, and equal sequences must name the same revision; accepted/applied ordering is enforced. Rollback protection assumes the private local state itself has not been replaced by an older backup; hardware-backed monotonic counters are not yet provided.
+
+For publication, call `freezeProposal(request, encryptedManifestFrame)` **before** the first advance request. It saves the exact validated wire request (expected head, immutable envelope, idempotency key) and encrypted manifest frame in one FULL-synchronous transaction. On restart, `proposal()` retrieves those exact bytes and request; upload the manifest if needed and replay `HttpRemote.advance(proposal.request)` rather than calling `publish()` again. Keep the proposal for ambiguous responses and stale/missing-object resolution; `acceptProposal(sequence)` durably advances the accepted head and records the outcome together, and only an accepted proposal can be `clearProposal()`-ed. A new proposal cannot replace an unresolved one. This adapter does not yet integrate the publish workflow, perform merge/rebase, or persist every upload frame.
+
+`put` accepts one caller-validated plaintext chunk of exactly the reference length and writes it to a staged 0600 file, fsyncs, renames, fsyncs the directory, then indexes it transactionally; `get` returns only complete indexed private files. Reopen removes abandoned staging files, orphan/partial files and missing indexes; budget eviction is least-recently-inserted order. The adapter cannot authenticate a plaintext chunk ID without the vault key: callers **must** verify checksum, decrypt, and validate the keyed chunk ID before `put`, and `HttpRemote.downloadChunks` re-encrypts and compares references on `get`. Cache is opportunistic, never an authoritative copy of a user file. Android storage requires a distinct adapter, not Bun imports in `sync-core`.
+
 ## Linux client
 
 ### Local directory

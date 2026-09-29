@@ -11,6 +11,16 @@
         "typescript": "^5",
       },
     },
+    "packages/client-local": {
+      "name": "@nanosync/client-local",
+      "dependencies": {
+        "@nanosync/protocol": "workspace:*",
+        "@nanosync/sync-core": "workspace:*",
+      },
+      "peerDependencies": {
+        "typescript": "^5",
+      },
+    },
     "packages/protocol": {
       "name": "@nanosync/protocol",
       "peerDependencies": {
@@ -60,6 +70,8 @@
     "@emnapi/runtime": ["@emnapi/runtime@1.11.3", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-Xz4Tpyki7XyrpbUK1jR1AhdAdaXyhhY4lZ3neLodmhpuWfy2PAQN5B46sAiU4liOXGLkHypn/qU+jvfWSCYYLA=="],
 
     "@emnapi/wasi-threads": ["@emnapi/wasi-threads@1.2.3", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-ELEBe8PsLvvJ6QMr0zLt8ffvOHW/dc1m3CEzNMg7aJUv3bMaoDtw2TXyDAwkYBuroxxuHEwhRTLJSe5sya547g=="],
+
+    "@nanosync/client-local": ["@nanosync/client-local@workspace:packages/client-local"],
 
     "@nanosync/protocol": ["@nanosync/protocol@workspace:packages/protocol"],
 

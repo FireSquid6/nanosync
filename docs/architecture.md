@@ -176,6 +176,8 @@ Each device tracks:
 
 Local mutations are journaled before network publication. After a crash, the client can determine whether an operation needs to be scanned again, uploaded, published, or applied locally.
 
+The Bun-specific `@nanosync/client-local` adapter is the first concrete local journal. It lives outside portable `sync-core` and implements its `ChunkJournal` interface. SQLite metadata is private to one vault/device pair; it records independent monotonic observed/accepted/applied heads, stable entry identities and hydration state, pending operations/transfers/conflicts, watcher suppression, and one immutable encrypted publication proposal. Database writes use immediate transactions, WAL and `synchronous=FULL`; checksummed ordered migrations, schema/integrity checks and identity checks fail closed on reopen. The cache is bounded private plaintext chunk files rather than a large SQLite blob table. A subsequent daemon must serialize access to the directory and explicitly authenticate cached plaintext with the vault master key on read (as `HttpRemote.downloadChunks` does).
+
 ## Deployment boundary
 
 ```mermaid
