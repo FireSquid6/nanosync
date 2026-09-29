@@ -88,9 +88,9 @@ Determine:
 - Treatment of constantly changing files.
 - Revision grouping across several paths.
 
-### Conflict naming
+### Conflict naming and client-side merge
 
-Choose a deterministic, Linux-safe convention that includes enough information to identify the source device and time without causing repeated collisions.
+`sync-core` merges authenticated base/local/remote v1 manifests by stable ID. The remote head wins divergent content and destination ties; the losing file content gets a distinct deterministic UUID and conflict lineage. A directory destination tie is reported in the merge result (without cloning the subtree). A deletion wins over an unchanged entry; delete/edit keeps the tombstone and copies changed file content. Delete versus directory move or descendant change keeps the original tombstone and materializes a new conflict directory at the surviving destination with its complete surviving subtree and unchanged descendant IDs. Other deleted directories with surviving descendants get a conflict directory under the nearest live ancestor; pre-existing descendant tombstones are not discarded. Path collisions preserve both IDs by renaming the lower-priority live entry; tombstones take priority. Generated names include source device, UTC client display time, revision, and entry ID, truncate on Unicode code-point boundaries to the v1 255-byte limit, and try at most 32 suffixes. Client timestamps are untrusted labels, not an ordering authority. Unrepresentable trees and exhausted collisions fail visibly.
 
 ## Deferred design areas
 

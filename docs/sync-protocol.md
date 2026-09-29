@@ -165,6 +165,10 @@ flowchart TD
 
 Directory operations are merged by stable identity rather than only by path. A client must bound automatic retries and surface persistent contention instead of looping indefinitely.
 
+`mergeManifests(base, local, remote, { revisionId, creatingDeviceId, localCreatedAt, remoteCreatedAt })` in `sync-core` is the portable plaintext merge primitive. Inputs must be verified/decrypted by the caller first; it checks complete v1 trees, common vault and root identity, distinct revision IDs, and both branches naming the supplied base as a parent. It produces a new manifest with the supplied revision ID/device, two sorted parents (prepared stale local revision and fetched current remote head), and a separate explicit conflict report. New conflict-copy IDs are deterministic SHA-256-derived UUIDs scoped to the vault/base/branches/origin and checked against all input IDs. Existing chunk lists, lengths, digests, and executable flags are copied unchanged and the completed manifest is parsed and size-checked before return. The caller must construct/upload the new encrypted manifest and exact chunk reference set, MAC the revision envelope, publish with compare-and-swap against the fetched remote head, and verify the response. This primitive does not authenticate input ciphertext or perform publication.
+
+For repeated stale-head responses, fetch and authenticate the newer head, find/verify a valid common ancestor, merge again using the new head and a new prepared local revision, and bound publication attempts (recommended maximum three); surface persistent contention rather than silently choosing a version. Do not reuse a previous merge result as if it were based on a new head. An unsafe tree, missing identity without a deleted ancestor, invalid ancestry or namespace, exceeded name/manifest limit, or unresolved collision is a visible failure requiring user intervention.
+
 ## Conflict rules
 
 ### Modify versus modify
@@ -179,6 +183,7 @@ Directory operations are merged by stable identity rather than only by path. A c
 - Keep the tombstone for the original file ID.
 - Create the modified content as a conflict copy with a new ID.
 - Do not silently restore the deleted original path.
+- If a directory is deleted while the other branch moves/renames it or changes its descendants, retain its original tombstone and materialize a new conflict directory at the surviving destination. Retain that branch's entire subtree, including unchanged children, new children and prior tombstones, reparenting its direct children to the new directory without changing descendant IDs. Resolve any resulting name collision with the normal conflict-name policy; fail visibly if no valid reconstruction exists.
 
 ### Rename versus modify
 
