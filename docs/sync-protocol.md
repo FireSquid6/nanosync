@@ -31,7 +31,7 @@ FileObject {
 }
 ```
 
-The file object is included in or referenced by the encrypted manifest. The plaintext digest is client-visible only and is used for local validation and change detection.
+The file object is a record inside the encrypted manifest; no separate file-object reference exists. The plaintext digest is client-visible only and is used for local validation and change detection. The exact closed, canonical v1 JSON schema and bounds (including 50 GB files, 4 MiB manifest plaintext, and 20,000 references) are frozen in [formats.md](formats.md#encrypted-manifest-plaintext-v1).
 
 ### Tree entry
 
@@ -41,13 +41,13 @@ TreeEntry {
     parent_directory_id
     name
     kind
-    file_object_id?
-    tombstone?
+    ordered_chunk_ids_and_lengths?  // file only
+    deleted_kind?                   // tombstone only
     supported_metadata
 }
 ```
 
-Paths are derived from parent relationships and names. Stable IDs allow renames and moves to preserve history.
+Paths are derived from parent relationships and names. Stable IDs allow renames and moves to preserve history. The unique root has an empty name and null parent; every other entry has a directory parent. Live files include size, whole-file SHA-256, and executable hint; tombstones retain ID/location/former kind but no content. Conflict copies have new IDs and optional source entry/revision lineage. Unsupported special filesystem entries are rejected rather than serialized.
 
 ### Revision
 
@@ -66,7 +66,7 @@ Revision {
 }
 ```
 
-The sorted, unique visible reference array gives object ID, type, SHA-256 ciphertext checksum, ciphertext length, and object format for every object needed by the revision. The server verifies this list before publication and uses it for GC. A domain-separated revision MAC binds the exact canonical envelope/reference set for client verification without requiring an encrypted object to contain its own checksum. This exposes revision graph, object membership, type, size, equality, and reuse to the server while names and contents remain encrypted; see [formats.md](formats.md).
+The sorted, unique visible reference array gives object ID, type, SHA-256 ciphertext checksum, ciphertext length, and object format for every object needed by the revision. It contains exactly one manifest reference and one chunk reference per distinct live chunk ID, with no missing or extraneous IDs. The server verifies this list before publication and uses it for GC. A domain-separated revision MAC binds the exact canonical envelope/reference set for client verification without requiring an encrypted object to contain its own checksum. Readers verify this MAC **before** manifest decryption, then authenticate the manifest's vault/revision/parent/device binding and exact chunk-reference set. This exposes revision graph, object membership, type, size, equality, and reuse to the server while names and contents remain encrypted; see [formats.md](formats.md).
 
 ## Normal change flow
 
