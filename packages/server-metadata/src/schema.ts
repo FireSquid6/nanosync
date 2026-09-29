@@ -9,7 +9,7 @@ import type {
   PrincipalId,
 } from "@nanosync/protocol";
 
-export const METADATA_SCHEMA_VERSION = 3 as const;
+export const METADATA_SCHEMA_VERSION = 4 as const;
 export const MAX_SQLITE_TIMESTAMP_MS = 9_007_199_254_740_991;
 
 export type IntegrityStatus = "unchecked" | "verified" | "corrupt" | "missing";

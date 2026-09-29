@@ -93,6 +93,7 @@ Provide a continuous daemon and commands for:
 - Immutable objects must be completely written and checksum-verified before publication.
 - A revision cannot become head until all referenced objects exist.
 - The server periodically verifies stored ciphertext checksums.
+  The server runtime must start the bounded single-flight `PeriodicIntegrityScanner` on startup and stop it on shutdown, supply error reporting, and choose an interval/batch size; the Step 15 scheduler API alone does not start automatically. It never runs destructive GC.
 - The operator is responsible for backups.
 - Backup documentation must cover both the metadata database and object storage.
 

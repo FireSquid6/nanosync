@@ -24,6 +24,7 @@ export * from "./revision-service.ts";
 export * from "./bootstrap-service.ts";
 export * from "./password-hasher.ts";
 export * from "./auth-service.ts";
+export * from "./maintenance.ts";
 
 export interface RawAuthorizationContext { principalId: unknown; deviceId: unknown; vaultId: unknown; }
 export type Authorize = (request: Request) => Promise<RawAuthorizationContext>;

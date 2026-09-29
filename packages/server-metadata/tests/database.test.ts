@@ -80,13 +80,13 @@ describe("metadata initialization", () => {
       busyTimeoutMs: 5000,
       journalMode: "wal",
       synchronous: 2,
-      userVersion: 3,
+      userVersion: 4,
     });
     expect(db.all<{ version: number; name: string }>("SELECT version, name FROM metadata_migrations ORDER BY version")).toEqual([
-      { version: 1, name: "initial_metadata_schema" }, { version: 2, name: "account_and_bootstrap" }, { version: 3, name: "device_authentication" },
+      { version: 1, name: "initial_metadata_schema" }, { version: 2, name: "account_and_bootstrap" }, { version: 3, name: "device_authentication" }, { version: 4, name: "offline_gc_candidates" },
     ]);
     expect(db.all<{ name: string }>("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name").map((row) => row.name)).toEqual([
-      "accounts", "audit_events", "authentication_rate_limit", "bootstrap_state", "devices", "enrollment_requests", "idempotency_records", "initial_devices", "metadata_migrations", "object_catalog", "password_sessions", "recovery_wraps", "revision_objects", "revision_parents",
+      "accounts", "audit_events", "authentication_rate_limit", "bootstrap_state", "devices", "enrollment_requests", "gc_candidates", "idempotency_records", "initial_devices", "metadata_migrations", "object_catalog", "password_sessions", "recovery_wraps", "revision_objects", "revision_parents",
       "revisions", "server_state", "sqlite_sequence", "upload_sessions",
     ]);
     insertObject(db);
@@ -401,7 +401,7 @@ describe("migration safety", () => {
     expect(db.pragmas().userVersion).toBe(1);
     db.close();
     db = new ServerMetadataDatabase(path);
-    expect(db.pragmas().userVersion).toBe(3);
+    expect(db.pragmas().userVersion).toBe(4);
     expect(db.get<{ count: number }>("SELECT count(*) AS count FROM sqlite_schema WHERE name = 'bootstrap_state'")?.count).toBe(1);
     db.close();
   });
@@ -410,6 +410,7 @@ describe("migration safety", () => {
       "9aed4c9f2ee3577b1349c78c097f885fa7bb54ad35f25a00143977a113e5dbb7",
       "aad9dd2ec61e0d72a0dd5c20622da5ca519bf91d7db402c87db6bbbc28c728e5",
       "3493ba2effffbde6b897d69679385eab4214304cb50a66ff01978a18adbfea46",
+      "b8bee458a27f315ff32762f1058d43e5c29450a4ef1ead3015d3a69a38f3e849",
     ]);
     const { path } = await pathFor("v2.sqlite");
     const v2 = __unsafeOpenWithMigrationsForTests(path, METADATA_MIGRATIONS.slice(0, 2));
@@ -422,7 +423,7 @@ describe("migration safety", () => {
     });
     v2.close();
     const upgraded = new ServerMetadataDatabase(path);
-    expect(upgraded.pragmas().userVersion).toBe(3);
+    expect(upgraded.pragmas().userVersion).toBe(4);
     expect(upgraded.get<{ device_id: string; state: string; role: string; is_initial: number }>("SELECT device_id,state,role,is_initial FROM devices")).toEqual({ device_id: device, state: "pending", role: "administrator", is_initial: 1 });
     upgraded.close();
   });
@@ -430,13 +431,13 @@ describe("migration safety", () => {
     const { path } = await pathFor();
     new ServerMetadataDatabase(path).close();
     const sql = "CREATE TABLE should_rollback(value TEXT) STRICT; INSERT INTO table_that_does_not_exist VALUES (1);";
-    const failing: MetadataMigration = { version: 4, name: "injected_failure", sql, checksum: migrationChecksum(4, "injected_failure", sql) };
+    const failing: MetadataMigration = { version: 5, name: "injected_failure", sql, checksum: migrationChecksum(5, "injected_failure", sql) };
     expect(() => __unsafeOpenWithMigrationsForTests(path, [...METADATA_MIGRATIONS, failing])).toThrow(
       expect.objectContaining({ code: "MIGRATION_FAILURE" }),
     );
     const db = new ServerMetadataDatabase(path);
-    expect(db.pragmas().userVersion).toBe(3);
-    expect(db.get<{ count: number }>("SELECT count(*) AS count FROM metadata_migrations")?.count).toBe(3);
+    expect(db.pragmas().userVersion).toBe(4);
+    expect(db.get<{ count: number }>("SELECT count(*) AS count FROM metadata_migrations")?.count).toBe(4);
     expect(db.get<{ count: number }>("SELECT count(*) AS count FROM sqlite_schema WHERE name = 'should_rollback'")?.count).toBe(0);
     db.close();
   });
@@ -444,14 +445,14 @@ describe("migration safety", () => {
   test("refuses future, gapped, and tampered migration metadata", async () => {
     const future = await pathFor("future.sqlite");
     let db = new ServerMetadataDatabase(future.path);
-    db.writeTransaction((tx) => tx.run("PRAGMA user_version = 4"));
+    db.writeTransaction((tx) => tx.run("PRAGMA user_version = 5"));
     db.close();
     expect(() => new ServerMetadataDatabase(future.path)).toThrow(expect.objectContaining({ code: "UNSUPPORTED_SCHEMA" }));
 
     const gapped = await pathFor("gapped.sqlite");
     db = new ServerMetadataDatabase(gapped.path);
     db.writeTransaction((tx) => tx.run(
-      "INSERT INTO metadata_migrations(version, name, checksum, applied_at_ms) VALUES (4, 'gap', ?, 0)", ["e".repeat(64)],
+      "INSERT INTO metadata_migrations(version, name, checksum, applied_at_ms) VALUES (5, 'gap', ?, 0)", ["e".repeat(64)],
     ));
     db.close();
     expect(() => new ServerMetadataDatabase(gapped.path)).toThrow(expect.objectContaining({ code: "CORRUPT_SCHEMA" }));

@@ -279,6 +279,10 @@ function verifyIntegrity(database: Database): void {
     const present = executeAll<{ name: string }>(database, "SELECT name FROM sqlite_schema WHERE type IN ('table', 'index', 'trigger') ORDER BY name", []).map((row) => row.name);
     if (required.some((name) => !present.includes(name))) throw new MetadataError("CORRUPT_SCHEMA", "Metadata schema is incomplete");
   }
+  if (pragmaNumber(database, "user_version") >= 4) {
+    const present = executeAll<{ name: string }>(database, "SELECT name FROM sqlite_schema WHERE type IN ('table', 'index')", []).map((row) => row.name);
+    if (!present.includes("gc_candidates") || !present.includes("gc_candidates_marked")) throw new MetadataError("CORRUPT_SCHEMA", "Metadata schema is incomplete");
+  }
 }
 
 function validateSidecars(filename: string): void {

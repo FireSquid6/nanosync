@@ -202,3 +202,6 @@ The server should bind to loopback by default. Binding to a non-loopback interfa
 - A client must not apply a partially downloaded file over a valid local file.
 - A server crash cannot expose a revision whose referenced objects were not durable.
 - Garbage collection must prefer leaking storage over deleting possibly referenced data.
+# Maintenance boundary
+
+Migration 4 adds durable offline GC candidate marks; migrations 1–3 and their checksums are unchanged. Retention selection is a UTC dry run, not revision deletion: with no client merge-base ACK, all accepted/prepared revision ancestry and all their object references remain protected. Only verified unreferenced cataloged uploads can pass offline GC, after creation and candidate grace and repeat transactional reachability checks. The object store has no cross-process lease, so physical deletion is deliberately absent from HTTP and background jobs; operators must stop writers and hold exclusive access to metadata and objects. Integrity scans hash entire ciphertext frames with bounded memory; they do not decrypt vault contents.

@@ -346,6 +346,17 @@ INSERT INTO devices(device_id, principal_id, vault_id, state, role, credential_d
 SELECT device_id, principal_id, vault_id, 'pending', 'administrator', NULL, 1, created_at_ms FROM initial_devices;
 `;
 
+const V4_SQL = `
+CREATE TABLE gc_candidates (
+  vault_id TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  marked_at_ms INTEGER NOT NULL CHECK(${timestamp("marked_at_ms")}),
+  PRIMARY KEY (vault_id, object_id),
+  FOREIGN KEY (vault_id, object_id) REFERENCES object_catalog(vault_id, object_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX gc_candidates_marked ON gc_candidates(marked_at_ms);
+`;
+
 export function migrationChecksum(version: number, name: string, sql: string): string {
   return createHash("sha256").update(`${version}\0${name}\0${sql}`, "utf8").digest("hex");
 }
@@ -358,4 +369,5 @@ export const METADATA_MIGRATIONS: readonly MetadataMigration[] = Object.freeze([
   migration(1, "initial_metadata_schema", V1_SQL),
   migration(2, "account_and_bootstrap", V2_SQL),
   migration(3, "device_authentication", V3_SQL),
+  migration(4, "offline_gc_candidates", V4_SQL),
 ]);
