@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, chmodSync, rmSync, writeFileSync, readFileSync, symlinkSync, unlinkSync, existsSync, lstatSync } from "node:fs";
 import { randomUUID, randomBytes, createHash } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -25,6 +25,31 @@ test("CLI rejects unknown flags and missing args", async () => {
   expect(await main(["download"])).toBe(2);
   expect(await main(["resolve", "copy"])).toBe(2);
   expect(await main(["resolve", "copy", "--confirm-discard", "--confirm-discard"])).toBe(2);
+});
+
+test("Commander help and validation preserve structured errors across repeated main calls", async () => {
+  const stdout = spyOn(process.stdout, "write").mockImplementation(() => true);
+  const stderr = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    expect(await main(["server", "run", "--help"])).toBe(0);
+    expect(stdout.mock.calls.flat().join("")).toContain("--acknowledge-exposure");
+    expect(await main(["status", "--help"])).toBe(0);
+    expect(stdout.mock.calls.flat().join("")).toContain("--client-dir");
+    expect(await main(["help"])).toBe(0);
+    for (const args of [
+      ["status", "--unexpected"], ["status", "--json", "--json"],
+      ["--client-dir", "/unused", "status", "--client-dir", "/unused"],
+      ["admin", "scan", "--client-dir"], ["restore", "one", "two", "three"],
+      ["resolve", "copy", "--confirm-discard", "--confirm-discard"]
+    ]) {
+      expect(await main(args)).toBe(2);
+      expect(JSON.parse(String(stderr.mock.lastCall?.[0]))).toMatchObject({ state: "unknown", exitCode: 2 });
+    }
+    expect(await main(["--server-dir", directory(), "server", "init", "--json"])).toBe(0);
+    expect(await main(["server", "--server-dir", directory(), "init"])).toBe(0);
+    expect(await main(["resolve", "copy"])).toBe(2);
+    expect(String(stderr.mock.lastCall?.[0])).toContain("--confirm-discard");
+  } finally { stdout.mockRestore(); stderr.mockRestore(); }
 });
 
 test("CLI maps typed local daemon failures to stable process codes", async () => {

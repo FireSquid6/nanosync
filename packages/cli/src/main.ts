@@ -2,121 +2,146 @@
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
+import { Command, CommanderError, Option } from "commander";
 import { daemonCommand, exitCode, failureState, startDaemon, type SyncState } from "@nanosync/linux-daemon";
 import { parseDeviceId } from "@nanosync/protocol";
 import { api, bootstrap, credentials, joinVault, readPassword } from "./client.ts";
 import { privateDirectory, secureCreate, secureRead } from "./security.ts";
 import { runServer } from "./server.ts";
 
-const HELP = `nanosync [--client-dir DIR] COMMAND [arguments]
-  daemon --sync-dir DIR           Run the single-owner Linux sync daemon
-  status [--json]                 Query local daemon
-  sync | pause | resume           Control local daemon
-  history [PATH]                  Authenticated revision history
-  restore REVISION [PATH]         Restore a historical tree or file as a new revision
-  resolve PATH --confirm-discard   Tombstone this named file conflict copy (history retains bytes)
-  evict PATH | download PATH      Change local hydration without publishing
-  conflicts | doctor             Inspect local daemon
-  devices                         List devices (administrator)
-  approve DEVICE_ID | revoke DEVICE_ID   Administrator actions
-  admin storage | retention-dry-run | gc-dry-run | scan | diagnostics   Aggregate administrator reports (scan: next 100 objects)
-  bootstrap --url URL --proof-file FILE  First device (password from stdin, recovery to TTY)
-  enroll --url URL --device-id UUID    Request enrollment (password from stdin)
-  enroll --url URL --device-id UUID --recovery-file FILE  Finish approved enrollment
-  server init --server-dir DIR    Create private pepper and bootstrap proof
-  server run --server-dir DIR [--host HOST] [--port PORT] [--acknowledge-exposure]
-  help
-Secrets must never be passed as command-line values. See packages/cli/README.md.
-`;
-function options(args: string[], names: string[]): { flags: Record<string, string | boolean>; rest: string[] } {
-  const flags: Record<string, string | boolean> = {}, rest: string[] = [];
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i]!;
-    if (!arg.startsWith("--")) { rest.push(arg); continue; }
-    if (!names.includes(arg) || Object.hasOwn(flags, arg)) throw new Error(`unknown or duplicate flag: ${arg}`);
-    if (["--json", "--acknowledge-exposure", "--confirm-discard"].includes(arg)) flags[arg] = true;
-    else { const value = args[++i]; if (!value || value.startsWith("--")) throw new Error(`missing ${arg} value`); flags[arg] = value; }
-  }
-  return { flags, rest };
+type CliOptions = { clientDir?: string; syncDir?: string; serverDir?: string; url?: string; proofFile?: string;
+  deviceId?: string; recoveryFile?: string; host?: string; port?: string; acknowledgeExposure?: boolean;
+  confirmDiscard?: boolean; json?: boolean };
+function required(value: string | undefined, label: string): string {
+  if (!value) throw new Error(`required ${label}`);
+  return value;
 }
-function required(value: string | boolean | undefined, label: string): string {
-  if (typeof value !== "string") throw new Error(`required ${label}`); return value;
-}
-function count(rest: string[], min: number, max = min) { if (rest.length < min || rest.length > max) throw new Error("invalid command arguments; see nanosync help"); }
 function output(value: unknown, json = false) { console.log(json || typeof value !== "string" ? JSON.stringify(value) : value); }
+
 export async function main(args = process.argv.slice(2)): Promise<number> {
   try {
-    if (args.length === 1 && (args[0] === "--help" || args[0] === "-h")) { process.stdout.write(HELP); return 0; }
-    const global = options(args, ["--client-dir", "--sync-dir", "--server-dir", "--url", "--proof-file", "--device-id", "--recovery-file", "--host", "--port", "--acknowledge-exposure", "--confirm-discard", "--json"]);
-    const [command, ...rest] = global.rest, flags = global.flags;
-    const directory = typeof flags["--client-dir"] === "string" ? flags["--client-dir"] : join(process.env.HOME ?? "", ".local/share/nanosync");
-    const url = flags["--url"] as string | undefined;
-    let result: unknown;
-    switch (command) {
-      case undefined: case "help": case "--help": count(rest, 0); process.stdout.write(HELP); return 0;
-      case "server": {
-        count(rest, 1);
-        const root = required(flags["--server-dir"], "--server-dir");
-        if (rest[0] === "init") {
-          const dir = privateDirectory(root);
-          secureCreate(join(dir, "pepper.hex"), randomBytes(32).toString("hex"));
-          secureCreate(join(dir, "bootstrap.hex"), randomBytes(32).toString("hex"));
-          result = { initialized: true, bootstrapProofFile: join(dir, "bootstrap.hex") }; break;
-        }
-        if (rest[0] !== "run") throw new Error("expected server init or server run");
-        const port = flags["--port"] === undefined ? undefined : Number(flags["--port"]);
-        const server = await runServer({ directory: root, host: flags["--host"] as string | undefined, port,
-          acknowledgeExposure: flags["--acknowledge-exposure"] === true });
-        console.error(`Server listening at ${server.url}`);
-        await new Promise<void>(resolveStop => {
-          process.once("SIGINT", resolveStop); process.once("SIGTERM", resolveStop);
+    const program = new Command().name("nanosync")
+      .description("Nanosync Linux CLI. Secrets must never be passed as command-line values. See packages/cli/README.md.")
+      .showHelpAfterError(false).exitOverride()
+      .configureOutput({ writeErr: () => {} });
+    const seen = new Set<string>();
+    function flags(command: Command, ...definitions: string[]): Command {
+      for (const definition of definitions) {
+        const option = new Option(definition);
+        if (command === program && !["--client-dir", "--json"].includes(option.long!)) option.hideHelp();
+        if (option.required) option.argParser(value => {
+          if (!value) throw new Error(`missing ${option.long} value`);
+          return value;
         });
-        await server.stop(); return 0;
+        command.addOption(option);
+        command.on(`option:${option.name()}`, () => {
+          if (seen.has(option.long!)) throw new Error(`unknown or duplicate flag: ${option.long}`);
+          seen.add(option.long!);
+        });
       }
-      case "bootstrap": count(rest, 0); result = await bootstrap(directory, required(url, "--url"), required(flags["--proof-file"], "--proof-file")); break;
-      case "enroll": {
-        count(rest, 0);
-        const server = required(url, "--url"), id = parseDeviceId(required(flags["--device-id"], "--device-id"));
-        const recovery = flags["--recovery-file"] ? secureRead(required(flags["--recovery-file"], "--recovery-file"), 128).toString("utf8").trim() : undefined;
-        result = await joinVault(directory, server, id, existsSync(join(directory, "enrollment.json")) ? undefined : readPassword(), recovery); break;
-      }
-      case "daemon": {
-        count(rest, 0);
-        const creds = credentials(directory);
-        const daemon = await startDaemon({ clientDirectory: directory, syncDirectory: required(flags["--sync-dir"], "--sync-dir"),
+      return command;
+    }
+    const common = ["--client-dir <dir>", "--json"];
+    flags(program, ...common, "--sync-dir <dir>", "--server-dir <dir>", "--url <url>", "--proof-file <file>",
+      "--device-id <uuid>", "--recovery-file <file>", "--host <host>", "--port <port>",
+      "--acknowledge-exposure", "--confirm-discard");
+    const opts = (command: Command): CliOptions => command.optsWithGlobals<CliOptions>();
+    const directory = (command: Command) => opts(command).clientDir ?? join(process.env.HOME ?? "", ".local/share/nanosync");
+    let result: unknown, code = 0;
+    const server = flags(program.command("server").description("Server provisioning and runtime"),
+      "--server-dir <dir>", "--host <host>", "--port <port>", "--acknowledge-exposure", ...common);
+    flags(server.command("init").description("Create private pepper and bootstrap proof"), "--server-dir <dir>", ...common)
+      .action((_options: CliOptions, command: Command) => {
+        const dir = privateDirectory(required(opts(command).serverDir, "--server-dir"));
+        secureCreate(join(dir, "pepper.hex"), randomBytes(32).toString("hex"));
+        secureCreate(join(dir, "bootstrap.hex"), randomBytes(32).toString("hex"));
+        result = { initialized: true, bootstrapProofFile: join(dir, "bootstrap.hex") };
+      });
+    flags(server.command("run").description("Run server until SIGINT or SIGTERM"), "--server-dir <dir>", "--host <host>", "--port <port>", "--acknowledge-exposure", ...common)
+      .action(async (_options: CliOptions, command: Command) => {
+        const config = opts(command);
+        const running = await runServer({ directory: required(config.serverDir, "--server-dir"), host: config.host,
+          port: config.port === undefined ? undefined : Number(config.port), acknowledgeExposure: config.acknowledgeExposure === true });
+        console.error(`Server listening at ${running.url}`);
+        await new Promise<void>(resolveStop => { process.once("SIGINT", resolveStop); process.once("SIGTERM", resolveStop); });
+        await running.stop();
+      });
+    flags(program.command("bootstrap").description("Initialize first device (password on stdin, recovery on TTY)"), "--url <url>", "--proof-file <file>", ...common)
+      .action(async (_options: CliOptions, command: Command) => {
+        const config = opts(command);
+        result = await bootstrap(directory(command), required(config.url, "--url"), required(config.proofFile, "--proof-file"));
+      });
+    flags(program.command("enroll").description("Request or finish enrollment (password on stdin for first request)"), "--url <url>", "--device-id <uuid>", "--recovery-file <file>", ...common)
+      .action(async (_options: CliOptions, command: Command) => {
+        const config = opts(command), dir = directory(command);
+        const url = required(config.url, "--url"), id = parseDeviceId(required(config.deviceId, "--device-id"));
+        const recovery = config.recoveryFile ? secureRead(config.recoveryFile, 128).toString("utf8").trim() : undefined;
+        result = await joinVault(dir, url, id, existsSync(join(dir, "enrollment.json")) ? undefined : readPassword(), recovery);
+        if ((result as { status?: string }).status === "pending") code = 3;
+      });
+    flags(program.command("daemon").description("Run the single-owner Linux sync daemon"), "--sync-dir <dir>", ...common)
+      .action(async (_options: CliOptions, command: Command) => {
+        const dir = directory(command), creds = credentials(dir);
+        const daemon = await startDaemon({ clientDirectory: dir, syncDirectory: required(opts(command).syncDir, "--sync-dir"),
           vaultId: creds.vaultId, deviceId: creds.deviceId, masterKey: Buffer.from(creds.masterKey, "hex"), baseUrl: creds.baseUrl, token: creds.token });
         console.error("Daemon started");
         await new Promise<void>(resolveStop => { process.once("SIGINT", resolveStop); process.once("SIGTERM", resolveStop); });
-        await daemon.stop(); return 0;
-      }
-      case "status": case "sync": case "pause": case "resume": case "conflicts": case "doctor":
-        count(rest, 0); result = await daemonCommand(directory, command); break;
-      case "history": count(rest, 0, 1); result = await daemonCommand(directory, "history", rest[0] ? { path: rest[0] } : {}); break;
-      case "restore": count(rest, 1, 2); result = await daemonCommand(directory, "restore", { revision: rest[0], ...(rest[1] === undefined ? {} : { path: rest[1] }) }); break;
-      case "resolve": count(rest, 1); if (flags["--confirm-discard"] !== true) throw new Error("resolve requires --confirm-discard; the named conflict copy will be removed from the live tree (retained in history)"); result = await daemonCommand(directory, "resolve", { path: rest[0] }); break;
-      case "devices": count(rest, 0); { const creds = credentials(directory); result = await api(creds.baseUrl, "/v1/admin/devices", {}, creds.token); break; }
-      case "admin": {
-        count(rest, 1);
-        const paths: Record<string, string> = { storage: "storage", "retention-dry-run": "retention/dry-run", "gc-dry-run": "gc/dry-run", scan: "integrity/scan", diagnostics: "diagnostics" };
-        const path = paths[rest[0]!];
-        if (!path) throw new Error("unknown admin report; see nanosync help");
-        const creds = credentials(directory);
-        result = await api(creds.baseUrl, `/v1/admin/${path}`, rest[0] === "scan" ? { method: "POST" } : {}, creds.token);
-        break;
-      }
-      case "approve": case "revoke": {
-        count(rest, 1); const id = parseDeviceId(rest[0]); const creds = credentials(directory);
-        result = await api(creds.baseUrl, command === "approve" ? `/v1/admin/enrollments/${id}/approve` : `/v1/admin/devices/${id}/revoke`,
-          { method: "POST", body: JSON.stringify({ protocolVersion: 1 }) }, creds.token); break;
-      }
-      case "evict": case "download": count(rest, 1); result = await daemonCommand(directory, command, { path: rest[0] }); break;
-      default: throw new Error(`unknown command: ${command}; see nanosync help`);
+        await daemon.stop();
+      });
+    for (const name of ["status", "sync", "pause", "resume", "conflicts", "doctor"] as const) {
+      flags(program.command(name).description(`${name} local daemon`), ...common)
+        .action(async (_options: CliOptions, command: Command) => {
+          result = await daemonCommand(directory(command), name);
+          if (name === "status") code = exitCode((result as { state: SyncState }).state);
+        });
     }
-    output(result, flags["--json"] === true);
-    if (command === "status") return exitCode((result as { state: SyncState }).state);
-    if (command === "enroll" && (result as { status?: string }).status === "pending") return 3;
-    return 0;
+    flags(program.command("history").description("Authenticated revision history").argument("[path]"), ...common)
+      .action(async (path: string | undefined, _options: CliOptions, command: Command) => {
+        result = await daemonCommand(directory(command), "history", path ? { path } : {});
+      });
+    flags(program.command("restore").description("Restore historical tree or file as a new revision").argument("<revision>").argument("[path]"), ...common)
+      .action(async (revision: string, path: string | undefined, _options: CliOptions, command: Command) => {
+        result = await daemonCommand(directory(command), "restore", { revision, ...(path === undefined ? {} : { path }) });
+      });
+    flags(program.command("resolve").description("Tombstone named conflict copy; bytes remain in history").argument("<path>"), "--confirm-discard", ...common)
+      .action(async (path: string, _options: CliOptions, command: Command) => {
+        if (!opts(command).confirmDiscard) throw new Error("resolve requires --confirm-discard; the named conflict copy will be removed from the live tree (retained in history)");
+        result = await daemonCommand(directory(command), "resolve", { path });
+      });
+    for (const name of ["evict", "download"] as const) {
+      flags(program.command(name).description(`${name} local file without publishing`).argument("<path>"), ...common)
+        .action(async (path: string, _options: CliOptions, command: Command) => {
+          result = await daemonCommand(directory(command), name, { path });
+        });
+    }
+    flags(program.command("devices").description("List devices (administrator)"), ...common)
+      .action(async (_options: CliOptions, command: Command) => {
+        const creds = credentials(directory(command)); result = await api(creds.baseUrl, "/v1/admin/devices", {}, creds.token);
+      });
+    for (const name of ["approve", "revoke"] as const) {
+      flags(program.command(name).description(`${name} device (administrator)`).argument("<device-id>"), ...common)
+        .action(async (deviceId: string, _options: CliOptions, command: Command) => {
+          const id = parseDeviceId(deviceId), creds = credentials(directory(command));
+          result = await api(creds.baseUrl, name === "approve" ? `/v1/admin/enrollments/${id}/approve` : `/v1/admin/devices/${id}/revoke`,
+            { method: "POST", body: JSON.stringify({ protocolVersion: 1 }) }, creds.token);
+        });
+    }
+    const admin = flags(program.command("admin").description("Aggregate administrator reports"), ...common);
+    for (const [name, path] of Object.entries({ storage: "storage", "retention-dry-run": "retention/dry-run",
+      "gc-dry-run": "gc/dry-run", scan: "integrity/scan", diagnostics: "diagnostics" })) {
+      flags(admin.command(name).description(`Administrator ${name} report`), ...common)
+        .action(async (_options: CliOptions, command: Command) => {
+          const creds = credentials(directory(command));
+          result = await api(creds.baseUrl, `/v1/admin/${path}`, name === "scan" ? { method: "POST" } : {}, creds.token);
+        });
+    }
+    if (!args.length) { program.outputHelp(); return 0; }
+    await program.parseAsync(args, { from: "user" });
+    if (result !== undefined) output(result, seen.has("--json"));
+    return code;
   } catch (error) {
+    if (error instanceof CommanderError && error.exitCode === 0 &&
+      (error.code === "commander.helpDisplayed" || error.code === "commander.help")) return 0;
     const message = error instanceof Error ? error.message : "command failed";
     const state = failureState(error), code = exitCode(state);
     console.error(JSON.stringify({ error: message, state, exitCode: code }));

@@ -10,6 +10,7 @@
     "@nanosync/linux-daemon": "workspace:*",
     "@nanosync/server-core": "workspace:*",
     "@nanosync/server-metadata": "workspace:*",
-    "@nanosync/server-object-storage": "workspace:*"
+    "@nanosync/server-object-storage": "workspace:*",
+    "commander": "^14.0.2"
   }
 }
