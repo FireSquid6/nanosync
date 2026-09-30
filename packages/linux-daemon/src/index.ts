@@ -44,21 +44,39 @@ export interface DaemonStatus {
 
 function privateDirectory(path: string) {
   const target = resolve(path);
-  if (!existsSync(target)) mkdirSync(target, { mode: 0o700 });
+  if (!existsSync(target)) {
+    mkdirSync(target, { mode: 0o700 });
+  }
   const st = lstatSync(target);
-  if (!st.isDirectory() || st.isSymbolicLink() || st.uid !== process.getuid!() || st.mode & 0o077 || realpathSync(target) !== target)
+  if (
+    !st.isDirectory() ||
+    st.isSymbolicLink() ||
+    st.uid !== process.getuid!() ||
+    st.mode & 0o077 ||
+    realpathSync(target) !== target
+  ) {
     throw new Error("unsafe client directory");
+  }
   return target;
 }
 function privateFile(path: string) {
   const st = lstatSync(path);
-  if (!st.isFile() || st.isSymbolicLink() || st.nlink !== 1 || st.uid !== process.getuid!() || st.mode & 0o177)
+  if (
+    !st.isFile() || st.isSymbolicLink() || st.nlink !== 1 ||
+    st.uid !== process.getuid!() || st.mode & 0o177
+  ) {
     throw new Error("unsafe private file");
+  }
 }
 function secret(path: string): string {
   if (!existsSync(path)) {
     const fd = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
-    try { writeFileSync(fd, randomBytes(32).toString("hex")); fsyncSync(fd); } finally { closeSync(fd); }
+    try {
+      writeFileSync(fd, randomBytes(32).toString("hex"));
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
   }
   privateFile(path);
   const value = readFileSync(path, "utf8");
@@ -68,9 +86,18 @@ function secret(path: string): string {
 function sameTree(a: ManifestV1, b: ManifestV1): boolean { return JSON.stringify(a.entries) === JSON.stringify(b.entries); }
 function refs(revision: RevisionEnvelope): VisibleObjectReference[] { return revision.references.filter(r => r.objectType === "chunk"); }
 function validIpcPath(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0 && value === value.normalize("NFC") && Buffer.byteLength(value) <= 512 &&
-    !value.startsWith("/") && value.split("/").every(part => part && part !== "." && part !== ".." && Buffer.byteLength(part) <= 255 &&
-      !/[\u0000-\u001f\u007f-\u009f\\:*?"<>|]/u.test(part) && !/[. ]$/u.test(part) &&
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value === value.normalize("NFC") &&
+    Buffer.byteLength(value) <= 512 &&
+    !value.startsWith("/") &&
+    value.split("/").every(part =>
+      part &&
+      part !== "." &&
+      part !== ".." &&
+      Buffer.byteLength(part) <= 255 &&
+      !/[\u0000-\u001f\u007f-\u009f\\:*?"<>|]/u.test(part) &&
+      !/[. ]$/u.test(part) &&
       !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(part));
 }
 
@@ -102,11 +129,13 @@ export class LinuxDaemon {
   private socketIdentity?: FileIdentity;
 
   private constructor(options: DaemonOptions) {
-    this.vault = parseVaultId(options.vaultId); this.device = parseDeviceId(options.deviceId);
+    this.vault = parseVaultId(options.vaultId);
+    this.device = parseDeviceId(options.deviceId);
     if (!(options.masterKey instanceof Uint8Array) || options.masterKey.length !== 32) throw new Error("invalid vault key");
     this.key = Uint8Array.from(options.masterKey);
     this.root = privateDirectory(options.clientDirectory);
-    this.socketPath = join(this.root, "daemon.sock"); this.credentialPath = join(this.root, "ipc.secret");
+    this.socketPath = join(this.root, "daemon.sock");
+    this.credentialPath = join(this.root, "ipc.secret");
     this.pollMs = options.pollMs ?? 5000;
     if (!Number.isSafeInteger(this.pollMs) || this.pollMs < 100 || this.pollMs > 3600_000) throw new Error("invalid poll interval");
     this.credential = secret(this.credentialPath);
@@ -114,9 +143,16 @@ export class LinuxDaemon {
     try {
       this.scanner = new LinuxScanner(options.syncDirectory, this.local, options.scan);
       this.watcher = new LinuxWatcher(this.scanner, options.scan);
-      this.remote = new HttpRemote({ baseUrl: options.baseUrl, token: options.token,
-        fetch: options.fetch ?? fetch, journal: this.local });
-    } catch (e) { this.local.close(); throw e; }
+      this.remote = new HttpRemote({
+        baseUrl: options.baseUrl,
+        token: options.token,
+        fetch: options.fetch ?? fetch,
+        journal: this.local,
+      });
+    } catch (e) {
+      this.local.close();
+      throw e;
+    }
   }
 
   static async start(options: DaemonOptions): Promise<LinuxDaemon> {
@@ -130,7 +166,11 @@ export class LinuxDaemon {
           // A failed connect is only a crash hint. The startup gate prevents another
           // local daemon from unlinking/rebinding concurrently during recovery.
           let alive = false;
-          try { const response = await fetch("http://localhost/status", { unix: daemon.socketPath, method: "POST" } as RequestInit & { unix: string });
+          try {
+            const response = await fetch("http://localhost/status", {
+              unix: daemon.socketPath,
+              method: "POST",
+            } as RequestInit & { unix: string });
             alive = !!response;
           } catch { /* stale socket */ }
           if (alive) throw new Error("another daemon owns this client directory");
@@ -140,13 +180,21 @@ export class LinuxDaemon {
         }
         daemon.server = Bun.serve({ unix: daemon.socketPath, fetch: request => daemon.handle(request) });
         const st = lstatSync(daemon.socketPath);
-        if (!st.isSocket() || st.uid !== process.getuid!()) throw new Error("unsafe IPC socket");
+        if (!st.isSocket() || st.uid !== process.getuid!()) {
+          throw new Error("unsafe IPC socket");
+        }
         daemon.socketIdentity = { dev: st.dev, ino: st.ino };
         chmodSync(daemon.socketPath, 0o600);
         const secured = lstatSync(daemon.socketPath);
-        if (!secured.isSocket() || secured.uid !== st.uid || secured.dev !== st.dev || secured.ino !== st.ino || secured.mode & 0o177)
+        if (
+          !secured.isSocket() || secured.uid !== st.uid || secured.dev !== st.dev ||
+          secured.ino !== st.ino || secured.mode & 0o177
+        ) {
           throw new Error("unsafe IPC socket");
-      } finally { release(); }
+        }
+      } finally {
+        release();
+      }
       // A linked download stage has nlink=2 and is intentionally rejected by
       // the normal scanner. Replay its durable intent before watcher inventory.
       await daemon.recoverHydration();
@@ -155,7 +203,9 @@ export class LinuxDaemon {
       daemon.timer = setInterval(() => {
         if (daemon.stopped || daemon.paused || daemon.active) return;
         if (Date.now() - lastPoll >= daemon.pollMs) {
-          lastPoll = Date.now(); daemon.watcher.notify(); void daemon.sync().catch(() => {});
+          lastPoll = Date.now();
+          daemon.watcher.notify();
+          void daemon.sync().catch(() => {});
         } else {
           try { if (daemon.watcher.ready()) void daemon.sync().catch(() => {}); }
           catch { void daemon.sync().catch(() => {}); }
@@ -163,12 +213,18 @@ export class LinuxDaemon {
       }, Math.min(daemon.pollMs, 250));
       void daemon.sync().catch(() => {});
       return daemon;
-    } catch (error) { await daemon.stop(); throw error; }
+    } catch (error) {
+      await daemon.stop();
+      throw error;
+    }
   }
 
   status(): DaemonStatus {
-    const observed = this.local.head("observed"), accepted = this.local.head("accepted"), applied = this.local.head("applied");
-    const pendingProposal = !!this.local.proposal(), pendingApplies = this.local.pendingApplies().length;
+    const observed = this.local.head("observed");
+    const accepted = this.local.head("accepted");
+    const applied = this.local.head("applied");
+    const pendingProposal = !!this.local.proposal();
+    const pendingApplies = this.local.pendingApplies().length;
     const pendingOperations = this.local.listWork("operations").filter(item => item.state !== "done").length;
     const files = this.local.entries().filter(item => item.kind === "file");
     // Metadata inventory is read-only. A changing or unsafe tree is never called synchronized.
@@ -179,9 +235,10 @@ export class LinuxDaemon {
     const pendingHydration = this.local.pendingHydration();
     const pendingTransfers = this.local.listWork("transfers").filter(item => item.state !== "done");
     const remoteOnlyFiles = files.filter(item => item.hydration === "evicted").length;
-    const headsConverged = this.phase === "idle" && !pendingProposal && !pendingApplies && !pendingOperations && !!applied.revisionId &&
-        observed.revisionId === accepted.revisionId && accepted.revisionId === applied.revisionId &&
-        observed.sequence === accepted.sequence && accepted.sequence === applied.sequence;
+    const headsConverged = this.phase === "idle" && !pendingProposal && !pendingApplies &&
+      !pendingOperations && !!applied.revisionId &&
+      observed.revisionId === accepted.revisionId && accepted.revisionId === applied.revisionId &&
+      observed.sequence === accepted.sequence && accepted.sequence === applied.sequence;
     const state: SyncState = this.failure && this.failure !== "unknown" ? this.failure :
       openConflicts ? "conflict_blocked" : this.paused ? "paused" :
       this.phase === "syncing" ? pendingApplies || pendingHydration?.direction === "download" || pendingTransfers.some(item => item.direction === "download")
@@ -190,21 +247,38 @@ export class LinuxDaemon {
       !diskCurrent || pendingProposal || pendingOperations || pendingApplies || pendingHydration || pendingTransfers.length ||
         observed.revisionId !== applied.revisionId || accepted.revisionId !== applied.revisionId ? "local_changes_pending" :
       remoteOnlyFiles ? "remote_only" : headsConverged && diskCurrent ? "synchronized" : "unknown";
-    return { state, exitCode: exitCode(state), phase: this.phase, paused: this.paused, error: this.error, observed,
+    return {
+      state,
+      exitCode: exitCode(state),
+      phase: this.phase,
+      paused: this.paused,
+      error: this.error,
+      observed,
       headsConverged,
       accepted, applied, pendingProposal, pendingApplies, pendingOperations,
       remoteOnlyFiles,
-      downloadedFiles: files.filter(item => item.hydration === "downloaded").length, lastSuccessMs: this.lastSuccessMs };
+      downloadedFiles: files.filter(item => item.hydration === "downloaded").length,
+      lastSuccessMs: this.lastSuccessMs,
+    };
   }
   private diskSignature(): string {
     return JSON.stringify(this.scanner.snapshot().map(item => [item.path, item.kind, item.stat.dev, item.stat.ino,
       item.stat.size, item.stat.mtimeMs, item.stat.ctimeMs, item.stat.mode]));
   }
-  pause() { this.paused = true; this.phase = "paused"; }
-  resume() { this.paused = false; this.watcher.notify(0); this.phase = "idle"; void this.sync().catch(() => {}); }
+  pause() {
+    this.paused = true;
+    this.phase = "paused";
+  }
+  resume() {
+    this.paused = false;
+    this.watcher.notify(0);
+    this.phase = "idle";
+    void this.sync().catch(() => {});
+  }
   private tracked<T>(action: () => Promise<T>): Promise<T> {
     if (this.mutation) return Promise.reject(new Error("local mutation already in progress"));
-    const work = action(); this.mutation = work;
+    const work = action();
+    this.mutation = work;
     void work.finally(() => { if (this.mutation === work) this.mutation = undefined; }).catch(() => {});
     return work;
   }
@@ -218,9 +292,15 @@ export class LinuxDaemon {
     this.restoring = true;
     try {
       await this.sync(true);
-      const applied = this.local.head("applied"), remoteHead = await this.remote.head();
-      if (!applied.revisionId || applied.revisionId !== remoteHead.revisionId || applied.sequence !== remoteHead.sequence ||
-          this.local.head("accepted").revisionId !== applied.revisionId || this.local.proposal()) throw new Error("accepted revision changed; synchronize before hydration");
+      const applied = this.local.head("applied");
+      const remoteHead = await this.remote.head();
+      if (
+        !applied.revisionId || applied.revisionId !== remoteHead.revisionId ||
+        applied.sequence !== remoteHead.sequence ||
+        this.local.head("accepted").revisionId !== applied.revisionId || this.local.proposal()
+      ) {
+        throw new Error("accepted revision changed; synchronize before hydration");
+      }
       const verified = await this.verified(applied.revisionId);
       const result = await hydrateFile(this.scanner.root, this.local, this.remote, verified.manifest, verified.revision, this.key, direction, path);
       this.diskBaseline = this.diskSignature();
@@ -236,19 +316,41 @@ export class LinuxDaemon {
     // Settle local edits first; restoration must branch from the accepted head.
     await this.sync(true);
     const head = await this.remote.head();
-    if (!head.revisionId || head.revisionId !== this.local.head("applied").revisionId ||
-        head.sequence !== this.local.head("applied").sequence || this.local.proposal()) throw new Error("head changed during restore");
-    const current = await this.verified(head.revisionId), old = await this.verified(revisionId);
+    if (
+      !head.revisionId || head.revisionId !== this.local.head("applied").revisionId ||
+      head.sequence !== this.local.head("applied").sequence || this.local.proposal()
+    ) {
+      throw new Error("head changed during restore");
+    }
+    const current = await this.verified(head.revisionId);
+    const old = await this.verified(revisionId);
     if (current.sequence !== head.sequence) throw new Error("restore head sequence mismatch");
     if (old.sequence === null) throw new Error("revision was not accepted");
     const planned = path === undefined
       ? planRestoreRevision(current.manifest, old.manifest, randomUUID(), this.device, head.revisionId)
       : planRestore(current.manifest, old.manifest, path, randomUUID(), this.device, head.revisionId);
-    const references = await restoreReferences(planned, [{ manifest: current.manifest, envelope: current.revision }, { manifest: old.manifest, envelope: old.revision }], this.key);
-    const result = await this.remote.publish(planned, references, [], this.key, head.revisionId, new Date().toISOString(),
-      (request, frame) => this.local.freezeRestoreProposal(request, frame, head.revisionId!));
+    const references = await restoreReferences(
+      planned,
+      [
+        { manifest: current.manifest, envelope: current.revision },
+        { manifest: old.manifest, envelope: old.revision },
+      ],
+      this.key,
+    );
+    const result = await this.remote.publish(
+      planned,
+      references,
+      [],
+      this.key,
+      head.revisionId,
+      new Date().toISOString(),
+      (request, frame) => this.local.freezeRestoreProposal(request, frame, head.revisionId!),
+    );
     if (result.status === "accepted" || result.status === "alreadyAccepted") this.local.acceptProposal(result.sequence);
-    else { if (result.status === "staleHead") this.local.discardStaleRestore(); throw new Error(`restore not accepted: ${result.status}`); }
+    else {
+      if (result.status === "staleHead") this.local.discardStaleRestore();
+      throw new Error(`restore not accepted: ${result.status}`);
+    }
     // Apply the accepted historical file through the durable apply journal.
     // The generic proposal replay assumes its local branch differs from its base,
     // which is not true for a server-side restore of unchanged local files.
@@ -264,10 +366,15 @@ export class LinuxDaemon {
       // This pass publishes any pending local edits (including edits to either
       // side of the conflict) before the explicitly requested discard.
       await this.sync(true);
-      const applied = this.local.head("applied"), head = await this.remote.head();
-      if (!head.revisionId || head.revisionId !== applied.revisionId || head.sequence !== applied.sequence ||
-          this.local.head("accepted").revisionId !== head.revisionId || this.local.proposal())
+      const applied = this.local.head("applied");
+      const head = await this.remote.head();
+      if (
+        !head.revisionId || head.revisionId !== applied.revisionId ||
+        head.sequence !== applied.sequence ||
+        this.local.head("accepted").revisionId !== head.revisionId || this.local.proposal()
+      ) {
         throw new Error("head changed during conflict resolution; synchronize and retry");
+      }
       const current = await this.verified(head.revisionId);
       if (current.sequence !== head.sequence) throw new Error("conflict resolution head sequence mismatch");
       const entry = manifestPaths(current.manifest).get(path);
@@ -308,15 +415,18 @@ export class LinuxDaemon {
           if (!current.isSocket() || current.uid !== process.getuid!()) throw new Error("unsafe replacement daemon socket");
           backup = join(this.root, `.daemon-socket-${randomUUID()}`);
           linkSync(this.socketPath, backup);
-          const confirmed = lstatSync(this.socketPath), saved = lstatSync(backup);
+          const confirmed = lstatSync(this.socketPath);
+          const saved = lstatSync(backup);
           if (confirmed.dev !== saved.dev || confirmed.ino !== saved.ino) throw new Error("replacement socket changed during stop");
         }
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-      this.server.stop(true); this.server = undefined;
+      this.server.stop(true);
+      this.server = undefined;
       if (backup) {
         try {
           if (!existsSync(this.socketPath)) linkSync(backup, this.socketPath);
-          const current = lstatSync(this.socketPath), saved = lstatSync(backup);
+          const current = lstatSync(this.socketPath);
+          const saved = lstatSync(backup);
           if (current.dev !== saved.dev || current.ino !== saved.ino)
             throw new Error(`replacement socket moved during stop; preserved at ${backup}`);
           unlinkSync(backup);
@@ -331,7 +441,8 @@ export class LinuxDaemon {
             st.dev === this.socketIdentity.dev && st.ino === this.socketIdentity.ino) unlinkSync(this.socketPath);
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     }
-    this.local.close(); this.key.fill(0);
+    this.local.close();
+    this.key.fill(0);
   }
   /** Serialized manual/automatic pass. A failed pass remains visibly failed until a later successful pass. */
   sync(internalRestore = false): Promise<void> {
@@ -348,11 +459,15 @@ export class LinuxDaemon {
         this.local.recordHead("observed", await this.remote.head());
         this.watcher.refresh();
         this.diskBaseline = this.diskSignature();
-        this.error = null; this.failure = null; this.phase = this.paused ? "paused" : "idle"; this.lastSuccessMs = Date.now();
+        this.error = null;
+        this.failure = null;
+        this.phase = this.paused ? "paused" : "idle";
+        this.lastSuccessMs = Date.now();
       } catch (error) {
         this.error = error instanceof Error ? error.message : "synchronization failed";
         this.failure = failureState(error);
-        this.phase = this.paused ? "paused" : "error"; throw error;
+        this.phase = this.paused ? "paused" : "error";
+        throw error;
       }
     })();
     this.active = work;
@@ -390,7 +505,10 @@ export class LinuxDaemon {
     const proposal = this.local.proposal();
     if (!proposal) return { stale: null, local: null };
     if (proposal.state === "accepted") return { stale: null, local: await this.verified(proposal.request.proposedRevision.revisionId) };
-    const request = proposal.request, reference = request.proposedRevision.references.find(r => r.objectId === request.proposedRevision.encryptedManifestObjectId)!;
+    const request = proposal.request;
+    const reference = request.proposedRevision.references.find(
+      r => r.objectId === request.proposedRevision.encryptedManifestObjectId,
+    )!;
     // Authenticate frozen bytes before retrying. No regenerated nonce or request key.
     if (!await verifyReferenceSetMac(request.proposedRevision, this.key)) throw new Error("frozen revision MAC mismatch");
     const manifest = await decryptManifest(proposal.encryptedManifestFrame, request.proposedRevision, this.key);

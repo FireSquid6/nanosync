@@ -28,14 +28,20 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
     function flags(command: Command, ...definitions: string[]): Command {
       for (const definition of definitions) {
         const option = new Option(definition);
-        if (command === program && !["--client-dir", "--json"].includes(option.long!)) option.hideHelp();
-        if (option.required) option.argParser(value => {
-          if (!value) throw new Error(`missing ${option.long} value`);
-          return value;
-        });
+        if (command === program && !["--client-dir", "--json"].includes(option.long!)) {
+          option.hideHelp();
+        }
+        if (option.required) {
+          option.argParser(value => {
+            if (!value) throw new Error(`missing ${option.long} value`);
+            return value;
+          });
+        }
         command.addOption(option);
         command.on(`option:${option.name()}`, () => {
-          if (seen.has(option.long!)) throw new Error(`unknown or duplicate flag: ${option.long}`);
+          if (seen.has(option.long!)) {
+            throw new Error(`unknown or duplicate flag: ${option.long}`);
+          }
           seen.add(option.long!);
         });
       }
@@ -48,30 +54,54 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
     const opts = (command: Command): CliOptions => command.optsWithGlobals<CliOptions>();
     const directory = (command: Command) => opts(command).clientDir ?? join(process.env.HOME ?? "", ".local/share/nanosync");
     let result: unknown, code = 0;
-    const server = flags(program.command("server").description("Server provisioning and runtime"),
+    const server = flags(
+      program.command("server").description("Server provisioning and runtime"),
       "--server-dir <dir>", "--host <host>", "--port <port>", "--acknowledge-exposure", ...common);
-    flags(server.command("init").description("Create private pepper and bootstrap proof"), "--server-dir <dir>", ...common)
+    flags(
+      server.command("init").description("Create private pepper and bootstrap proof"),
+      "--server-dir <dir>",
+      ...common,
+    )
       .action((_options: CliOptions, command: Command) => {
         const dir = privateDirectory(required(opts(command).serverDir, "--server-dir"));
         secureCreate(join(dir, "pepper.hex"), randomBytes(32).toString("hex"));
         secureCreate(join(dir, "bootstrap.hex"), randomBytes(32).toString("hex"));
-        result = { initialized: true, bootstrapProofFile: join(dir, "bootstrap.hex") };
+        result = {
+          initialized: true,
+          bootstrapProofFile: join(dir, "bootstrap.hex"),
+        };
       });
-    flags(server.command("run").description("Run server until SIGINT or SIGTERM"), "--server-dir <dir>", "--host <host>", "--port <port>", "--acknowledge-exposure", ...common)
+    flags(
+      server.command("run").description("Run server until SIGINT or SIGTERM"),
+      "--server-dir <dir>", "--host <host>", "--port <port>", "--acknowledge-exposure", ...common,
+    )
       .action(async (_options: CliOptions, command: Command) => {
         const config = opts(command);
-        const running = await runServer({ directory: required(config.serverDir, "--server-dir"), host: config.host,
-          port: config.port === undefined ? undefined : Number(config.port), acknowledgeExposure: config.acknowledgeExposure === true });
+        const running = await runServer({
+          directory: required(config.serverDir, "--server-dir"),
+          host: config.host,
+          port: config.port === undefined ? undefined : Number(config.port),
+          acknowledgeExposure: config.acknowledgeExposure === true,
+        });
         console.error(`Server listening at ${running.url}`);
-        await new Promise<void>(resolveStop => { process.once("SIGINT", resolveStop); process.once("SIGTERM", resolveStop); });
+        await new Promise<void>(resolveStop => {
+          process.once("SIGINT", resolveStop);
+          process.once("SIGTERM", resolveStop);
+        });
         await running.stop();
       });
-    flags(program.command("bootstrap").description("Initialize first device (password on stdin, recovery on TTY)"), "--url <url>", "--proof-file <file>", ...common)
+    flags(
+      program.command("bootstrap").description("Initialize first device (password on stdin, recovery on TTY)"),
+      "--url <url>", "--proof-file <file>", ...common,
+    )
       .action(async (_options: CliOptions, command: Command) => {
         const config = opts(command);
         result = await bootstrap(directory(command), required(config.url, "--url"), required(config.proofFile, "--proof-file"));
       });
-    flags(program.command("enroll").description("Request or finish enrollment (password on stdin for first request)"), "--url <url>", "--device-id <uuid>", "--recovery-file <file>", ...common)
+    flags(
+      program.command("enroll").description("Request or finish enrollment (password on stdin for first request)"),
+      "--url <url>", "--device-id <uuid>", "--recovery-file <file>", ...common,
+    )
       .action(async (_options: CliOptions, command: Command) => {
         const config = opts(command), dir = directory(command);
         const url = required(config.url, "--url"), id = parseDeviceId(required(config.deviceId, "--device-id"));
@@ -79,13 +109,28 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
         result = await joinVault(dir, url, id, existsSync(join(dir, "enrollment.json")) ? undefined : readPassword(), recovery);
         if ((result as { status?: string }).status === "pending") code = 3;
       });
-    flags(program.command("daemon").description("Run the single-owner Linux sync daemon"), "--sync-dir <dir>", ...common)
+    flags(
+      program.command("daemon").description("Run the single-owner Linux sync daemon"),
+      "--sync-dir <dir>",
+      ...common,
+    )
       .action(async (_options: CliOptions, command: Command) => {
-        const dir = directory(command), creds = credentials(dir);
-        const daemon = await startDaemon({ clientDirectory: dir, syncDirectory: required(opts(command).syncDir, "--sync-dir"),
-          vaultId: creds.vaultId, deviceId: creds.deviceId, masterKey: Buffer.from(creds.masterKey, "hex"), baseUrl: creds.baseUrl, token: creds.token });
+        const dir = directory(command);
+        const creds = credentials(dir);
+        const daemon = await startDaemon({
+          clientDirectory: dir,
+          syncDirectory: required(opts(command).syncDir, "--sync-dir"),
+          vaultId: creds.vaultId,
+          deviceId: creds.deviceId,
+          masterKey: Buffer.from(creds.masterKey, "hex"),
+          baseUrl: creds.baseUrl,
+          token: creds.token,
+        });
         console.error("Daemon started");
-        await new Promise<void>(resolveStop => { process.once("SIGINT", resolveStop); process.once("SIGTERM", resolveStop); });
+        await new Promise<void>(resolveStop => {
+          process.once("SIGINT", resolveStop);
+          process.once("SIGTERM", resolveStop);
+        });
         await daemon.stop();
       });
     for (const name of ["status", "sync", "pause", "resume", "conflicts", "doctor"] as const) {
@@ -99,13 +144,21 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
       .action(async (path: string | undefined, _options: CliOptions, command: Command) => {
         result = await daemonCommand(directory(command), "history", path ? { path } : {});
       });
-    flags(program.command("restore").description("Restore historical tree or file as a new revision").argument("<revision>").argument("[path]"), ...common)
+    flags(
+      program.command("restore")
+        .description("Restore historical tree or file as a new revision")
+        .argument("<revision>")
+        .argument("[path]"),
+      ...common,
+    )
       .action(async (revision: string, path: string | undefined, _options: CliOptions, command: Command) => {
         result = await daemonCommand(directory(command), "restore", { revision, ...(path === undefined ? {} : { path }) });
       });
     flags(program.command("resolve").description("Tombstone named conflict copy; bytes remain in history").argument("<path>"), "--confirm-discard", ...common)
       .action(async (path: string, _options: CliOptions, command: Command) => {
-        if (!opts(command).confirmDiscard) throw new Error("resolve requires --confirm-discard; the named conflict copy will be removed from the live tree (retained in history)");
+        if (!opts(command).confirmDiscard) {
+          throw new Error("resolve requires --confirm-discard; the named conflict copy will be removed from the live tree (retained in history)");
+        }
         result = await daemonCommand(directory(command), "resolve", { path });
       });
     for (const name of ["evict", "download"] as const) {
@@ -122,13 +175,24 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
       flags(program.command(name).description(`${name} device (administrator)`).argument("<device-id>"), ...common)
         .action(async (deviceId: string, _options: CliOptions, command: Command) => {
           const id = parseDeviceId(deviceId), creds = credentials(directory(command));
-          result = await api(creds.baseUrl, name === "approve" ? `/v1/admin/enrollments/${id}/approve` : `/v1/admin/devices/${id}/revoke`,
-            { method: "POST", body: JSON.stringify({ protocolVersion: 1 }) }, creds.token);
+          result = await api(
+            creds.baseUrl,
+            name === "approve"
+              ? `/v1/admin/enrollments/${id}/approve`
+              : `/v1/admin/devices/${id}/revoke`,
+            { method: "POST", body: JSON.stringify({ protocolVersion: 1 }) },
+            creds.token,
+          );
         });
     }
     const admin = flags(program.command("admin").description("Aggregate administrator reports"), ...common);
-    for (const [name, path] of Object.entries({ storage: "storage", "retention-dry-run": "retention/dry-run",
-      "gc-dry-run": "gc/dry-run", scan: "integrity/scan", diagnostics: "diagnostics" })) {
+    for (const [name, path] of Object.entries({
+      storage: "storage",
+      "retention-dry-run": "retention/dry-run",
+      "gc-dry-run": "gc/dry-run",
+      scan: "integrity/scan",
+      diagnostics: "diagnostics",
+    })) {
       flags(admin.command(name).description(`Administrator ${name} report`), ...common)
         .action(async (_options: CliOptions, command: Command) => {
           const creds = credentials(directory(command));

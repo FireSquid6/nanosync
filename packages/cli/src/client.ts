@@ -12,9 +12,17 @@ import { privateDirectory, secureCreate, secureInstall, secureRead, syncPrivateD
 export interface ClientCredentials { baseUrl: string; vaultId: string; deviceId: string; token: string; masterKey: string }
 export function credentials(directory: string): ClientCredentials {
   const value = JSON.parse(secureRead(join(privateDirectory(directory), "client.json")).toString("utf8")) as ClientCredentials;
-  if (typeof value.baseUrl !== "string" || !/^https?:\/\//.test(value.baseUrl) || new URL(value.baseUrl).username || new URL(value.baseUrl).password ||
-    new URL(value.baseUrl).search || new URL(value.baseUrl).hash || typeof value.masterKey !== "string" || !/^[0-9a-f]{64}$/.test(value.masterKey)) throw new Error("invalid client credentials");
-  parseVaultId(value.vaultId); parseDeviceId(value.deviceId); parseAuthToken(value.token);
+  if (
+    typeof value.baseUrl !== "string" || !/^https?:\/\//.test(value.baseUrl) ||
+    new URL(value.baseUrl).username || new URL(value.baseUrl).password ||
+    new URL(value.baseUrl).search || new URL(value.baseUrl).hash ||
+    typeof value.masterKey !== "string" || !/^[0-9a-f]{64}$/.test(value.masterKey)
+  ) {
+    throw new Error("invalid client credentials");
+  }
+  parseVaultId(value.vaultId);
+  parseDeviceId(value.deviceId);
+  parseAuthToken(value.token);
   return value;
 }
 export function saveCredentials(directory: string, value: ClientCredentials): void {
@@ -22,16 +30,27 @@ export function saveCredentials(directory: string, value: ClientCredentials): vo
 }
 export function baseUrl(url: string): string {
   const parsed = new URL(url);
-  if (!/^(http:|https:)$/.test(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error("invalid server URL");
-  if (parsed.protocol !== "https:" && !["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname))
+  if (
+    !/^(http:|https:)$/.test(parsed.protocol) || parsed.username || parsed.password ||
+    parsed.search || parsed.hash
+  ) {
+    throw new Error("invalid server URL");
+  }
+  if (
+    parsed.protocol !== "https:" &&
+    !["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname)
+  ) {
     throw new Error("HTTP is permitted only for loopback; use HTTPS for remote servers");
+  }
   return parsed.href.replace(/\/$/, "");
 }
 export async function api(url: string, path: string, init: RequestInit = {}, token?: string, bootstrapProof?: string): Promise<any> {
   const headers = new Headers(init.headers);
   if (token) headers.set("authorization", `Bearer ${token}`);
   if (bootstrapProof) headers.set("x-nanosync-bootstrap-authorization", bootstrapProof);
-  if (init.body && !headers.has("content-type") && !(init.body instanceof Uint8Array)) headers.set("content-type", "application/json");
+  if (init.body && !headers.has("content-type") && !(init.body instanceof Uint8Array)) {
+    headers.set("content-type", "application/json");
+  }
   const response = await fetch(`${baseUrl(url)}${path}`, { ...init, headers });
   const result = await response.json() as Record<string, any>;
   if (!response.ok) throw new RemoteError(response.status, String(result.code ?? "ERROR"), `server ${response.status}: ${String(result.code ?? "ERROR")}`);
@@ -44,11 +63,16 @@ export async function secretPrompt(label: string): Promise<string> {
     if (spawnSync("stty", ["-echo"], { stdio: [fd, fd, fd] }).status !== 0) throw new Error("cannot disable terminal echo");
     const tty = createInterface({ input: createReadStream("/dev/tty"), output: createWriteStream("/dev/tty"), terminal: false });
     try { return await tty.question(`${label}: `); }
-    finally { tty.close(); spawnSync("stty", ["echo"], { stdio: [fd, fd, fd] }); writeSync(fd, "\n"); }
+    finally {
+      tty.close();
+      spawnSync("stty", ["echo"], { stdio: [fd, fd, fd] });
+      writeSync(fd, "\n");
+    }
   } finally { closeSync(fd); }
 }
 export function readPassword(): string {
-  const buffer = Buffer.alloc(1026); let length = 0;
+  const buffer = Buffer.alloc(1026);
+  let length = 0;
   while (length < buffer.length) {
     const count = readSync(0, buffer, length, buffer.length - length, null);
     if (!count) break;
@@ -83,25 +107,41 @@ async function verifiedCheckpoint(directory: string, url: string): Promise<Boots
   decodeCanonicalBase64Url(checkpoint.fingerprint, 32); parseRecoveryWrap(checkpoint.recoveryWrap);
   const master = Buffer.from(checkpoint.masterKey, "hex");
   const envelope = parsePersistedRevisionEnvelope(checkpoint.genesisRevision), frame = Buffer.from(checkpoint.frame, "base64url");
-  if (frame.toString("base64url") !== checkpoint.frame || envelope.vaultId !== checkpoint.vaultId || envelope.creatingDeviceId !== checkpoint.deviceId ||
-      envelope.parents.length || envelope.references.length !== 1 || !await verifyReferenceSetMac(envelope, master)) throw new Error("invalid bootstrap genesis checkpoint");
+  if (
+    frame.toString("base64url") !== checkpoint.frame || envelope.vaultId !== checkpoint.vaultId ||
+    envelope.creatingDeviceId !== checkpoint.deviceId || envelope.parents.length ||
+    envelope.references.length !== 1 || !await verifyReferenceSetMac(envelope, master)
+  ) {
+    throw new Error("invalid bootstrap genesis checkpoint");
+  }
   const manifest = await decryptManifest(frame, envelope, master);
-  if (manifest.revisionId !== envelope.revisionId || manifest.entries.length !== 1 || manifest.entries[0]?.kind !== "directory" ||
-      manifest.entries[0]?.parentId !== null || manifest.vaultId !== checkpoint.vaultId) throw new Error("invalid bootstrap manifest checkpoint");
+  if (
+    manifest.revisionId !== envelope.revisionId || manifest.entries.length !== 1 ||
+    manifest.entries[0]?.kind !== "directory" || manifest.entries[0]?.parentId !== null ||
+    manifest.vaultId !== checkpoint.vaultId
+  ) {
+    throw new Error("invalid bootstrap manifest checkpoint");
+  }
   return { ...checkpoint, genesisRevision: envelope };
 }
 /** Confirmation is called only when no durable checkpoint exists. The CLI passes a TTY-only callback. */
 export async function bootstrapWorkflow(directory: string, url: string, proofFile: string, password: string,
   confirmRecovery: (display: string) => Promise<void>): Promise<{ vaultId: string; deviceId: string }> {
-  const root = privateDirectory(directory), canonicalUrl = baseUrl(url), checkpointPath = join(root, "bootstrap.checkpoint");
+  const root = privateDirectory(directory);
+  const canonicalUrl = baseUrl(url);
+  const checkpointPath = join(root, "bootstrap.checkpoint");
   if (existsSync(join(root, "enrollment.json"))) throw new Error("another enrollment owns this directory");
   const proof = secureRead(proofFile, 64).toString("utf8");
   if (!/^[0-9a-f]{64}$/.test(proof)) throw new Error("invalid bootstrap proof file");
   let checkpoint: BootstrapCheckpoint;
   if (existsSync(checkpointPath)) checkpoint = await verifiedCheckpoint(root, canonicalUrl);
   else {
-    if (existsSync(join(root, "client.json"))) throw new Error("client directory already contains credentials");
-    if ((await api(canonicalUrl, "/v1/bootstrap/status")).status !== "uninitialized") throw new Error("server already initialized; cannot invent a new vault");
+    if (existsSync(join(root, "client.json"))) {
+      throw new Error("client directory already contains credentials");
+    }
+    if ((await api(canonicalUrl, "/v1/bootstrap/status")).status !== "uninitialized") {
+      throw new Error("server already initialized; cannot invent a new vault");
+    }
     const vaultId = randomUUID(), principalId = randomUUID(), deviceId = randomUUID(), revisionId = randomUUID();
     const master = generateVaultMasterKey(), recovery = generateRecoverySecret();
     try {
@@ -109,14 +149,33 @@ export async function bootstrapWorkflow(directory: string, url: string, proofFil
       const manifest: ManifestV1 = { version: 1, vaultId, revisionId, parents: [], creatingDeviceId: deviceId,
         entries: [{ id: randomUUID(), parentId: null, name: "", kind: "directory" }] };
       const encrypted = await encryptManifest(manifest, master);
-      const unsigned: RevisionEnvelope = { protocolVersion: 1, revisionFormatVersion: 1, vaultId: parseVaultId(vaultId), revisionId: parseRevisionId(revisionId),
-        parents: [], creatingDeviceId: parseDeviceId(deviceId), createdAt: new Date().toISOString(), encryptedManifestObjectId: encrypted.reference.objectId,
-        references: [encrypted.reference], referenceSetMac: parseReferenceSetMac("0".repeat(64)) };
+      const unsigned: RevisionEnvelope = {
+        protocolVersion: 1,
+        revisionFormatVersion: 1,
+        vaultId: parseVaultId(vaultId),
+        revisionId: parseRevisionId(revisionId),
+        parents: [],
+        creatingDeviceId: parseDeviceId(deviceId),
+        createdAt: new Date().toISOString(),
+        encryptedManifestObjectId: encrypted.reference.objectId,
+        references: [encrypted.reference],
+        referenceSetMac: parseReferenceSetMac("0".repeat(64)),
+      };
       const genesisRevision = parsePersistedRevisionEnvelope({ ...unsigned, referenceSetMac: await referenceSetMac(unsigned, master) });
       await confirmRecovery(await displayRecoverySecret(recovery));
-      checkpoint = { version: 1, url: canonicalUrl, principalId, vaultId, deviceId, masterKey: Buffer.from(master).toString("hex"),
-        recoveryWrap, genesisRevision, frame: Buffer.from(encrypted.frame).toString("base64url"),
-        uploadKey: randomBytes(32).toString("hex"), fingerprint: fingerprint() };
+      checkpoint = {
+        version: 1,
+        url: canonicalUrl,
+        principalId,
+        vaultId,
+        deviceId,
+        masterKey: Buffer.from(master).toString("hex"),
+        recoveryWrap,
+        genesisRevision,
+        frame: Buffer.from(encrypted.frame).toString("base64url"),
+        uploadKey: randomBytes(32).toString("hex"),
+        fingerprint: fingerprint(),
+      };
       // This fsync includes the directory entry; no server mutation precedes it.
       secureCreate(checkpointPath, JSON.stringify(checkpoint));
     } finally { master.fill(0); recovery.fill(0); }
@@ -125,15 +184,28 @@ export async function bootstrapWorkflow(directory: string, url: string, proofFil
   const credentialPath = join(root, "client.json"), sessionPath = join(root, "bootstrap.session");
   if (existsSync(credentialPath)) {
     const saved = credentials(root);
-    if (saved.baseUrl !== canonicalUrl || saved.vaultId !== result.vaultId || saved.deviceId !== result.deviceId || saved.masterKey !== checkpoint.masterKey)
+    if (
+      saved.baseUrl !== canonicalUrl || saved.vaultId !== result.vaultId ||
+      saved.deviceId !== result.deviceId || saved.masterKey !== checkpoint.masterKey
+    ) {
       throw new Error("client credential differs from bootstrap checkpoint");
-    if (existsSync(sessionPath) && saved.token !== parseAuthToken(secureRead(sessionPath, 128).toString("utf8")))
+    }
+    if (
+      existsSync(sessionPath) &&
+      saved.token !== parseAuthToken(secureRead(sessionPath, 128).toString("utf8"))
+    ) {
       throw new Error("client credential differs from bootstrap session");
+    }
     if (existsSync(`${credentialPath}.stage`)) {
-      if (secureRead(`${credentialPath}.stage`).toString("utf8") !== JSON.stringify(saved)) throw new Error("unexpected credential stage");
+      if (secureRead(`${credentialPath}.stage`).toString("utf8") !== JSON.stringify(saved)) {
+        throw new Error("unexpected credential stage");
+      }
       unlinkSync(`${credentialPath}.stage`); syncPrivateDirectory(root);
     }
-    if (existsSync(sessionPath)) { secureRead(sessionPath, 128); unlinkSync(sessionPath); }
+    if (existsSync(sessionPath)) {
+      secureRead(sessionPath, 128);
+      unlinkSync(sessionPath);
+    }
     unlinkSync(checkpointPath); syncPrivateDirectory(root);
     return result;
   }
@@ -149,10 +221,18 @@ export async function bootstrapWorkflow(directory: string, url: string, proofFil
   } else if (status !== "initializedWithoutHead" && status !== "sealed") throw new Error("unexpected bootstrap lifecycle");
   if (status !== "sealed") {
     const frame = Buffer.from(checkpoint.frame, "base64url"), reference = checkpoint.genesisRevision.references[0]!;
-    const upload = await fetch(`${canonicalUrl}/v1/bootstrap/objects/manifest/${reference.objectId}`, { method: "PUT", headers: {
-      "x-nanosync-bootstrap-authorization": proof, "content-length": String(frame.length), "x-nanosync-protocol-version": "1",
-      "x-nanosync-object-format-version": "1", "x-nanosync-ciphertext-sha256": createHash("sha256").update(frame).digest("hex"), "idempotency-key": checkpoint.uploadKey
-    }, body: frame });
+    const upload = await fetch(`${canonicalUrl}/v1/bootstrap/objects/manifest/${reference.objectId}`, {
+      method: "PUT",
+      headers: {
+        "x-nanosync-bootstrap-authorization": proof,
+        "content-length": String(frame.length),
+        "x-nanosync-protocol-version": "1",
+        "x-nanosync-object-format-version": "1",
+        "x-nanosync-ciphertext-sha256": createHash("sha256").update(frame).digest("hex"),
+        "idempotency-key": checkpoint.uploadKey,
+      },
+      body: frame,
+    });
     if (!upload.ok) throw new Error(`bootstrap object upload failed (${upload.status}); checkpoint retained`);
     await api(canonicalUrl, "/v1/bootstrap/complete", { method: "POST", body: JSON.stringify({ protocolVersion: 1,
       vaultId: checkpoint.vaultId, genesisRevision: checkpoint.genesisRevision }) }, undefined, proof);
