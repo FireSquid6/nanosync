@@ -183,6 +183,7 @@ export class LinuxScanner {
       const id = assigned.get(file.path)!, parentPath = file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : "";
       const entry: ManifestEntry = { id, parentId: file.path ? assigned.get(parentPath)! : null,
         name: file.path ? file.path.slice(parentPath ? parentPath.length + 1 : 0) : "", kind: file.kind };
+      if (old.get(id)?.conflict) entry.conflict = old.get(id)!.conflict;
       if (file.kind === "file") {
         Object.assign(entry, { ...fileResults.get(file.path)!, executable: !!(file.stat.mode & 0o100) });
         planned.set(file.path, file);

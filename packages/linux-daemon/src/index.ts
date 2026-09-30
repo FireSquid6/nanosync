@@ -3,7 +3,7 @@ import { constants, chmodSync, closeSync, existsSync, fsyncSync, linkSync, lstat
 import { join, resolve } from "node:path";
 import { ClientLocal } from "@nanosync/client-local";
 import { applyNewFiles, hydrateFile, LinuxScanner, LinuxWatcher, type ScanOptions, type ScanPlan } from "@nanosync/linux-client";
-import { decryptManifest, HttpRemote, mergeManifests, verifyReferenceSetMac, history, planRestore, restoreReferences, type ManifestV1, type RemoteOptions } from "@nanosync/sync-core";
+import { decryptManifest, HttpRemote, manifestPaths, mergeManifests, parseManifest, verifyReferenceSetMac, history, planRestore, planRestoreRevision, restoreReferences, type ManifestV1, type RemoteOptions } from "@nanosync/sync-core";
 import { parseDeviceId, parseRevisionId, parseVaultId, type RevisionEnvelope, type VisibleObjectReference } from "@nanosync/protocol";
 import { acquireStartupGate, type FileIdentity } from "./startup-lock.ts";
 
@@ -97,7 +97,7 @@ export class LinuxDaemon {
   private constructor(options: DaemonOptions) {
     this.vault = parseVaultId(options.vaultId); this.device = parseDeviceId(options.deviceId);
     if (!(options.masterKey instanceof Uint8Array) || options.masterKey.length !== 32) throw new Error("invalid vault key");
-    this.key = options.masterKey.slice();
+    this.key = Uint8Array.from(options.masterKey);
     this.root = privateDirectory(options.clientDirectory);
     this.socketPath = join(this.root, "daemon.sock"); this.credentialPath = join(this.root, "ipc.secret");
     this.pollMs = options.pollMs ?? 5000;
@@ -199,7 +199,7 @@ export class LinuxDaemon {
       return result;
     } finally { this.restoring = false; }
   }
-  private async restore(revisionId: string, path: string) {
+  private async restore(revisionId: string, path?: string) {
     if (this.paused) throw new Error("daemon paused");
     if (this.restoring) throw new Error("restore already in progress");
     this.restoring = true;
@@ -207,10 +207,14 @@ export class LinuxDaemon {
     // Settle local edits first; restoration must branch from the accepted head.
     await this.sync(true);
     const head = await this.remote.head();
-    if (!head.revisionId || head.revisionId !== this.local.head("applied").revisionId || this.local.proposal()) throw new Error("head changed during restore");
+    if (!head.revisionId || head.revisionId !== this.local.head("applied").revisionId ||
+        head.sequence !== this.local.head("applied").sequence || this.local.proposal()) throw new Error("head changed during restore");
     const current = await this.verified(head.revisionId), old = await this.verified(revisionId);
+    if (current.sequence !== head.sequence) throw new Error("restore head sequence mismatch");
     if (old.sequence === null) throw new Error("revision was not accepted");
-    const planned = planRestore(current.manifest, old.manifest, path, randomUUID(), this.device, head.revisionId);
+    const planned = path === undefined
+      ? planRestoreRevision(current.manifest, old.manifest, randomUUID(), this.device, head.revisionId)
+      : planRestore(current.manifest, old.manifest, path, randomUUID(), this.device, head.revisionId);
     const references = await restoreReferences(planned, [{ manifest: current.manifest, envelope: current.revision }, { manifest: old.manifest, envelope: old.revision }], this.key);
     const result = await this.remote.publish(planned, references, [], this.key, head.revisionId, new Date().toISOString(),
       (request, frame) => this.local.freezeRestoreProposal(request, frame, head.revisionId!));
@@ -222,6 +226,40 @@ export class LinuxDaemon {
     await applyNewFiles(this.scanner.root, this.local, this.remote, planned, result.sequence, this.key);
     this.local.finishRestoreProposal();
     return { revisionId: planned.revisionId, sequence: result.sequence };
+    } finally { this.restoring = false; }
+  }
+  private async resolveConflict(path: string) {
+    if (this.paused || this.restoring) throw new Error("daemon busy or paused");
+    this.restoring = true;
+    try {
+      // This pass publishes any pending local edits (including edits to either
+      // side of the conflict) before the explicitly requested discard.
+      await this.sync(true);
+      const applied = this.local.head("applied"), head = await this.remote.head();
+      if (!head.revisionId || head.revisionId !== applied.revisionId || head.sequence !== applied.sequence ||
+          this.local.head("accepted").revisionId !== head.revisionId || this.local.proposal())
+        throw new Error("head changed during conflict resolution; synchronize and retry");
+      const current = await this.verified(head.revisionId);
+      if (current.sequence !== head.sequence) throw new Error("conflict resolution head sequence mismatch");
+      const entry = manifestPaths(current.manifest).get(path);
+      if (!entry?.conflict || entry.kind !== "file") throw new Error("path is not a live file conflict copy");
+      const planned = parseManifest({ ...current.manifest, revisionId: randomUUID(), parents: [head.revisionId],
+        creatingDeviceId: this.device, entries: current.manifest.entries.map(item => item.id === entry.id
+          ? { id: item.id, parentId: item.parentId, name: item.name, kind: "tombstone", deletedKind: "file" }
+          : item) });
+      const references = await restoreReferences(planned, [{ manifest: current.manifest, envelope: current.revision }], this.key);
+      const result = await this.remote.publish(planned, references, [], this.key, head.revisionId, new Date().toISOString(),
+        (request, frame) => this.local.freezeRestoreProposal(request, frame, head.revisionId!));
+      if (result.status === "accepted" || result.status === "alreadyAccepted") this.local.acceptProposal(result.sequence);
+      else {
+        if (result.status === "staleHead") this.local.discardStaleRestore();
+        throw new Error(`conflict resolution not accepted: ${result.status}`);
+      }
+      await applyNewFiles(this.scanner.root, this.local, this.remote, planned, result.sequence, this.key);
+      this.local.finishRestoreProposal();
+      this.local.reconcileConflicts(planned);
+      this.watcher.notify(0);
+      return { revisionId: planned.revisionId, sequence: result.sequence, resolvedPath: path };
     } finally { this.restoring = false; }
   }
   async stop() {
@@ -276,6 +314,8 @@ export class LinuxDaemon {
     const work = (async () => {
       try {
         await this.run();
+        const applied = this.local.head("applied");
+        if (applied.revisionId) this.local.reconcileConflicts((await this.verified(applied.revisionId)).manifest);
         this.local.recordHead("observed", await this.remote.head());
         this.watcher.refresh();
         this.error = null; this.phase = this.paused ? "paused" : "idle"; this.lastSuccessMs = Date.now();
@@ -306,6 +346,12 @@ export class LinuxDaemon {
       throw new Error("hydration recovery requires unchanged accepted revision");
     const verified = await this.verified(hydration.revision);
     if (verified.sequence !== hydration.sequence) throw new Error("hydration accepted sequence changed");
+    if (remoteHead.sequence > hydration.sequence) {
+      if (!remoteHead.revisionId) throw new Error("remote head missing during hydration recovery");
+      const current = await this.verified(remoteHead.revisionId);
+      if (current.sequence !== remoteHead.sequence) throw new Error("head sequence mismatch");
+      await this.remotePath(verified, current);
+    }
     await hydrateFile(this.scanner.root, this.local, this.remote, verified.manifest, verified.revision, this.key, hydration.direction,
       this.local.entry(hydration.entryId)?.path ?? "", hydration);
   }
@@ -412,25 +458,41 @@ export class LinuxDaemon {
     return { stale: await this.verified(result.currentRevisionId), local: prepared };
   }
 
-  /** Find an authenticated accepted path, rather than pretending a distant head
-   * is an immediate child of the local base. Prepared stale branches are not
-   * eligible as remote history. Bound graph traversal independently of retries.
+  /** Find an authenticated path from the applied revision. Merge parents may
+   * include prepared (unaccepted) local branches, but accepted nodes along the
+   * path must have strictly increasing server sequences.
    */
-  private async remotePath(base: Verified, head: Verified): Promise<Verified[]> {
+  private async remotePath(base: Verified, head: Verified, acceptedOnly = false): Promise<Verified[]> {
+    // A frequently edited vault can accumulate far more than 64 revisions
+    // while a device is offline. Bound hostile graph traversal without making
+    // ordinary long-running histories unsynchronizable.
+    const maxAncestryNodes = 16_384;
+    if (base.sequence === null || head.sequence === null || head.sequence <= base.sequence)
+      throw new Error("remote head does not advance applied sequence");
     const seen = new Set<string>();
     const visit = async (node: Verified): Promise<Verified[] | null> => {
       if (node.manifest.revisionId === base.manifest.revisionId) {
         if (node.sequence !== base.sequence) throw new Error("merge base sequence mismatch");
         return [];
       }
-      if (node.sequence === null || seen.has(node.manifest.revisionId) || seen.size >= 64)
-        return null;
+      if (acceptedOnly && node.sequence === null) return null;
+      if (seen.has(node.manifest.revisionId)) return null;
+      if (seen.size >= maxAncestryNodes) throw new Error("remote ancestry traversal limit exceeded");
       seen.add(node.manifest.revisionId);
       for (const id of node.manifest.parents) {
         const parent = await this.verified(id);
-        if (parent.manifest.vaultId !== this.vault) throw new Error("foreign remote ancestor");
+        if (node.sequence !== null && parent.sequence !== null && parent.sequence >= node.sequence) continue;
         const path = await visit(parent);
-        if (path) return [...path, node];
+        if (path) {
+          // A prepared parent can sit between two accepted revisions. Check
+          // monotonicity across that gap as well as on direct accepted edges.
+          let lastAccepted = base;
+          for (let i = path.length - 1; i >= 0; i--) {
+            if (path[i]!.sequence !== null) { lastAccepted = path[i]!; break; }
+          }
+          if (node.sequence !== null && node.sequence <= lastAccepted.sequence!) continue;
+          return [...path, node];
+        }
       }
       return null;
     };
@@ -442,7 +504,7 @@ export class LinuxDaemon {
   private async reconcile(base: Verified, local: Verified, current: Verified): Promise<Verified> {
     let concurrentStales = 0, steps = 0;
     while (steps++ < 64) {
-      const path = await this.remotePath(base, current);
+      const path = await this.remotePath(base, current, true);
       const child = path[0]!;
       if (!local.manifest.parents.includes(base.manifest.revisionId) || !child.manifest.parents.includes(base.manifest.revisionId))
         throw new Error("unverifiable merge ancestry");
@@ -529,6 +591,8 @@ export class LinuxDaemon {
     }
     const prior = await this.verified(latest.revisionId);
     if (prior.sequence !== latest.sequence) throw new Error("applied revision sequence mismatch");
+    if (head.revisionId !== latest.revisionId) await this.remotePath(prior, current);
+    else if (head.sequence !== latest.sequence) throw new Error("applied head sequence changed");
     const scan = await this.scanner.plan(prior.manifest, randomUUID(), this.device, this.key);
     if (sameTree(scan.manifest, prior.manifest)) {
       if (head.sequence > latest.sequence) {
@@ -561,6 +625,7 @@ export class LinuxDaemon {
       conflicts: () => this.local.listWork("conflicts").filter(item => item.state === "open"),
       history: body => this.history(body.path as string | undefined),
       restore: body => this.tracked(() => this.restore(body.revision as string, body.path as string)),
+      resolve: body => this.tracked(() => this.resolveConflict(body.path as string)),
       evict: body => this.tracked(() => this.hydrate("evict", body.path as string)),
       download: body => this.tracked(() => this.hydrate("download", body.path as string)),
       doctor: async () => ({ status: this.status(), capabilities: await this.remote.capabilities() }),
@@ -584,14 +649,14 @@ export class LinuxDaemon {
       const value = JSON.parse(body) as Record<string, unknown>;
       if (!value || Array.isArray(value) || typeof value !== "object") throw new Error("invalid command body");
       const command = url.pathname.slice(1);
-      const fields = command === "history" || command === "evict" || command === "download" ? ["path"] : command === "restore" ? ["path", "revision"] : [];
+      const fields = command === "history" || command === "evict" || command === "download" || command === "resolve" ? ["path"] : command === "restore" ? ["path", "revision"] : [];
       if (Object.keys(value).some(key => !fields.includes(key))) throw new Error("invalid command fields");
       if (value.path !== undefined && !validIpcPath(value.path)) throw new Error("invalid relative path");
       if (command === "restore") {
         parseRevisionId(value.revision);
-        if (typeof value.path !== "string") throw new Error("restore requires a file path");
+        if (value.path !== undefined && typeof value.path !== "string") throw new Error("invalid restore path");
       }
-      if ((command === "evict" || command === "download") && typeof value.path !== "string") throw new Error("file path required");
+      if ((command === "evict" || command === "download" || command === "resolve") && typeof value.path !== "string") throw new Error("file path required");
       return Response.json(await commands[command]!(value));
     } catch (error) { return Response.json({ error: error instanceof Error ? error.message : "failed" }, { status: 409 }); }
   }
@@ -599,7 +664,7 @@ export class LinuxDaemon {
 
 export async function startDaemon(options: DaemonOptions) { return LinuxDaemon.start(options); }
 export async function stopDaemon(daemon: LinuxDaemon) { await daemon.stop(); }
-export async function daemonCommand(clientDirectory: string, command: "status" | "pause" | "resume" | "sync" | "history" | "restore" | "conflicts" | "doctor" | "evict" | "download", args: { path?: string; revision?: string } = {}): Promise<any> {
+export async function daemonCommand(clientDirectory: string, command: "status" | "pause" | "resume" | "sync" | "history" | "restore" | "resolve" | "conflicts" | "doctor" | "evict" | "download", args: { path?: string; revision?: string } = {}): Promise<any> {
   const root = privateDirectory(clientDirectory), token = secret(join(root, "ipc.secret"));
   const response = await fetch(`http://localhost/${command}`, { unix: join(root, "daemon.sock"), method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(args) } as RequestInit & { unix: string });

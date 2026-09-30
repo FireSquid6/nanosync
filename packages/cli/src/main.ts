@@ -13,7 +13,8 @@ const HELP = `nanosync [--client-dir DIR] COMMAND [arguments]
   status [--json]                 Query local daemon
   sync | pause | resume           Control local daemon
   history [PATH]                  Authenticated revision history
-  restore REVISION PATH           Restore a historical file as a new revision
+  restore REVISION [PATH]         Restore a historical tree or file as a new revision
+  resolve PATH --confirm-discard   Tombstone this named file conflict copy (history retains bytes)
   evict PATH | download PATH      Change local hydration without publishing
   conflicts | doctor             Inspect local daemon
   devices                         List devices (administrator)
@@ -32,7 +33,7 @@ function options(args: string[], names: string[]): { flags: Record<string, strin
     const arg = args[i]!;
     if (!arg.startsWith("--")) { rest.push(arg); continue; }
     if (!names.includes(arg) || Object.hasOwn(flags, arg)) throw new Error(`unknown or duplicate flag: ${arg}`);
-    if (["--json", "--acknowledge-exposure"].includes(arg)) flags[arg] = true;
+    if (["--json", "--acknowledge-exposure", "--confirm-discard"].includes(arg)) flags[arg] = true;
     else { const value = args[++i]; if (!value || value.startsWith("--")) throw new Error(`missing ${arg} value`); flags[arg] = value; }
   }
   return { flags, rest };
@@ -45,7 +46,7 @@ function output(value: unknown, json = false) { console.log(json || typeof value
 export async function main(args = process.argv.slice(2)): Promise<number> {
   try {
     if (args.length === 1 && (args[0] === "--help" || args[0] === "-h")) { process.stdout.write(HELP); return 0; }
-    const global = options(args, ["--client-dir", "--sync-dir", "--server-dir", "--url", "--proof-file", "--device-id", "--recovery-file", "--host", "--port", "--acknowledge-exposure", "--json"]);
+    const global = options(args, ["--client-dir", "--sync-dir", "--server-dir", "--url", "--proof-file", "--device-id", "--recovery-file", "--host", "--port", "--acknowledge-exposure", "--confirm-discard", "--json"]);
     const [command, ...rest] = global.rest, flags = global.flags;
     const directory = typeof flags["--client-dir"] === "string" ? flags["--client-dir"] : join(process.env.HOME ?? "", ".local/share/nanosync");
     const url = flags["--url"] as string | undefined;
@@ -90,7 +91,8 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
       case "status": case "sync": case "pause": case "resume": case "conflicts": case "doctor":
         count(rest, 0); result = await daemonCommand(directory, command); break;
       case "history": count(rest, 0, 1); result = await daemonCommand(directory, "history", rest[0] ? { path: rest[0] } : {}); break;
-      case "restore": count(rest, 2); result = await daemonCommand(directory, "restore", { revision: rest[0], path: rest[1] }); break;
+      case "restore": count(rest, 1, 2); result = await daemonCommand(directory, "restore", { revision: rest[0], ...(rest[1] === undefined ? {} : { path: rest[1] }) }); break;
+      case "resolve": count(rest, 1); if (flags["--confirm-discard"] !== true) throw new Error("resolve requires --confirm-discard; the named conflict copy will be removed from the live tree (retained in history)"); result = await daemonCommand(directory, "resolve", { path: rest[0] }); break;
       case "devices": count(rest, 0); { const creds = credentials(directory); result = await api(creds.baseUrl, "/v1/admin/devices", {}, creds.token); break; }
       case "approve": case "revoke": {
         count(rest, 1); const id = parseDeviceId(rest[0]); const creds = credentials(directory);

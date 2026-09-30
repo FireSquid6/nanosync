@@ -56,7 +56,9 @@ export async function mergeManifests(baseInput: unknown, localInput: unknown, re
   const b = byId(base), l = byId(local), r = byId(remote);
   for (const branch of [l, r]) for (const [id, previous] of b) {
     const current = branch.get(id);
-    if (current && !same(current.conflict, previous.conflict))
+    // Tombstones cannot carry lineage in the v1 manifest format. Deleting a
+    // conflict copy legitimately drops that field; live identities cannot.
+    if (current && current.kind !== "tombstone" && !same(current.conflict, previous.conflict))
       throw new Error(`ambiguous identity lineage: ${id}`);
     if (current && current.kind !== previous.kind &&
         !(current.kind === "tombstone" && previous.kind !== "tombstone" && current.deletedKind === previous.kind))

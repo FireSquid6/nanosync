@@ -155,6 +155,35 @@ describe("v1 framed objects", () => {
     expect(cancelled).toBe(true);
     expect(source.locked).toBe(false);
   });
+  test("50 GB virtual source is pulled in bounded natural order, not buffered or fully uploaded", async () => {
+    const virtualBytes = 50_000_000_000;
+    const segment = new Uint8Array(64 * 1024);
+    let produced = 0, peakSegment = 0, cancelled = false;
+    const source = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (produced === virtualBytes) { controller.close(); return; }
+        const length = Math.min(segment.length, virtualBytes - produced);
+        segment.fill(Math.floor(produced / CHUNK_SIZE) + 1);
+        controller.enqueue(segment.slice(0, length));
+        produced += length;
+        peakSegment = Math.max(peakSegment, length);
+      },
+      cancel() { cancelled = true; }
+    }, { highWaterMark: 0 });
+    const iterator = encryptFileChunks(source, master, vault);
+    const first = (await iterator.next()).value!;
+    const second = (await iterator.next()).value!;
+    expect(first.frame.length).toBe(CHUNK_SIZE + 96);
+    expect(second.frame.length).toBe(CHUNK_SIZE + 96);
+    expect(first.reference.objectId).not.toBe(second.reference.objectId);
+    expect((await decryptObject(first.frame, master, vault, first.reference))[0]).toBe(1);
+    expect((await decryptObject(second.frame, master, vault, second.reference))[0]).toBe(2);
+    expect(produced).toBeLessThanOrEqual(3 * CHUNK_SIZE);
+    expect(peakSegment).toBeLessThanOrEqual(64 * 1024);
+    await iterator.return(undefined);
+    expect(cancelled).toBe(true);
+    expect(produced).toBeLessThan(virtualBytes);
+  });
   test("stream keeps the key from first pull while awaiting a source fragment", async () => {
     let feed!: (chunk: Uint8Array) => void;
     const source = new ReadableStream<Uint8Array>({ start(controller) {

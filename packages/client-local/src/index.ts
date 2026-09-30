@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants, closeSync, existsSync, fchmodSync, fsyncSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { CHUNK_SIZE, parseAdvanceHeadRequest, parseCiphertextChecksum, parseDeviceId, parseIdempotencyKey, parseObjectFrameHeader, parseObjectId, parseRevisionId, parseVaultId, type AdvanceHeadRequest, type VisibleObjectReference } from "@nanosync/protocol";
-import type { ChunkJournal } from "@nanosync/sync-core";
+import type { ChunkJournal, ManifestV1 } from "@nanosync/sync-core";
 
 const hash = (data: string | Uint8Array) => createHash("sha256").update(data).digest("hex");
 const hex = (value: string) => { if (!/^[0-9a-f]{64}$/.test(value)) throw new Error("invalid digest"); return value; };
@@ -293,6 +293,26 @@ export class ClientLocal implements ChunkJournal {
   }
   enqueueTransfer(id: string, objectId: string, direction: "upload" | "download") { parseObjectId(objectId); this.work("transfers", id, [objectId, direction, "pending", 0]); }
   addConflict(id: string, entryId: string, sourceRevision: string) { uuid(sourceRevision); this.work("conflicts", id, [entryId, sourceRevision, "open"]); }
+  /** The accepted manifest, not a device-local acknowledgement, determines open conflicts. */
+  reconcileConflicts(manifest: ManifestV1) {
+    if (this.head("applied").revisionId !== manifest.revisionId) throw new Error("conflict manifest not applied");
+    this.write(() => {
+      const live = new Map(manifest.entries.filter(e => e.kind !== "tombstone" && e.conflict).map(e => [e.id, e.conflict!]));
+      for (const [id, lineage] of live) {
+        const entry = this.entry(id);
+        if (!entry || entry.kind === "tombstone") throw new Error("missing applied conflict entry");
+        const existing = row<{ entry_id: string; source_revision: string; state: string }>(this.db, "SELECT entry_id,source_revision,state FROM conflicts WHERE id=?", id);
+        if (existing && (existing.entry_id !== id || existing.source_revision !== lineage.sourceRevisionId))
+          throw new Error("conflict lineage changed");
+        // An explicit historical restore can legitimately bring a resolved
+        // copy back into the live tree; the applied head remains authoritative.
+        if (existing?.state === "resolved") run(this.db, "UPDATE conflicts SET state='open' WHERE id=?", id);
+        if (!existing) run(this.db, "INSERT INTO conflicts VALUES(?,?,?,'open')", id, id, lineage.sourceRevisionId);
+      }
+      for (const old of all<{ id: string }>(this.db, "SELECT id FROM conflicts WHERE state='open'"))
+        if (!live.has(old.id)) run(this.db, "UPDATE conflicts SET state='resolved' WHERE id=?", old.id);
+    });
+  }
   listWork(table: "operations" | "transfers" | "conflicts") { return all<Record<string, unknown>>(this.db, `SELECT * FROM ${table} ORDER BY id`); }
   transition(table: "operations" | "transfers" | "conflicts", id: string, state: Work["state"] | "resolved") {
     uuid(id);

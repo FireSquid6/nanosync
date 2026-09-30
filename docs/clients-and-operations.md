@@ -106,11 +106,26 @@ nanosync resume
 nanosync history [PATH]
 nanosync restore REVISION [PATH]
 nanosync conflicts
+nanosync resolve PATH --confirm-discard
 nanosync evict PATH
 nanosync download PATH
 nanosync devices
 nanosync doctor
 ```
+
+The shipped Linux CLI supports whole-revision restore when `PATH` is omitted,
+or a historical single-file restore when supplied. Both publish a new immutable
+revision branching from the accepted head after settling local edits; history
+is not rewound. Deleted identities are not resurrected: restored files and
+directories whose old IDs were tombstoned receive fresh IDs, with deletion
+markers retained. Other devices must synchronize and verify plaintext files
+and head after a restore.
+
+`resolve PATH --confirm-discard` explicitly removes a live **file conflict
+copy** from the current tree by publishing its tombstone after synchronizing
+pending edits. The discarded bytes remain in immutable history. Inspect both
+copies and combine content in the intended survivor first; this command does
+not merge bytes, and does not handle directory or location-only conflicts.
 
 Commands intended for scripts should provide stable structured output and meaningful exit codes. `status` should distinguish:
 

@@ -8,7 +8,7 @@ import {
 export { MAX_FILE_BYTES, parseManifest, encodeManifest, decodeManifest, validateManifestReferences, encryptManifest, decryptManifest, type ManifestV1, type ManifestEntry, type ManifestChunk } from "./manifest.ts";
 export { mergeManifests, type MergeOptions, type MergeConflict, type MergeResult } from "./merge.ts";
 export { HttpRemote, RemoteError, type RemoteOptions, type ChunkJournal } from "./remote.ts";
-export { history, manifestPaths, planRestore, restoreReferences } from "./history.ts";
+export { history, manifestPaths, planRestore, planRestoreRevision, restoreReferences } from "./history.ts";
 
 const text = new TextEncoder();
 const ZERO_NONCE = new Uint8Array(12);

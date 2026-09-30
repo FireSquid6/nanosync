@@ -1,6 +1,7 @@
 # Bun CLI (Linux)
 
-Run `bun packages/cli/src/main.ts --help` or link the `@nanosync/cli` bin as `nanosync`.
+Install Bun and dependencies with `bun install` from the repository root. Run
+`bun packages/cli/src/main.ts --help` or link the `@nanosync/cli` bin as `nanosync`.
 The CLI uses a single daemon per private client directory; local commands require
 its owner-only Unix socket and the separately provisioned IPC secret. Commands
 return JSON and exit 0 on success, 2 for invalid input/operational failures,
@@ -47,6 +48,17 @@ helper with stdin and avoid shell history. Never paste secrets into arguments,
 URLs, logs, or a world-readable file. `server init` creates owned 0600 pepper
 and bootstrap-proof files in a real 0700 directory. Losing the pepper invalidates
 all sessions. Back up the server metadata **and** immutable object store together.
+For a consistent offline backup, stop the server, copy its entire private
+directory (`metadata.sqlite`, any SQLite WAL/SHM files, `objects/`, pepper and
+bootstrap proof), verify the copies and store them with equivalent permissions.
+Do not copy a live SQLite database file. Restore to a separate private
+directory while stopped; verify database integrity and referenced objects
+before promotion. Review device revocations and client head sequences before
+reconnecting clients: an older restored head is not automatically safe to
+expose. There is no shipped backup/restore or migration CLI. Database schema
+migrations run on open; back up before upgrading. Legacy migration-1 vaults
+without account identities need offline operator migration, not network
+bootstrap. See `docs/clients-and-operations.md` for the restore checklist.
 
 Second device: choose and retain a UUID (`uuidgen`), then use
 `printf '%s' "$PASSWORD" | nanosync enroll --client-dir "$HOME/second-client" \
@@ -62,16 +74,22 @@ The completed second client stores its token and vault key in `client.json`,
 mode 0600. Restrict backups of this file accordingly. Expired enrollment
 sessions require operator intervention; do not delete pending state casually.
 
-The server binds 127.0.0.1 by default. Non-loopback requires
+The server binds 127.0.0.1:7337 by default. Keep `server run` running under a
+service manager with persistent private storage. Non-loopback requires
 `--host HOST --acknowledge-exposure` and **an external TLS/VPN boundary**;
 the server has no built-in transport encryption. Clients reject non-loopback
-HTTP URLs in enrollment/bootstrap; configure HTTPS when remote. The integrity
+HTTP URLs in enrollment/bootstrap; terminate HTTPS at a trusted proxy for all
+routes (including uploads/downloads) or use a VPN, and use that HTTPS URL on
+remote devices. Never publish the bare HTTP port to an untrusted network. The integrity
 scanner starts on server startup and stops (cancelling active scans) on SIGINT
 or SIGTERM. A missing/corrupt object or scan failure is reported to stderr;
 offline GC is never run by the server.
 
-`restore REVISION PATH` restores a historical regular file as a new head;
-it does not rewind history. `evict PATH` requires an accepted unchanged
+`restore REVISION [PATH]` restores a historical tree, or one historical regular
+file when `PATH` is given, as a new head; it does not rewind history. The tree
+restore removes current additions from the live tree, restores historical
+deletions with fresh identities, and retains past revisions as immutable history.
+`evict PATH` requires an accepted unchanged
 revision and remote ciphertext presence before recording durable intent and
 removing verified local content. `download PATH` stages and verifies the
 authenticated complete file before installing it without creating a revision.
@@ -81,3 +99,16 @@ Sync/pause/resume/history/restore/conflicts/doctor
 go through authenticated local IPC, and devices/approve/revoke through the
 server's administrator API. An interrupted restore is recovered from its
 durable frozen proposal and authenticated manifest before normal scanning.
+Synchronize all devices after a restore and confirm the expected files before
+making further edits. Current local edits are synchronized before restore.
+
+`conflicts` lists live conflict-copy records (the `entry_id` is the copy identity).
+Inspect both files and use `resolve 'EXACT/CONFLICT COPY PATH' --confirm-discard`
+only when you choose to keep the other file: this synchronizes pending local
+edits, then publishes a new head tombstoning that named file copy. Both devices
+remove the copy on sync; the prior accepted revision and encrypted file content
+remain accessible through immutable history. A missing flag, ordinary file,
+already resolved copy, or directory conflict is refused. Resolution does not
+combine file contents or resolve location/name-only conflicts; edit the chosen
+survivor before resolving if you need to combine content. If the remote head
+changes during resolution, retry after syncing. The daemon must be running.

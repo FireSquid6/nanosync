@@ -50,6 +50,17 @@ test("delete against an unchanged file does not restore it or create a false con
   expect(result.conflicts).toEqual([]);
 });
 
+test("deleting a conflict copy drops its lineage only on the tombstone", async () => {
+  const conflicted: ManifestEntry = { ...file, conflict: { sourceEntryId: id(16), sourceRevisionId: id(17) } };
+  const b = base(); b.entries = [root, conflicted];
+  const tomb: ManifestEntry = { id: fileId, parentId: rootId, name: file.name, kind: "tombstone", deletedKind: "file" };
+  const result = await merge(b, side(b, 6, 7, [root, tomb]), side(b, 8, 9, [root, conflicted]));
+  expect(find(result.manifest.entries, fileId)).toEqual(tomb);
+  expect(result.conflicts).toEqual([]);
+  await expect(merge(b, side(b, 6, 7, [root, { ...file }]), side(b, 8, 9, [root, conflicted])))
+    .rejects.toThrow(/ambiguous identity lineage/);
+});
+
 test("rename and modify combine on one identity, independent changes combine", async () => {
   const b = base(), other: ManifestEntry = { ...file, id: id(12), name: "other" };
   b.entries.push(other);

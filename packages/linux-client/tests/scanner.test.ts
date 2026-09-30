@@ -41,6 +41,25 @@ test("rename and atomic temp replacement keep stable IDs; changed content is str
     expect(third.manifest.entries.some(e => e.kind === "tombstone" && e.id === entry(second, "b").id)).toBe(false);
   } finally { local.close(); }
 });
+test("scan preserves immutable conflict lineage on unchanged, renamed and deleted entries", async () => {
+  const { folder, local, prior, scanner } = setup();
+  try {
+    writeFileSync(join(folder, "conflict"), "kept", { mode: 0o600 });
+    const initial = await scanner.plan(prior, randomUUID(), device, key); initial.commit();
+    const original = entry(initial, "conflict");
+    const lineage = { sourceEntryId: randomUUID(), sourceRevisionId: prior.revisionId };
+    const accepted: ManifestV1 = { ...initial.manifest, entries: initial.manifest.entries.map(e =>
+      e.id === original.id ? { ...e, conflict: lineage } : e) };
+    const unchanged = await scanner.plan(accepted, randomUUID(), device, key);
+    expect(entry(unchanged, "conflict").conflict).toEqual(lineage);
+    renameSync(join(folder, "conflict"), join(folder, "moved"));
+    const moved = await scanner.plan(accepted, randomUUID(), device, key);
+    expect(entry(moved, "moved").conflict).toEqual(lineage);
+    unlinkSync(join(folder, "moved"));
+    const deleted = await scanner.plan(accepted, randomUUID(), device, key);
+    expect(deleted.manifest.entries.find(e => e.id === original.id)).toMatchObject({ kind: "tombstone", deletedKind: "file" });
+  } finally { local.close(); }
+});
 test("rejects symlinks, hardlinks, special files, and mutation after planning", async () => {
   const { folder, local, prior, scanner } = setup();
   try {

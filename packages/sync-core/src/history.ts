@@ -68,8 +68,87 @@ export function planRestore(currentInput: ManifestV1, historicalInput: ManifestV
     }
     if (!restoredId) throw new Error("restore identity allocation failed");
   }
-  entries.push({ ...source, id: restoredId, parentId: parent.id,
-    name: path.slice(parentPath ? parentPath.length + 1 : 0) });
+  const restored: ManifestEntry = { ...source, id: restoredId, parentId: parent.id,
+    name: path.slice(parentPath ? parentPath.length + 1 : 0) };
+  // A reused identity keeps its current immutable conflict lineage, not the
+  // lineage (or lack thereof) of the historical source bytes.
+  delete restored.conflict;
+  if (target?.kind === "file" && target.conflict) restored.conflict = target.conflict;
+  entries.push(restored);
+  const planned = parseManifest({ ...current, revisionId: parseRevisionId(revisionId),
+    parents: [current.revisionId], creatingDeviceId: parseDeviceId(deviceId), entries });
+  encodeManifest(planned);
+  return planned;
+}
+
+/** Replace the live tree, not history. Tombstoned identities never resurrect. */
+export function planRestoreRevision(currentInput: ManifestV1, historicalInput: ManifestV1,
+  revisionId: string, deviceId: string, acceptedRevisionId: string): ManifestV1 {
+  const current = parseManifest(currentInput), historical = parseManifest(historicalInput);
+  if (current.revisionId !== parseRevisionId(acceptedRevisionId)) throw new Error("current manifest is not the accepted head");
+  if (current.vaultId !== historical.vaultId) throw new Error("restore vault mismatch");
+  const currentRoot = current.entries.find(e => e.parentId === null)!;
+  const historicalRoot = historical.entries.find(e => e.parentId === null)!;
+  if (currentRoot.id !== historicalRoot.id) throw new Error("restore root identity mismatch");
+  const byCurrent = new Map(current.entries.map(e => [e.id, e]));
+  const used = new Set(current.entries.map(e => e.id));
+  const allocate = () => {
+    for (let attempt = 0; attempt < 32; attempt++) {
+      const id = crypto.randomUUID();
+      if (!used.has(id)) { used.add(id); return id; }
+    }
+    throw new Error("restore identity allocation failed");
+  };
+  const mapping = new Map<string, string>([[historicalRoot.id, currentRoot.id]]);
+  for (const old of historical.entries.filter(e => e.kind !== "tombstone" && e.parentId !== null)) {
+    const existing = byCurrent.get(old.id);
+    mapping.set(old.id, existing?.kind === old.kind ? old.id : allocate());
+  }
+  const entries: ManifestEntry[] = historical.entries.filter(e => e.kind !== "tombstone").map(old => {
+    const id = mapping.get(old.id)!;
+    const existing = byCurrent.get(id);
+    // Conflict lineage is immutable for a reused live identity, even when
+    // restoring its historical bytes or location.
+    const entry = { ...old, id, parentId: old.parentId === null ? null : mapping.get(old.parentId)! };
+    if (existing) {
+      delete entry.conflict;
+      if (existing.conflict) entry.conflict = existing.conflict;
+    }
+    return entry;
+  });
+  const live = new Set(entries.map(e => e.id));
+  const currentById = new Map(current.entries.map(e => [e.id, e]));
+  // Preserve the nearest surviving directory for deletion markers. Omitting
+  // descendants of a removed directory is valid: its tombstone represents
+  // removal of the entire subtree, as in the normal scanner.
+  for (const old of current.entries) {
+    if (old.parentId === null || live.has(old.id)) continue;
+    let parentId: string | null = old.parentId;
+    while (parentId && !live.has(parentId)) parentId = currentById.get(parentId)?.parentId ?? null;
+    if (!parentId) parentId = currentRoot.id;
+    if (old.kind !== "tombstone" && parentId !== old.parentId) continue;
+    entries.push({ id: old.id, parentId, name: old.name, kind: "tombstone",
+      deletedKind: old.kind === "tombstone" ? old.deletedKind : old.kind });
+  }
+  const occupied = new Set(entries.filter(e => e.kind !== "tombstone" && e.parentId !== null)
+    .map(e => `${e.parentId}/${e.name.toLowerCase()}`));
+  const encoder = new TextEncoder();
+  for (const tombstone of entries.filter(e => e.kind === "tombstone").sort((a, b) => a.id.localeCompare(b.id))) {
+    const location = `${tombstone.parentId}/${tombstone.name.toLowerCase()}`;
+    if (occupied.has(location)) {
+      let archived: string | undefined;
+      for (let attempt = 0; attempt < 32; attempt++) {
+        const suffix = ` (deleted ${tombstone.id}${attempt ? `-${attempt}` : ""})`;
+        let stem = "";
+        for (const char of tombstone.name) if (encoder.encode(stem + char + suffix).length <= 255) stem += char;
+        const name = `${stem.replace(/[. ]+$/u, "") || "entry"}${suffix}`;
+        if (!occupied.has(`${tombstone.parentId}/${name.toLowerCase()}`)) { archived = name; break; }
+      }
+      if (!archived) throw new Error("tombstone archival name collision limit exceeded");
+      tombstone.name = archived;
+    }
+    occupied.add(`${tombstone.parentId}/${tombstone.name.toLowerCase()}`);
+  }
   const planned = parseManifest({ ...current, revisionId: parseRevisionId(revisionId),
     parents: [current.revisionId], creatingDeviceId: parseDeviceId(deviceId), entries });
   encodeManifest(planned);

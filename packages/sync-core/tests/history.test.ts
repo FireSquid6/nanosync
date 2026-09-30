@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { planRestore, manifestPaths, parseManifest } from "../src/index.ts";
+import { planRestore, planRestoreRevision, manifestPaths, parseManifest } from "../src/index.ts";
 const a = "11111111-1111-4111-8111-111111111111";
 const b = "22222222-2222-4222-8222-222222222222";
 const c = "33333333-3333-4333-8333-333333333333";
@@ -18,6 +18,18 @@ describe("restore planning", () => {
     expect(restored.parents).toEqual([a]);
     expect(restored.entries.find(x => x.id === e)?.executable).toBe(false);
     expect(manifestPaths(restored).get("hello")?.id).toBe(e);
+  });
+  test("single-file restore retains the current identity's immutable conflict lineage", () => {
+    const historical = parseManifest(base);
+    const lineage = { sourceEntryId: a, sourceRevisionId: b };
+    const current = parseManifest({ ...base, revisionId: a, parents: [b], entries: [base.entries[0],
+      { ...base.entries[1], executable: true, conflict: lineage }] });
+    const restored = planRestore(current, historical, "hello", c, c, a);
+    expect(manifestPaths(restored).get("hello")?.conflict).toEqual(lineage);
+    expect(manifestPaths(restored).get("hello")?.executable).toBe(false);
+    const earlierLineage = parseManifest({ ...base, entries: [base.entries[0],
+      { ...base.entries[1], conflict: { sourceEntryId: c, sourceRevisionId: b } }] });
+    expect(manifestPaths(planRestore(current, earlierLineage, "hello", b, c, a)).get("hello")?.conflict).toEqual(lineage);
   });
   test("rejects unsafe path and missing parent", () => {
     expect(() => planRestore(parseManifest(base), parseManifest(base), "../hello", c, c, b)).toThrow();
@@ -49,5 +61,42 @@ describe("restore planning", () => {
     expect(archived.name).toContain(`(deleted ${e}-1)`);
     expect(new TextEncoder().encode(archived.name).length).toBeLessThanOrEqual(255);
     expect(manifestPaths(planned).get(long)?.kind).toBe("file");
+  });
+});
+
+describe("whole-revision restore planning", () => {
+  test("replaces the live tree while retaining surviving IDs, old tombstones and conflict lineage", () => {
+    const historic = parseManifest({ ...base, entries: [base.entries[0], base.entries[1],
+      { id: a, parentId: d, name: "folder", kind: "directory" },
+      { id: b, parentId: a, name: "nested", kind: "file", size: 0, sha256: sha, chunks: [], executable: false }] });
+    const current = parseManifest({ ...base, revisionId: c, parents: [b], entries: [base.entries[0],
+      { ...base.entries[1], name: "renamed", executable: true, conflict: { sourceEntryId: a, sourceRevisionId: b } },
+      { id: a, parentId: d, name: "folder", kind: "tombstone", deletedKind: "directory" },
+      { id: b, parentId: d, name: "nested", kind: "tombstone", deletedKind: "file" },
+      { id: c, parentId: d, name: "added", kind: "file", size: 0, sha256: sha, chunks: [], executable: false }] });
+    const restored = planRestoreRevision(current, historic, a, c, c);
+    expect(restored.parents).toEqual([c]);
+    expect(manifestPaths(restored).get("hello")?.id).toBe(e);
+    expect(restored.entries.find(x => x.id === e)?.conflict).toEqual({ sourceEntryId: a, sourceRevisionId: b });
+    const folder = manifestPaths(restored).get("folder")!;
+    expect(folder.id).not.toBe(a);
+    expect(manifestPaths(restored).get("folder/nested")?.id).not.toBe(b);
+    expect(restored.entries.find(x => x.id === a)?.kind).toBe("tombstone");
+    expect(restored.entries.find(x => x.id === b)?.kind).toBe("tombstone");
+    expect(restored.entries.find(x => x.id === c)?.kind).toBe("tombstone");
+    expect(manifestPaths(restored).get("added")?.kind).not.toBe("file");
+  });
+  test("archives colliding tombstones without creating invalid long names", () => {
+    const long = "x".repeat(250);
+    const historic = parseManifest({ ...base, entries: [base.entries[0], { ...base.entries[1], name: long }] });
+    const current = parseManifest({ ...base, revisionId: c, parents: [b], entries: [base.entries[0],
+      { id: a, parentId: d, name: long, kind: "tombstone", deletedKind: "file" },
+      { id: b, parentId: d, name: `${long.slice(0, 200)} (deleted ${a})`, kind: "tombstone", deletedKind: "file" }] });
+    const restored = planRestoreRevision(current, historic, a, c, c);
+    expect(manifestPaths(restored).get(long)?.kind).toBe("file");
+    expect(restored.entries.find(x => x.id === a)?.name).toContain(`(deleted ${a})`);
+    expect(restored.entries.every(x => new TextEncoder().encode(x.name).length <= 255)).toBe(true);
+    expect(() => planRestoreRevision(current, historic, a, c, b)).toThrow(/accepted/);
+    expect(() => planRestoreRevision(current, { ...historic, vaultId: c }, a, c, c)).toThrow(/vault/);
   });
 });

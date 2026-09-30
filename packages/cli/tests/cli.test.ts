@@ -20,9 +20,11 @@ afterEach(() => { for (const path of roots.splice(0)) rmSync(path, { recursive: 
 test("CLI rejects unknown flags and missing args", async () => {
   expect(await main(["--help"])).toBe(0);
   expect(await main(["--bogus", "status"])).toBe(2);
-  expect(await main(["restore", "not-a-revision"])).toBe(2);
+  expect(await main(["restore"])).toBe(2);
   expect(await main(["evict"])).toBe(2);
   expect(await main(["download"])).toBe(2);
+  expect(await main(["resolve", "copy"])).toBe(2);
+  expect(await main(["resolve", "copy", "--confirm-discard", "--confirm-discard"])).toBe(2);
 });
 
 test("server init provisions owner-only secrets and refuses overwrite", async () => {
