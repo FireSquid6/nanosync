@@ -10,7 +10,12 @@ import {
   type EncryptedObject,
 } from "./index.ts";
 import { parseManifest, validateManifestReferences, type ManifestV1 } from "./manifest.ts";
-export class IntegrityError extends Error { constructor(message: string) { super(message); this.name = "IntegrityError"; } }
+export class IntegrityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "IntegrityError";
+  }
+}
 
 const encoder = new TextEncoder();
 const MAX_RESPONSE_JSON = MAX_JSON_METADATA_BYTES;
@@ -20,7 +25,8 @@ class RetryableDownloadError extends Error {}
 
 export class RemoteError extends Error {
   constructor(readonly status: number, readonly code: string, message: string, readonly retryAfterSeconds?: number) {
-    super(message); this.name = "RemoteError";
+    super(message);
+    this.name = "RemoteError";
   }
 }
 
@@ -43,9 +49,14 @@ export interface RemoteOptions {
 
 function exact(value: unknown, fields: string[]): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value) ||
-      ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new Error("invalid remote response");
+      ![Object.prototype, null].includes(Object.getPrototypeOf(value))) {
+    throw new Error("invalid remote response");
+  }
   const obj = value as Record<string, unknown>;
-  if (Object.keys(obj).length !== fields.length || fields.some(field => !Object.hasOwn(obj, field))) throw new Error("invalid remote response fields");
+  if (Object.keys(obj).length !== fields.length ||
+      fields.some(field => !Object.hasOwn(obj, field))) {
+    throw new Error("invalid remote response fields");
+  }
   return obj;
 }
 
@@ -53,17 +64,24 @@ async function json(response: Response, limit = MAX_RESPONSE_JSON): Promise<unkn
   if (!/^application\/json(?:\s*;|$)/i.test(response.headers.get("content-type") ?? "")) throw new Error("invalid response content type");
   if (response.headers.get("content-length") !== null && Number(response.headers.get("content-length")) > limit) throw new Error("response exceeds limit");
   if (!response.body) throw new Error("missing JSON body");
-  const reader = response.body.getReader(); let length = 0; const parts: Uint8Array[] = [];
+  const reader = response.body.getReader();
+  let length = 0;
+  const parts: Uint8Array[] = [];
   try {
     while (true) {
-      const { done, value } = await reader.read(); if (done) break;
+      const { done, value } = await reader.read();
+      if (done) break;
       if (!(value instanceof Uint8Array) || value.length > limit - length) throw new Error("response exceeds limit");
-      length += value.length; parts.push(value);
+      length += value.length;
+      parts.push(value);
     }
   } catch (error) { void reader.cancel().catch(() => {}); throw error; }
   finally { reader.releaseLock(); }
   const data = new Uint8Array(length); let offset = 0;
-  for (const part of parts) { data.set(part, offset); offset += part.length; }
+  for (const part of parts) {
+    data.set(part, offset);
+    offset += part.length;
+  }
   const source = new TextDecoder("utf-8", { fatal: true }).decode(data);
   rejectDuplicateKeys(source);
   return JSON.parse(source);
@@ -71,20 +89,31 @@ async function json(response: Response, limit = MAX_RESPONSE_JSON): Promise<unkn
 
 function rejectDuplicateKeys(source: string): void {
   let cursor = 0;
-  const space = () => { while (/\s/.test(source[cursor] ?? "") && cursor < source.length) cursor++; };
+  const space = () => {
+    while (/\s/.test(source[cursor] ?? "") && cursor < source.length) cursor++;
+  };
   const string = (): string => {
     const start = cursor++;
     while (cursor < source.length) {
-      if (source[cursor] === "\\") { cursor += 2; continue; }
+      if (source[cursor] === "\\") {
+        cursor += 2;
+        continue;
+      }
       if (source[cursor++] === '"') return JSON.parse(source.slice(start, cursor)) as string;
     }
     throw new Error("invalid JSON string");
   };
   const value = (): void => {
-    space(); const ch = source[cursor];
-    if (ch === '"') { string(); return; }
+    space();
+    const ch = source[cursor];
+    if (ch === '"') {
+      string();
+      return;
+    }
     if (ch === "{" || ch === "[") {
-      cursor++; const keys = new Set<string>(); space();
+      cursor++;
+      const keys = new Set<string>();
+      space();
       if (source[cursor] === (ch === "{" ? "}" : "]")) { cursor++; return; }
       while (cursor < source.length) {
         space();

@@ -12,18 +12,46 @@ export const MAX_CLIENT_VERSION_BYTES = 64;
 export const INITIAL_DEVICE_AUTHORIZATION_HEADER = "x-nanosync-bootstrap-authorization" as const;
 export const MAX_INITIAL_DEVICE_AUTHORIZATION_BYTES = 1024;
 
-export interface PasswordAuthenticationRequest { protocolVersion: 1; password: string; }
+export interface PasswordAuthenticationRequest {
+  protocolVersion: 1;
+  password: string;
+}
 export interface EnrollmentCreateRequest {
-  protocolVersion: 1; deviceId: DeviceId; displayName: string; platform: string;
-  clientVersion: string; fingerprint: string;
+  protocolVersion: 1;
+  deviceId: DeviceId;
+  displayName: string;
+  platform: string;
+  clientVersion: string;
+  fingerprint: string;
 }
 export interface DeviceActionRequest { protocolVersion: 1; }
-export interface PasswordAuthenticationResponse { protocolVersion: 1; status: "authenticated"; sessionToken: string; expiresAtMs: number; }
-export interface EnrollmentResponse { protocolVersion: 1; status: "pending" | "approved"; deviceId: DeviceId; }
-export interface EnrollmentStatusResponse { protocolVersion: 1; status: "pending" | "approved" | "denied" | "expired"; deviceId: DeviceId; }
+export interface PasswordAuthenticationResponse {
+  protocolVersion: 1;
+  status: "authenticated";
+  sessionToken: string;
+  expiresAtMs: number;
+}
+export interface EnrollmentResponse {
+  protocolVersion: 1;
+  status: "pending" | "approved";
+  deviceId: DeviceId;
+}
+export interface EnrollmentStatusResponse {
+  protocolVersion: 1;
+  status: "pending" | "approved" | "denied" | "expired";
+  deviceId: DeviceId;
+}
 export interface DeviceRecord {
-  deviceId: DeviceId; displayName: string | null; platform: string | null; clientVersion: string | null; fingerprint: string | null;
-  role: "administrator" | "member"; state: "pending" | "active" | "revoked"; createdAtMs: number; approvedAtMs: number | null; revokedAtMs: number | null;
+  deviceId: DeviceId;
+  displayName: string | null;
+  platform: string | null;
+  clientVersion: string | null;
+  fingerprint: string | null;
+  role: "administrator" | "member";
+  state: "pending" | "active" | "revoked";
+  createdAtMs: number;
+  approvedAtMs: number | null;
+  revokedAtMs: number | null;
 }
 export interface DeviceListResponse { protocolVersion: 1; devices: DeviceRecord[]; }
 export interface PendingEnrollmentListResponse { protocolVersion: 1; enrollments: DeviceRecord[]; }
@@ -35,8 +63,16 @@ function exact(value: unknown, path: string, fields: readonly string[]): Plain {
   const prototype = Object.getPrototypeOf(value);
   if (prototype !== Object.prototype && prototype !== null) throw new ProtocolValidationError("INVALID_TYPE", path, "expected plain object");
   const record = value as Plain;
-  for (const field of fields) if (!Object.hasOwn(record, field)) throw new ProtocolValidationError("MISSING_FIELD", `${path}.${field}`, "field is required");
-  for (const field of Object.keys(record)) if (!fields.includes(field)) throw new ProtocolValidationError("UNKNOWN_FIELD", `${path}.${field}`, "field is not allowed");
+  for (const field of fields) {
+    if (!Object.hasOwn(record, field)) {
+      throw new ProtocolValidationError("MISSING_FIELD", `${path}.${field}`, "field is required");
+    }
+  }
+  for (const field of Object.keys(record)) {
+    if (!fields.includes(field)) {
+      throw new ProtocolValidationError("UNKNOWN_FIELD", `${path}.${field}`, "field is not allowed");
+    }
+  }
   return record;
 }
 function version(value: unknown, path: string): 1 {
@@ -58,7 +94,15 @@ export function parseAuthToken(value: unknown, path = "token"): string {
 
 export function parsePasswordAuthenticationRequest(value: unknown, path = "request"): PasswordAuthenticationRequest {
   const input = exact(value, path, ["protocolVersion", "password"]);
-  if (typeof input.password !== "string" || new TextEncoder().encode(input.password).byteLength < 1 || new TextEncoder().encode(input.password).byteLength > MAX_AUTH_PASSWORD_BYTES) throw new ProtocolValidationError("LIMIT_EXCEEDED", `${path}.password`, `password must be 1..${MAX_AUTH_PASSWORD_BYTES} UTF-8 bytes`);
+  if (typeof input.password !== "string" ||
+      new TextEncoder().encode(input.password).byteLength < 1 ||
+      new TextEncoder().encode(input.password).byteLength > MAX_AUTH_PASSWORD_BYTES) {
+    throw new ProtocolValidationError(
+      "LIMIT_EXCEEDED",
+      `${path}.password`,
+      `password must be 1..${MAX_AUTH_PASSWORD_BYTES} UTF-8 bytes`,
+    );
+  }
   const password = input.password;
   return { protocolVersion: version(input.protocolVersion, `${path}.protocolVersion`), password };
 }
@@ -85,31 +129,97 @@ export function parseDeviceActionRequest(value: unknown, path = "request"): Devi
 export function parsePasswordAuthenticationResponse(value: unknown, path = "response"): PasswordAuthenticationResponse {
   const input = exact(value, path, ["protocolVersion", "status", "sessionToken", "expiresAtMs"]);
   if (input.status !== "authenticated") throw new ProtocolValidationError("INVALID_VALUE", `${path}.status`, "authenticated is required");
-  return { protocolVersion: version(input.protocolVersion, `${path}.protocolVersion`), status: "authenticated", sessionToken: parseAuthToken(input.sessionToken, `${path}.sessionToken`), expiresAtMs: timestamp(input.expiresAtMs, `${path}.expiresAtMs`) };
+  return {
+    protocolVersion: version(input.protocolVersion, `${path}.protocolVersion`),
+    status: "authenticated",
+    sessionToken: parseAuthToken(input.sessionToken, `${path}.sessionToken`),
+    expiresAtMs: timestamp(input.expiresAtMs, `${path}.expiresAtMs`),
+  };
 }
 export function parseEnrollmentResponse(value: unknown, path = "response"): EnrollmentResponse {
   const input = exact(value, path, ["protocolVersion", "status", "deviceId"]);
   if (input.status !== "pending" && input.status !== "approved") throw new ProtocolValidationError("INVALID_VALUE", `${path}.status`, "unknown enrollment status");
-  return { protocolVersion: version(input.protocolVersion, `${path}.protocolVersion`), status: input.status, deviceId: parseDeviceId(input.deviceId, `${path}.deviceId`) };
+  return {
+    protocolVersion: version(input.protocolVersion, `${path}.protocolVersion`),
+    status: input.status,
+    deviceId: parseDeviceId(input.deviceId, `${path}.deviceId`),
+  };
 }
 export function parseEnrollmentStatusResponse(value: unknown, path = "response"): EnrollmentStatusResponse {
   const input = exact(value, path, ["protocolVersion", "status", "deviceId"]);
   if (!["pending", "approved", "denied", "expired"].includes(input.status as string)) throw new ProtocolValidationError("INVALID_VALUE", `${path}.status`, "unknown enrollment status");
-  return { protocolVersion: version(input.protocolVersion, `${path}.protocolVersion`), status: input.status as EnrollmentStatusResponse["status"], deviceId: parseDeviceId(input.deviceId, `${path}.deviceId`) };
+  return {
+    protocolVersion: version(input.protocolVersion, `${path}.protocolVersion`),
+    status: input.status as EnrollmentStatusResponse["status"],
+    deviceId: parseDeviceId(input.deviceId, `${path}.deviceId`),
+  };
 }
-export function parseDeviceListResponse(value: unknown, path = "response"): DeviceListResponse { const input = exact(value, path, ["protocolVersion", "devices"]); return { protocolVersion: version(input.protocolVersion, `${path}.protocolVersion`), devices: deviceArray(input.devices, `${path}.devices`) }; }
-export function parsePendingEnrollmentListResponse(value: unknown, path = "response"): PendingEnrollmentListResponse { const input = exact(value, path, ["protocolVersion", "enrollments"]); return { protocolVersion: version(input.protocolVersion, `${path}.protocolVersion`), enrollments: deviceArray(input.enrollments, `${path}.enrollments`) }; }
-export function parseRecoveryWrapResponse(value: unknown, path = "response"): RecoveryWrapResponse { const input = exact(value, path, ["protocolVersion", "recoveryWrap"]); return { protocolVersion: version(input.protocolVersion, `${path}.protocolVersion`), recoveryWrap: parseRecoveryWrap(input.recoveryWrap, `${path}.recoveryWrap`) }; }
+export function parseDeviceListResponse(value: unknown, path = "response"): DeviceListResponse {
+  const input = exact(value, path, ["protocolVersion", "devices"]);
+  return {
+    protocolVersion: version(input.protocolVersion, `${path}.protocolVersion`),
+    devices: deviceArray(input.devices, `${path}.devices`),
+  };
+}
+export function parsePendingEnrollmentListResponse(value: unknown, path = "response"): PendingEnrollmentListResponse {
+  const input = exact(value, path, ["protocolVersion", "enrollments"]);
+  return {
+    protocolVersion: version(input.protocolVersion, `${path}.protocolVersion`),
+    enrollments: deviceArray(input.enrollments, `${path}.enrollments`),
+  };
+}
+export function parseRecoveryWrapResponse(value: unknown, path = "response"): RecoveryWrapResponse {
+  const input = exact(value, path, ["protocolVersion", "recoveryWrap"]);
+  return {
+    protocolVersion: version(input.protocolVersion, `${path}.protocolVersion`),
+    recoveryWrap: parseRecoveryWrap(input.recoveryWrap, `${path}.recoveryWrap`),
+  };
+}
 
-function timestamp(value: unknown, path: string): number { if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new ProtocolValidationError("INVALID_TYPE", path, "expected nonnegative safe integer"); return value; }
-function nullableTimestamp(value: unknown, path: string): number | null { return value === null ? null : timestamp(value, path); }
-function nullableText(value: unknown, maximum: number, path: string): string | null { return value === null ? null : boundedText(value, maximum, path); }
-function deviceArray(value: unknown, path: string): DeviceRecord[] { if (!Array.isArray(value) || value.length > 64) throw new ProtocolValidationError("LIMIT_EXCEEDED", path, "expected at most 64 devices"); return value.map((item, index) => device(item, `${path}[${index}]`)); }
+function timestamp(value: unknown, path: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new ProtocolValidationError("INVALID_TYPE", path, "expected nonnegative safe integer");
+  }
+  return value;
+}
+function nullableTimestamp(value: unknown, path: string): number | null {
+  return value === null ? null : timestamp(value, path);
+}
+function nullableText(value: unknown, maximum: number, path: string): string | null {
+  return value === null ? null : boundedText(value, maximum, path);
+}
+function deviceArray(value: unknown, path: string): DeviceRecord[] {
+  if (!Array.isArray(value) || value.length > 64) {
+    throw new ProtocolValidationError("LIMIT_EXCEEDED", path, "expected at most 64 devices");
+  }
+  return value.map((item, index) => device(item, `${path}[${index}]`));
+}
 function device(value: unknown, path: string): DeviceRecord {
   const input = exact(value, path, ["deviceId", "displayName", "platform", "clientVersion", "fingerprint", "role", "state", "createdAtMs", "approvedAtMs", "revokedAtMs"]);
-  if (input.role !== "administrator" && input.role !== "member") throw new ProtocolValidationError("INVALID_VALUE", `${path}.role`, "unknown device role");
-  if (input.state !== "pending" && input.state !== "active" && input.state !== "revoked") throw new ProtocolValidationError("INVALID_VALUE", `${path}.state`, "unknown device state");
+  if (input.role !== "administrator" && input.role !== "member") {
+    throw new ProtocolValidationError("INVALID_VALUE", `${path}.role`, "unknown device role");
+  }
+  if (input.state !== "pending" && input.state !== "active" && input.state !== "revoked") {
+    throw new ProtocolValidationError("INVALID_VALUE", `${path}.state`, "unknown device state");
+  }
   let fingerprint: string | null = null;
-  if (input.fingerprint !== null) { if (typeof input.fingerprint !== "string") throw new ProtocolValidationError("INVALID_TYPE", `${path}.fingerprint`, "expected string or null"); decodeCanonicalBase64Url(input.fingerprint, DEVICE_FINGERPRINT_BYTES, `${path}.fingerprint`); fingerprint = input.fingerprint; }
-  return { deviceId: parseDeviceId(input.deviceId, `${path}.deviceId`), displayName: nullableText(input.displayName, MAX_DEVICE_DISPLAY_NAME_BYTES, `${path}.displayName`), platform: nullableText(input.platform, MAX_DEVICE_PLATFORM_BYTES, `${path}.platform`), clientVersion: nullableText(input.clientVersion, MAX_CLIENT_VERSION_BYTES, `${path}.clientVersion`), fingerprint, role: input.role, state: input.state, createdAtMs: timestamp(input.createdAtMs, `${path}.createdAtMs`), approvedAtMs: nullableTimestamp(input.approvedAtMs, `${path}.approvedAtMs`), revokedAtMs: nullableTimestamp(input.revokedAtMs, `${path}.revokedAtMs`) };
+  if (input.fingerprint !== null) {
+    if (typeof input.fingerprint !== "string") {
+      throw new ProtocolValidationError("INVALID_TYPE", `${path}.fingerprint`, "expected string or null");
+    }
+    decodeCanonicalBase64Url(input.fingerprint, DEVICE_FINGERPRINT_BYTES, `${path}.fingerprint`);
+    fingerprint = input.fingerprint;
+  }
+  return {
+    deviceId: parseDeviceId(input.deviceId, `${path}.deviceId`),
+    displayName: nullableText(input.displayName, MAX_DEVICE_DISPLAY_NAME_BYTES, `${path}.displayName`),
+    platform: nullableText(input.platform, MAX_DEVICE_PLATFORM_BYTES, `${path}.platform`),
+    clientVersion: nullableText(input.clientVersion, MAX_CLIENT_VERSION_BYTES, `${path}.clientVersion`),
+    fingerprint,
+    role: input.role,
+    state: input.state,
+    createdAtMs: timestamp(input.createdAtMs, `${path}.createdAtMs`),
+    approvedAtMs: nullableTimestamp(input.approvedAtMs, `${path}.approvedAtMs`),
+    revokedAtMs: nullableTimestamp(input.revokedAtMs, `${path}.revokedAtMs`),
+  };
 }

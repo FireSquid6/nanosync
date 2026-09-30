@@ -1,5 +1,11 @@
-import { CHUNK_SIZE, parseDeviceId, parseObjectId, parsePersistedRevisionEnvelope, parseRevisionId, parseVaultId, type RevisionEnvelope } from "@nanosync/protocol";
-import { decryptObject, encryptRandomized, MAX_IN_MEMORY_OBJECT_PLAINTEXT, verifyReferenceSetMac, type EncryptedObject } from "./index.ts";
+import {
+  CHUNK_SIZE, parseDeviceId, parseObjectId, parsePersistedRevisionEnvelope,
+  parseRevisionId, parseVaultId, type RevisionEnvelope,
+} from "@nanosync/protocol";
+import {
+  decryptObject, encryptRandomized, MAX_IN_MEMORY_OBJECT_PLAINTEXT,
+  verifyReferenceSetMac, type EncryptedObject,
+} from "./index.ts";
 
 export const MAX_FILE_BYTES = 50_000_000_000;
 const utf8 = new TextEncoder();
@@ -31,10 +37,16 @@ export interface ManifestV1 {
 }
 
 function record(input: unknown, required: string[], optional: string[] = []): Record<string, unknown> {
-  if (!input || typeof input !== "object" || Array.isArray(input) || ![Object.prototype, null].includes(Object.getPrototypeOf(input))) throw new Error("invalid manifest record");
+  if (!input || typeof input !== "object" || Array.isArray(input) ||
+      ![Object.prototype, null].includes(Object.getPrototypeOf(input))) {
+    throw new Error("invalid manifest record");
+  }
   const obj = input as Record<string, unknown>;
   const keys = Object.keys(obj);
-  if (required.some(k => !Object.hasOwn(obj, k)) || keys.some(k => !required.includes(k) && !optional.includes(k))) throw new Error("invalid manifest fields");
+  if (required.some(k => !Object.hasOwn(obj, k)) ||
+      keys.some(k => !required.includes(k) && !optional.includes(k))) {
+    throw new Error("invalid manifest fields");
+  }
   return obj;
 }
 function name(value: unknown, root = false): string {
