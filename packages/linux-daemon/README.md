@@ -1,4 +1,6 @@
-# Linux daemon
+# `@nanosync/linux-daemon` — continuous Linux synchronization
+
+This Bun package runs the single-owner Linux synchronization daemon, coordinating scanning, remote synchronization, local persistence, hydration, and authenticated local IPC for the CLI. It depends on `sync-core`, `client-local`, and `linux-client`.
 
 `startDaemon({ clientDirectory, syncDirectory, vaultId, deviceId, masterKey, baseUrl, token })` starts the continuous Bun daemon. `stopDaemon(daemon)` shuts it down. The CLI uses `daemonCommand` for status, sync, pause, resume, history, restore, conflicts, evict, download and doctor. Status reports `state` and `exitCode` separately from activity `phase`, observed/accepted/applied heads, remote-only/downloaded file counts, pending recovery work and the last error. `headsConverged` means only that durable heads agree at the last observation; it does not claim that subsequent local edits have been scanned. `synchronized` additionally requires an unchanged read-only filesystem metadata inventory, no pending work, no open conflict, and no evicted remote-only files. The caller must provision the approved device credential and unlocked vault master key; the daemon never obtains these through IPC.
 
