@@ -4,8 +4,10 @@ Install Bun and dependencies with `bun install` from the repository root. Run
 `bun packages/cli/src/main.ts --help` or link the `@nanosync/cli` bin as `nanosync`.
 The CLI uses a single daemon per private client directory; local commands require
 its owner-only Unix socket and the separately provisioned IPC secret. Commands
-return JSON and exit 0 on success, 2 for invalid input/operational failures,
-3 for authentication failures, 4 for approval, 5 for unavailable features.
+return JSON and use stable process exit codes: 0 synchronized/success, 2 unknown
+or command error, 3 authentication/approval required, 4 pending/active/paused
+or remote-only state, 5 offline, 6 integrity failure, 7 capacity incomplete,
+8 unresolved conflict. See `docs/clients-and-operations.md` for status details.
 
 ```sh
 bun packages/cli/src/main.ts server init --server-dir "$HOME/nanosync-server"
