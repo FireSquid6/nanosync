@@ -28,7 +28,12 @@ export class ObjectStorageError extends Error {
   readonly code: ObjectStorageErrorCode;
   readonly key?: string;
 
-  constructor(code: ObjectStorageErrorCode, message: string, key?: string, options?: ErrorOptions) {
+  constructor(
+    code: ObjectStorageErrorCode,
+    message: string,
+    key?: string,
+    options?: ErrorOptions,
+  ) {
     super(message, options);
     this.name = "ObjectStorageError";
     this.code = code;
@@ -74,7 +79,11 @@ export interface ListResult {
 
 /** Server-side immutable ciphertext storage. Keys are opaque, relative, slash-separated names. */
 export interface Filesystem {
-  putIfAbsent(key: string, stream: ReadableStream<Uint8Array>, expectedChecksum: string): Promise<PutResult>;
+  putIfAbsent(
+    key: string,
+    stream: ReadableStream<Uint8Array>,
+    expectedChecksum: string,
+  ): Promise<PutResult>;
   open(key: string, range?: ByteRange): Promise<OpenObject>;
   stat(key: string): Promise<ObjectStat>;
   existsBatch(keys: readonly string[]): Promise<boolean[]>;
@@ -101,14 +110,24 @@ export class LocalFilesystem implements Filesystem {
   constructor(root: string, options: LocalFilesystemOptions = {}) {
     this.root = resolve(root);
     this.tempDirectory = join(this.root, TEMP_DIRECTORY);
-    this.maximumObjectSize = options.maximumObjectSize ?? DEFAULT_MAXIMUM_OBJECT_SIZE;
-    if (!Number.isSafeInteger(this.maximumObjectSize) || this.maximumObjectSize < 0) {
-      throw new TypeError("maximumObjectSize must be a non-negative safe integer");
+    this.maximumObjectSize =
+      options.maximumObjectSize ?? DEFAULT_MAXIMUM_OBJECT_SIZE;
+    if (
+      !Number.isSafeInteger(this.maximumObjectSize) ||
+      this.maximumObjectSize < 0
+    ) {
+      throw new TypeError(
+        "maximumObjectSize must be a non-negative safe integer",
+      );
     }
     this.ready = this.initialize();
   }
 
-  async putIfAbsent(key: string, source: ReadableStream<Uint8Array>, expectedChecksum: string): Promise<PutResult> {
+  async putIfAbsent(
+    key: string,
+    source: ReadableStream<Uint8Array>,
+    expectedChecksum: string,
+  ): Promise<PutResult> {
     await this.ready;
     const parts = validateKey(key);
     const checksum = validateChecksum(expectedChecksum);
@@ -129,7 +148,10 @@ export class LocalFilesystem implements Filesystem {
     try {
       temporary = await openFile(
         temporaryPath,
-        constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollowFlag(),
+        constants.O_CREAT |
+          constants.O_EXCL |
+          constants.O_WRONLY |
+          noFollowFlag(),
         0o600,
       );
       while (true) {
@@ -138,7 +160,8 @@ export class LocalFilesystem implements Filesystem {
           sourceComplete = true;
           break;
         }
-        if (!(next.value instanceof Uint8Array)) throw new TypeError("Object stream must yield Uint8Array chunks");
+        if (!(next.value instanceof Uint8Array))
+          throw new TypeError("Object stream must yield Uint8Array chunks");
         const incomingLength = next.value.byteLength;
         if (incomingLength > this.maximumObjectSize - size) {
           throw new ObjectStorageError(
@@ -160,7 +183,9 @@ export class LocalFilesystem implements Filesystem {
 
       const actual = await hashFile(temporaryPath, key, false);
       if (actual.size !== size || actual.size > this.maximumObjectSize) {
-        throw new Error("Temporary object size differs from accounted stream bytes");
+        throw new Error(
+          "Temporary object size differs from accounted stream bytes",
+        );
       }
       if (actual.checksum !== checksum) {
         throw new ObjectStorageError(
@@ -203,7 +228,11 @@ export class LocalFilesystem implements Filesystem {
     try {
       const stats = await handle.stat();
       validateObject(stats, key, this.isPublishing(path));
-      const range = validateRange(requestedRange ?? { start: 0, endExclusive: stats.size }, stats.size, key);
+      const range = validateRange(
+        requestedRange ?? { start: 0, endExclusive: stats.size },
+        stats.size,
+        key,
+      );
       return { stream: fileStream(handle, range), size: stats.size, range };
     } catch (error) {
       await handle.close().catch(() => undefined);
@@ -226,19 +255,21 @@ export class LocalFilesystem implements Filesystem {
 
   async existsBatch(keys: readonly string[]): Promise<boolean[]> {
     await this.ready;
-    return Promise.all(keys.map(async (key) => {
-      const parts = validateKey(key);
-      const path = join(this.root, ...parts);
-      try {
-        await this.assertSafePath(parts, key);
-        const stats = await lstat(path);
-        validateObject(stats, key, this.isPublishing(path));
-        return true;
-      } catch (error) {
-        if (hasCode(error, "ENOENT")) return false;
-        throw error;
-      }
-    }));
+    return Promise.all(
+      keys.map(async (key) => {
+        const parts = validateKey(key);
+        const path = join(this.root, ...parts);
+        try {
+          await this.assertSafePath(parts, key);
+          const stats = await lstat(path);
+          validateObject(stats, key, this.isPublishing(path));
+          return true;
+        } catch (error) {
+          if (hasCode(error, "ENOENT")) return false;
+          throw error;
+        }
+      }),
+    );
   }
 
   async delete(key: string): Promise<{ deleted: boolean }> {
@@ -263,15 +294,28 @@ export class LocalFilesystem implements Filesystem {
     validatePrefix(prefix);
     const limit = options.limit ?? 100;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
-      throw new RangeError("list limit must be an integer from 1 through 1,000");
+      throw new RangeError(
+        "list limit must be an integer from 1 through 1,000",
+      );
     }
     if (options.cursor !== undefined) {
       validateKey(options.cursor);
-      if (!options.cursor.startsWith(prefix)) throw new ObjectStorageError("INVALID_KEY", "List cursor does not match prefix");
+      if (!options.cursor.startsWith(prefix))
+        throw new ObjectStorageError(
+          "INVALID_KEY",
+          "List cursor does not match prefix",
+        );
     }
 
     const matches: string[] = [];
-    await this.collectPage(this.root, "", prefix, options.cursor, limit + 1, matches);
+    await this.collectPage(
+      this.root,
+      "",
+      prefix,
+      options.cursor,
+      limit + 1,
+      matches,
+    );
     const page = matches.slice(0, limit);
     return {
       keys: page,
@@ -284,8 +328,10 @@ export class LocalFilesystem implements Filesystem {
     const rootStats = await lstat(this.root);
     if (rootStats.isSymbolicLink()) throw symlinkError("<root>");
     validateDirectory(rootStats, "<root>");
-    if (await realpath(this.root) !== this.root) {
-      throw new Error(`Object storage root resolves through a symbolic link: ${this.root}`);
+    if ((await realpath(this.root)) !== this.root) {
+      throw new Error(
+        `Object storage root resolves through a symbolic link: ${this.root}`,
+      );
     }
     await mkdir(this.tempDirectory, { mode: 0o700 }).catch((error: unknown) => {
       if (!hasCode(error, "EEXIST")) throw error;
@@ -336,12 +382,22 @@ export class LocalFilesystem implements Filesystem {
       validateObject(stats, key, this.isPublishing(path));
       return path;
     } catch (error) {
-      if (hasCode(error, "ENOENT")) throw new ObjectStorageError("NOT_FOUND", `Object not found: ${key}`, key, { cause: error });
+      if (hasCode(error, "ENOENT"))
+        throw new ObjectStorageError(
+          "NOT_FOUND",
+          `Object not found: ${key}`,
+          key,
+          { cause: error },
+        );
       throw error;
     }
   }
 
-  private async inspectObject(path: string, key: string, missingAllowed: boolean): Promise<{ size: number } | undefined> {
+  private async inspectObject(
+    path: string,
+    key: string,
+    missingAllowed: boolean,
+  ): Promise<{ size: number } | undefined> {
     try {
       const stats = await lstat(path);
       validateObject(stats, key, this.isPublishing(path));
@@ -352,7 +408,12 @@ export class LocalFilesystem implements Filesystem {
     }
   }
 
-  private async verifyExisting(key: string, path: string, checksum: string, knownSize?: number): Promise<PutResult> {
+  private async verifyExisting(
+    key: string,
+    path: string,
+    checksum: string,
+    knownSize?: number,
+  ): Promise<PutResult> {
     const actual = await hashFile(path, key, this.isPublishing(path));
     if (actual.checksum !== checksum) {
       throw new ObjectStorageError(
@@ -361,7 +422,11 @@ export class LocalFilesystem implements Filesystem {
         key,
       );
     }
-    return { status: "already-present", size: knownSize ?? actual.size, checksum };
+    return {
+      status: "already-present",
+      size: knownSize ?? actual.size,
+      checksum,
+    };
   }
 
   private async collectPage(
@@ -382,23 +447,40 @@ export class LocalFilesystem implements Filesystem {
       if (stats.isDirectory()) {
         validateDirectory(stats, key);
         if (prefixesCanOverlap(key, requestedPrefix)) {
-          await this.collectPage(path, key, requestedPrefix, cursor, maximum, output);
+          await this.collectPage(
+            path,
+            key,
+            requestedPrefix,
+            cursor,
+            maximum,
+            output,
+          );
         }
       } else if (stats.isFile()) {
         validateObject(stats, key, this.isPublishing(path));
-        if (key.startsWith(requestedPrefix) && (cursor === undefined || compareNames(key, cursor) > 0)) {
+        if (
+          key.startsWith(requestedPrefix) &&
+          (cursor === undefined || compareNames(key, cursor) > 0)
+        ) {
           output.push(key);
           output.sort(compareNames);
           if (output.length > maximum) output.pop();
         }
       } else {
-        throw new ObjectStorageError("NOT_REGULAR_FILE", `Unsupported object-store entry: ${key}`, key);
+        throw new ObjectStorageError(
+          "NOT_REGULAR_FILE",
+          `Unsupported object-store entry: ${key}`,
+          key,
+        );
       }
     }
   }
 
   private beginPublication(path: string): void {
-    this.activePublications.set(path, (this.activePublications.get(path) ?? 0) + 1);
+    this.activePublications.set(
+      path,
+      (this.activePublications.get(path) ?? 0) + 1,
+    );
   }
 
   private endPublication(path: string): void {
@@ -414,11 +496,22 @@ export class LocalFilesystem implements Filesystem {
 
 function validateKey(key: string): string[] {
   if (!key || key.startsWith("/") || key.includes("\\") || key.includes("\0")) {
-    throw new ObjectStorageError("INVALID_KEY", `Invalid object key: ${JSON.stringify(key)}`, key);
+    throw new ObjectStorageError(
+      "INVALID_KEY",
+      `Invalid object key: ${JSON.stringify(key)}`,
+      key,
+    );
   }
   const parts = key.split("/");
-  if (parts.some((part) => !part || part === "." || part === "..") || parts[0] === TEMP_DIRECTORY) {
-    throw new ObjectStorageError("INVALID_KEY", `Invalid object key: ${JSON.stringify(key)}`, key);
+  if (
+    parts.some((part) => !part || part === "." || part === "..") ||
+    parts[0] === TEMP_DIRECTORY
+  ) {
+    throw new ObjectStorageError(
+      "INVALID_KEY",
+      `Invalid object key: ${JSON.stringify(key)}`,
+      key,
+    );
   }
   return parts;
 }
@@ -430,18 +523,21 @@ function validatePrefix(prefix: string): void {
 
 function validateChecksum(checksum: string): string {
   if (!/^[a-fA-F0-9]{64}$/.test(checksum)) {
-    throw new ObjectStorageError("INVALID_CHECKSUM", "Expected checksum must be a 64-character SHA-256 hex digest");
+    throw new ObjectStorageError(
+      "INVALID_CHECKSUM",
+      "Expected checksum must be a 64-character SHA-256 hex digest",
+    );
   }
   return checksum.toLowerCase();
 }
 
 function validateRange(range: ByteRange, size: number, key: string): ByteRange {
   if (
-    !Number.isSafeInteger(range.start)
-    || !Number.isSafeInteger(range.endExclusive)
-    || range.start < 0
-    || range.endExclusive < range.start
-    || range.endExclusive > size
+    !Number.isSafeInteger(range.start) ||
+    !Number.isSafeInteger(range.endExclusive) ||
+    range.start < 0 ||
+    range.endExclusive < range.start ||
+    range.endExclusive > size
   ) {
     throw new ObjectStorageError(
       "RANGE_NOT_SATISFIABLE",
@@ -452,7 +548,10 @@ function validateRange(range: ByteRange, size: number, key: string): ByteRange {
   return { start: range.start, endExclusive: range.endExclusive };
 }
 
-function fileStream(handle: FileHandle, range: ByteRange): ReadableStream<Uint8Array> {
+function fileStream(
+  handle: FileHandle,
+  range: ByteRange,
+): ReadableStream<Uint8Array> {
   let position = range.start;
   let closed = false;
   const close = async (): Promise<void> => {
@@ -470,10 +569,20 @@ function fileStream(handle: FileHandle, range: ByteRange): ReadableStream<Uint8A
           return;
         }
         const buffer = new Uint8Array(Math.min(IO_CHUNK_SIZE, remaining));
-        const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, position);
-        if (bytesRead === 0) throw new Error("Object was truncated while being read");
+        const { bytesRead } = await handle.read(
+          buffer,
+          0,
+          buffer.byteLength,
+          position,
+        );
+        if (bytesRead === 0)
+          throw new Error("Object was truncated while being read");
         position += bytesRead;
-        controller.enqueue(bytesRead === buffer.byteLength ? buffer : buffer.subarray(0, bytesRead));
+        controller.enqueue(
+          bytesRead === buffer.byteLength
+            ? buffer
+            : buffer.subarray(0, bytesRead),
+        );
       } catch (error) {
         await close().catch(() => undefined);
         controller.error(error);
@@ -488,24 +597,44 @@ function fileStream(handle: FileHandle, range: ByteRange): ReadableStream<Uint8A
 async function writeAll(handle: FileHandle, bytes: Uint8Array): Promise<void> {
   let offset = 0;
   while (offset < bytes.byteLength) {
-    const { bytesWritten } = await handle.write(bytes, offset, bytes.byteLength - offset);
-    if (bytesWritten === 0) throw new Error("Unable to make progress writing object");
+    const { bytesWritten } = await handle.write(
+      bytes,
+      offset,
+      bytes.byteLength - offset,
+    );
+    if (bytesWritten === 0)
+      throw new Error("Unable to make progress writing object");
     offset += bytesWritten;
   }
 }
 
-function copyIncomingRange(bytes: Uint8Array, offset: number, length: number): Uint8Array {
+function copyIncomingRange(
+  bytes: Uint8Array,
+  offset: number,
+  length: number,
+): Uint8Array {
   try {
-    const source = new Uint8Array(bytes.buffer, bytes.byteOffset + offset, length);
+    const source = new Uint8Array(
+      bytes.buffer,
+      bytes.byteOffset + offset,
+      length,
+    );
     const owned = new Uint8Array(length);
     owned.set(source);
     return owned;
   } catch (error) {
-    throw new TypeError("Object stream chunk changed size while being consumed", { cause: error });
+    throw new TypeError(
+      "Object stream chunk changed size while being consumed",
+      { cause: error },
+    );
   }
 }
 
-async function hashFile(path: string, key: string, allowPublicationLink: boolean): Promise<{ checksum: string; size: number }> {
+async function hashFile(
+  path: string,
+  key: string,
+  allowPublicationLink: boolean,
+): Promise<{ checksum: string; size: number }> {
   const handle = await openFile(path, constants.O_RDONLY | noFollowFlag());
   const hash = createHash("sha256");
   const buffer = new Uint8Array(IO_CHUNK_SIZE);
@@ -514,7 +643,12 @@ async function hashFile(path: string, key: string, allowPublicationLink: boolean
     const stats = await handle.stat();
     validateObject(stats, key, allowPublicationLink);
     while (true) {
-      const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, null);
+      const { bytesRead } = await handle.read(
+        buffer,
+        0,
+        buffer.byteLength,
+        null,
+      );
       if (bytesRead === 0) break;
       hash.update(buffer.subarray(0, bytesRead));
       size += bytesRead;
@@ -539,14 +673,20 @@ function noFollowFlag(): number {
 }
 
 function symlinkError(key: string): ObjectStorageError {
-  return new ObjectStorageError("SYMLINK", `Symbolic links are not permitted in object storage: ${key}`, key);
+  return new ObjectStorageError(
+    "SYMLINK",
+    `Symbolic links are not permitted in object storage: ${key}`,
+    key,
+  );
 }
 
 function hasCode(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && error.code === code;
 }
 
-function cancelReaderWithoutWaiting(reader: { cancel(reason?: unknown): Promise<void> }): void {
+function cancelReaderWithoutWaiting(reader: {
+  cancel(reason?: unknown): Promise<void>;
+}): void {
   try {
     void reader.cancel().catch(() => undefined);
   } catch {
@@ -563,23 +703,49 @@ function cancelStreamWithoutWaiting(stream: ReadableStream<Uint8Array>): void {
 }
 
 function validateDirectory(stats: Stats, key: string): void {
-  if (!stats.isDirectory()) throw new ObjectStorageError("NOT_REGULAR_FILE", `Object parent is not a directory: ${key}`, key);
+  if (!stats.isDirectory())
+    throw new ObjectStorageError(
+      "NOT_REGULAR_FILE",
+      `Object parent is not a directory: ${key}`,
+      key,
+    );
   validateOwnershipAndMode(stats, key, 0o700);
 }
 
-function validateObject(stats: Stats, key: string, allowPublicationLink: boolean): void {
+function validateObject(
+  stats: Stats,
+  key: string,
+  allowPublicationLink: boolean,
+): void {
   if (stats.isSymbolicLink()) throw symlinkError(key);
-  if (!stats.isFile()) throw new ObjectStorageError("NOT_REGULAR_FILE", `Object is not a regular file: ${key}`, key);
+  if (!stats.isFile())
+    throw new ObjectStorageError(
+      "NOT_REGULAR_FILE",
+      `Object is not a regular file: ${key}`,
+      key,
+    );
   validateOwnershipAndMode(stats, key, 0o600);
   const maximumLinks = allowPublicationLink ? 2 : 1;
   if (stats.nlink < 1 || stats.nlink > maximumLinks) {
-    throw new ObjectStorageError("UNSAFE_PATH", `Unsafe hard-link count for object: ${key}`, key);
+    throw new ObjectStorageError(
+      "UNSAFE_PATH",
+      `Unsafe hard-link count for object: ${key}`,
+      key,
+    );
   }
 }
 
-function validateOwnershipAndMode(stats: Stats, key: string, expectedMode: number): void {
-  const currentUid = typeof process.getuid === "function" ? process.getuid() : undefined;
-  if ((currentUid !== undefined && stats.uid !== currentUid) || (stats.mode & 0o777) !== expectedMode) {
+function validateOwnershipAndMode(
+  stats: Stats,
+  key: string,
+  expectedMode: number,
+): void {
+  const currentUid =
+    typeof process.getuid === "function" ? process.getuid() : undefined;
+  if (
+    (currentUid !== undefined && stats.uid !== currentUid) ||
+    (stats.mode & 0o777) !== expectedMode
+  ) {
     throw new ObjectStorageError(
       "UNSAFE_PATH",
       `Unsafe owner or permissions for object-store path: ${key}`,
@@ -588,10 +754,15 @@ function validateOwnershipAndMode(stats: Stats, key: string, expectedMode: numbe
   }
 }
 
-function prefixesCanOverlap(directoryKey: string, requestedPrefix: string): boolean {
-  return requestedPrefix === ""
-    || directoryKey.startsWith(requestedPrefix)
-    || requestedPrefix.startsWith(`${directoryKey}/`);
+function prefixesCanOverlap(
+  directoryKey: string,
+  requestedPrefix: string,
+): boolean {
+  return (
+    requestedPrefix === "" ||
+    directoryKey.startsWith(requestedPrefix) ||
+    requestedPrefix.startsWith(`${directoryKey}/`)
+  );
 }
 
 function compareNames(left: string, right: string): number {
