@@ -1,8 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants, closeSync, fstatSync, lstatSync, openSync, readSync, readdirSync, realpathSync, watch, type FSWatcher, type Stats } from "node:fs";
+import {
+  constants, closeSync, fstatSync, lstatSync, openSync, readSync, readdirSync,
+  realpathSync, watch, type FSWatcher, type Stats,
+} from "node:fs";
 import { resolve } from "node:path";
 import { CHUNK_SIZE, parseDeviceId, parseRevisionId, parseVaultId } from "@nanosync/protocol";
-import { encryptChunk, manifestPaths, MAX_FILE_BYTES, parseManifest, type EncryptedObject, type ManifestEntry, type ManifestV1 } from "@nanosync/sync-core";
+import {
+  encryptChunk, manifestPaths, MAX_FILE_BYTES, parseManifest,
+  type EncryptedObject, type ManifestEntry, type ManifestV1,
+} from "@nanosync/sync-core";
 import { ClientLocal, type Entry } from "@nanosync/client-local";
 export { applyNewFiles, applyNewFiles as applyManifest } from "./apply.ts";
 export { hydrateFile } from "./hydration.ts";
@@ -57,13 +63,19 @@ function inventory(root: string): Found[] {
     for (const name of names) {
       validName(name);
       const relative = path ? `${path}/${name}` : name;
-      if (Buffer.byteLength(relative) > 4096 || folded.has(name.toLowerCase())) throw new Error("ambiguous or overlong path");
+      if (
+        Buffer.byteLength(relative) > 4096 || folded.has(name.toLowerCase())
+      ) throw new Error("ambiguous or overlong path");
       folded.add(name.toLowerCase());
       const target = `/proc/self/fd/${fd}/${name}`;
       const st = lstatSync(target);
       if (st.isDirectory()) {
         const child = openChecked(target, "directory", st);
-        try { descend(child, relative, fstatSync(child)); } finally { closeSync(child); }
+        try {
+          descend(child, relative, fstatSync(child));
+        } finally {
+          closeSync(child);
+        }
       } else {
         safeStat(st, "file");
         result.push({ path: relative, kind: "file", stat: st, identity: identity(st) });
@@ -125,7 +137,9 @@ export class LinuxScanner {
     const prior = parseManifest(priorInput), revision = parseRevisionId(revisionId), device = parseDeviceId(deviceId);
     parseVaultId(prior.vaultId);
     if (revision === prior.revisionId || !(master instanceof Uint8Array) || master.length !== 32) throw new Error("invalid scan context");
-    const key = master.slice(), files = this.snapshot(), old = new Map(prior.entries.map(e => [e.id, e]));
+    const key = master.slice();
+    const files = this.snapshot();
+    const old = new Map(prior.entries.map(e => [e.id, e]));
     const priorPath = new Map<string, ManifestEntry>();
     function index(e: ManifestEntry): string {
       if (e.parentId === null) return "";
@@ -137,7 +151,10 @@ export class LinuxScanner {
     const localEntries = this.local.entries(), localPath = new Map(localEntries.map(e => [e.path, e]));
     const idByIdentity = new Map<string, string[]>();
     for (const item of this.local.identities()) {
-      const k = `${item.device}:${item.inode}`, ids = idByIdentity.get(k) ?? []; ids.push(item.entryId); idByIdentity.set(k, ids);
+      const k = `${item.device}:${item.inode}`;
+      const ids = idByIdentity.get(k) ?? [];
+      ids.push(item.entryId);
+      idByIdentity.set(k, ids);
     }
     const occurrence = new Map<string, number>();
     for (const file of files) occurrence.set(file.identity, (occurrence.get(file.identity) ?? 0) + 1);
@@ -145,7 +162,9 @@ export class LinuxScanner {
     for (const file of files) {
       if (localPath.get(file.path)?.hydration === "evicted")
         throw new Error("evicted name collision; reconcile before scanning");
-      const atPath = priorPath.get(file.path) ?? (localPath.get(file.path) && old.get(localPath.get(file.path)!.id)) ?? hints.get(file.path);
+      const atPath = priorPath.get(file.path) ??
+        (localPath.get(file.path) && old.get(localPath.get(file.path)!.id)) ??
+        hints.get(file.path);
       const candidates = idByIdentity.get(file.identity) ?? [];
       // Identity wins over path for atomic replacement / rename only if one-to-one.
       const byInode = candidates.length === 1 && occurrence.get(file.identity) === 1 ? old.get(candidates[0]!) : undefined;
@@ -166,8 +185,10 @@ export class LinuxScanner {
     let cursor = 0;
     await Promise.all(Array.from({ length: Math.min(this.options.maxConcurrent, files.length) }, async () => {
       while (cursor < files.length) {
-        const file = files[cursor++]!; if (file.kind !== "file") continue;
-        const hash = createHash("sha256"), chunks = [];
+        const file = files[cursor++]!;
+        if (file.kind !== "file") continue;
+        const hash = createHash("sha256");
+        const chunks = [];
         for await (const bytes of readChunks(this.root, file)) {
           hash.update(bytes);
           const encrypted = await encryptChunk(bytes, key, prior.vaultId);
@@ -180,7 +201,10 @@ export class LinuxScanner {
     if (after.length !== files.length || after.some((file, i) => file.path !== files[i]!.path || !same(file.stat, files[i]!.stat)))
       throw new Error("directory changed during scan");
     for (const file of files) {
-      const id = assigned.get(file.path)!, parentPath = file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : "";
+      const id = assigned.get(file.path)!;
+      const parentPath = file.path.includes("/")
+        ? file.path.slice(0, file.path.lastIndexOf("/"))
+        : "";
       const entry: ManifestEntry = { id, parentId: file.path ? assigned.get(parentPath)! : null,
         name: file.path ? file.path.slice(parentPath ? parentPath.length + 1 : 0) : "", kind: file.kind };
       if (old.get(id)?.conflict) entry.conflict = old.get(id)!.conflict;
@@ -248,7 +272,14 @@ export class LinuxScanner {
     }
     for (const entry of entries.filter(e => e.kind === "tombstone"))
       updates.push({ id: entry.id, path: nextPath(entry), kind: "tombstone", fingerprint: null, hydration: "downloaded", revision });
-    const manifest = parseManifest({ version: 1, vaultId: prior.vaultId, revisionId: revision, parents: [prior.revisionId], creatingDeviceId: device, entries });
+    const manifest = parseManifest({
+      version: 1,
+      vaultId: prior.vaultId,
+      revisionId: revision,
+      parents: [prior.revisionId],
+      creatingDeviceId: device,
+      entries,
+    });
     const scanner = this;
     return { manifest, suppressed, commit: () => {
       const current = scanner.snapshot();

@@ -1,8 +1,16 @@
 import { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
-import { constants, closeSync, existsSync, fchmodSync, fsyncSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import {
+  constants, closeSync, existsSync, fchmodSync, fsyncSync, fstatSync, lstatSync,
+  mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync,
+  unlinkSync, writeSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { CHUNK_SIZE, parseAdvanceHeadRequest, parseCiphertextChecksum, parseDeviceId, parseIdempotencyKey, parseObjectFrameHeader, parseObjectId, parseRevisionId, parseVaultId, type AdvanceHeadRequest, type VisibleObjectReference } from "@nanosync/protocol";
+import {
+  CHUNK_SIZE, parseAdvanceHeadRequest, parseCiphertextChecksum, parseDeviceId,
+  parseIdempotencyKey, parseObjectFrameHeader, parseObjectId, parseRevisionId,
+  parseVaultId, type AdvanceHeadRequest, type VisibleObjectReference,
+} from "@nanosync/protocol";
 import type { ChunkJournal, ManifestV1 } from "@nanosync/sync-core";
 
 const hash = (data: string | Uint8Array) => createHash("sha256").update(data).digest("hex");
@@ -39,12 +47,18 @@ function secureDir(path: string, create = false): string {
   const target = resolve(path);
   if (create && !existsSync(target)) mkdirSync(target, { mode: 0o700 });
   const st = lstatSync(target);
-  if (!st.isDirectory() || st.isSymbolicLink() || st.uid !== process.getuid!() || (st.mode & 0o077) !== 0 || realpathSync(target) !== target) throw new Error("unsafe private directory");
+  if (
+    !st.isDirectory() || st.isSymbolicLink() || st.uid !== process.getuid!() ||
+    (st.mode & 0o077) !== 0 || realpathSync(target) !== target
+  ) throw new Error("unsafe private directory");
   return target;
 }
 function secureFile(path: string): void {
   const st = lstatSync(path);
-  if (!st.isFile() || st.isSymbolicLink() || st.nlink !== 1 || st.uid !== process.getuid!() || (st.mode & 0o177) !== 0) throw new Error("unsafe private file");
+  if (
+    !st.isFile() || st.isSymbolicLink() || st.nlink !== 1 ||
+    st.uid !== process.getuid!() || (st.mode & 0o177) !== 0
+  ) throw new Error("unsafe private file");
 }
 function sidecars(path: string) { for (const suffix of ["", "-wal", "-shm", "-journal"]) if (existsSync(path + suffix)) secureFile(path + suffix); }
 function syncDir(path: string) { const fd = openSync(path, constants.O_RDONLY | noSymlink); try { fsyncSync(fd); } finally { closeSync(fd); } }
@@ -78,7 +92,11 @@ export class ClientLocal implements ChunkJournal {
     this.db = new Database(filename, { create: false, readwrite: true, strict: true });
     try {
       this.db.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL");
-      if (row<{ foreign_keys: number }>(this.db, "PRAGMA foreign_keys")?.foreign_keys !== 1 || row<{ synchronous: number }>(this.db, "PRAGMA synchronous")?.synchronous !== 2 || row<{ journal_mode: string }>(this.db, "PRAGMA journal_mode")?.journal_mode !== "wal") throw new Error("unsafe SQLite settings");
+      if (
+        row<{ foreign_keys: number }>(this.db, "PRAGMA foreign_keys")?.foreign_keys !== 1 ||
+        row<{ synchronous: number }>(this.db, "PRAGMA synchronous")?.synchronous !== 2 ||
+        row<{ journal_mode: string }>(this.db, "PRAGMA journal_mode")?.journal_mode !== "wal"
+      ) throw new Error("unsafe SQLite settings");
       this.migrate();
       if (row<{ integrity_check: string }>(this.db, "PRAGMA integrity_check")?.integrity_check !== "ok" || schemaDigest(this.db) !== expectedDigest()) throw new Error("corrupt local schema");
       this.write(() => {
@@ -89,7 +107,10 @@ export class ClientLocal implements ChunkJournal {
       sidecars(filename);
       this.repairCache();
       this.tick = row<{ n: number }>(this.db, "SELECT coalesce(max(accessed),0) n FROM chunks")!.n;
-    } catch (error) { this.db.close(); throw error; }
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
   }
 
   private migrate() {
@@ -99,7 +120,10 @@ export class ClientLocal implements ChunkJournal {
     if (!ledger && version !== 0) throw new Error("missing migration ledger");
     if (ledger) {
       const history = all<{ version: number; checksum: string }>(this.db, "SELECT * FROM migrations ORDER BY version");
-      if (history.length !== version || history.some((r, i) => r.version !== i + 1 || r.checksum !== hash(`${i + 1}\0${migrations[i]}`))) throw new Error("migration checksum mismatch");
+      if (
+        history.length !== version ||
+        history.some((r, i) => r.version !== i + 1 || r.checksum !== hash(`${i + 1}\0${migrations[i]}`))
+      ) throw new Error("migration checksum mismatch");
     } else if (row<{ n: number }>(this.db, "SELECT count(*) n FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'")!.n) throw new Error("unrecognized schema");
     for (let i = version; i < migrations.length; i++) {
       this.db.exec("BEGIN IMMEDIATE");
@@ -114,8 +138,16 @@ export class ClientLocal implements ChunkJournal {
   private write<T>(fn: () => T): T {
     if (this.closed) throw new Error("closed local database");
     this.db.exec("BEGIN IMMEDIATE");
-    try { const result = fn(); if (result && typeof result === "object" && "then" in result) throw new Error("async transaction"); this.db.exec("COMMIT"); return result; }
-    catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    try {
+      const result = fn();
+      if (result && typeof result === "object" && "then" in result)
+        throw new Error("async transaction");
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
   close() { if (!this.closed) { this.db.close(); this.closed = true; } }
   pragmas() { return { synchronous: row<{ synchronous: number }>(this.db, "PRAGMA synchronous")!.synchronous, version: row<{ user_version: number }>(this.db, "PRAGMA user_version")!.user_version }; }
@@ -165,9 +197,14 @@ export class ClientLocal implements ChunkJournal {
   }
   beginHydration(intent: HydrationIntent) {
     uuid(intent.id); uuid(intent.entryId); uuid(intent.revision); integer(intent.sequence);
-    if (!intent.sequence || !/^[0-9]+$/.test(intent.rootDevice) || !/^[0-9]+$/.test(intent.rootInode) ||
-        intent.direction === "evict" && (!intent.fileDevice || !intent.fileInode || !/^[0-9]+$/.test(intent.fileDevice) || !/^[0-9]+$/.test(intent.fileInode)) ||
-        intent.direction === "download" && (intent.fileDevice !== null || intent.fileInode !== null)) throw new Error("invalid hydration intent");
+    if (
+      !intent.sequence || !/^[0-9]+$/.test(intent.rootDevice) || !/^[0-9]+$/.test(intent.rootInode) ||
+      intent.direction === "evict" && (
+        !intent.fileDevice || !intent.fileInode ||
+        !/^[0-9]+$/.test(intent.fileDevice) || !/^[0-9]+$/.test(intent.fileInode)
+      ) ||
+      intent.direction === "download" && (intent.fileDevice !== null || intent.fileInode !== null)
+    ) throw new Error("invalid hydration intent");
     this.write(() => {
       if (this.pendingHydration() || this.pendingApplies().length || this.proposal()) throw new Error("other local work must finish before hydration");
       if (this.head("applied").revisionId !== intent.revision || this.head("applied").sequence !== intent.sequence ||

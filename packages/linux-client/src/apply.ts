@@ -1,30 +1,55 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants, closeSync, fchmodSync, fsyncSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readSync, readdirSync, renameSync, rmdirSync, unlinkSync, writeSync, type Stats } from "node:fs";
+import {
+  constants, closeSync, fchmodSync, fsyncSync, fstatSync, linkSync, lstatSync,
+  mkdirSync, openSync, readSync, readdirSync, renameSync, rmdirSync, unlinkSync,
+  writeSync, type Stats,
+} from "node:fs";
 import { resolve } from "node:path";
 import { CHUNK_SIZE } from "@nanosync/protocol";
-import { encodeManifest, manifestPaths, parseManifest, type HttpRemote, type ManifestEntry, type ManifestV1 } from "@nanosync/sync-core";
+import {
+  encodeManifest, manifestPaths, parseManifest,
+  type HttpRemote, type ManifestEntry, type ManifestV1,
+} from "@nanosync/sync-core";
 import { ClientLocal, type Entry } from "@nanosync/client-local";
 
 const dirFlags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
 const fileFlags = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
 type Old = { entry: Entry; device: string; inode: string };
-type Plan = { version: 1; rootDevice: string; rootInode: string; manifest: ManifestV1; old: Old[];
-  desired: Entry[]; stages: Record<string, string>; created: Record<string, { device: string; inode: string }>; operationId: string };
+type Plan = {
+  version: 1;
+  rootDevice: string;
+  rootInode: string;
+  manifest: ManifestV1;
+  old: Old[];
+  desired: Entry[];
+  stages: Record<string, string>;
+  created: Record<string, { device: string; inode: string }>;
+  operationId: string;
+};
 
 function statOrNull(path: string): Stats | null {
-  try { return lstatSync(path); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
+  try {
+    return lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
 }
 function safe(stat: Stats, kind: "file" | "directory") {
-  if (stat.uid !== process.getuid!() || !!(stat.mode & 0o022) || (kind === "file" ? !stat.isFile() || stat.nlink !== 1 : !stat.isDirectory()))
+  if (
+    stat.uid !== process.getuid!() || !!(stat.mode & 0o022) ||
+    (kind === "file" ? !stat.isFile() || stat.nlink !== 1 : !stat.isDirectory())
+  )
     throw new Error("unsafe filesystem entry (symlink, hardlink, special file or foreign owner)");
 }
 function digest(fd: number, expected: Stats, allowLinked = false): string {
-  const hash = createHash("sha256"), buffer = Buffer.allocUnsafe(64 * 1024);
+  const hash = createHash("sha256");
+  const buffer = Buffer.allocUnsafe(64 * 1024);
   for (let offset = 0; offset < expected.size;) {
     const n = readSync(fd, buffer, 0, Math.min(buffer.length, expected.size - offset), offset);
     if (!n) throw new Error("file truncated during verification");
-    hash.update(buffer.subarray(0, n)); offset += n;
+    hash.update(buffer.subarray(0, n));
+    offset += n;
   }
   const after = fstatSync(fd);
   if (after.dev !== expected.dev || after.ino !== expected.ino || after.size !== expected.size ||
@@ -37,16 +62,23 @@ function digest(fd: number, expected: Stats, allowLinked = false): string {
 class Root {
   readonly fd: number;
   readonly stat: Stats;
-  constructor(readonly path: string, expected?: { rootDevice: string; rootInode: string }) {
-    this.fd = openSync(path, dirFlags); this.stat = fstatSync(this.fd); safe(this.stat, "directory");
+  constructor(
+    readonly path: string,
+    expected?: { rootDevice: string; rootInode: string },
+  ) {
+    this.fd = openSync(path, dirFlags);
+    this.stat = fstatSync(this.fd);
+    safe(this.stat, "directory");
     if (expected && (String(this.stat.dev) !== expected.rootDevice || String(this.stat.ino) !== expected.rootInode)) {
-      closeSync(this.fd); throw new Error("root identity changed");
+      closeSync(this.fd);
+      throw new Error("root identity changed");
     }
     this.check();
   }
   check() {
     const current = lstatSync(this.path); safe(current, "directory");
-    if (current.dev !== this.stat.dev || current.ino !== this.stat.ino) throw new Error("root moved");
+    if (current.dev !== this.stat.dev || current.ino !== this.stat.ino)
+      throw new Error("root moved");
   }
   parent(path: string): { fd: number; leaf: string; close(): void; check(): void } {
     this.check();
@@ -58,26 +90,38 @@ class Root {
       for (const name of parts.slice(0, -1)) {
         const next = openSync(`/proc/self/fd/${fd}/${name}`, dirFlags);
         const st = fstatSync(next); safe(st, "directory");
-        chain.push({ fd, name, dev: st.dev, ino: st.ino }); fd = next;
+        chain.push({ fd, name, dev: st.dev, ino: st.ino });
+        fd = next;
       }
-      const close = () => { if (fd !== this.fd) closeSync(fd); for (const item of chain.slice(0, -1)) if (item.fd !== this.fd) closeSync(item.fd); };
+      const close = () => {
+        if (fd !== this.fd) closeSync(fd);
+        for (const item of chain.slice(0, -1))
+          if (item.fd !== this.fd) closeSync(item.fd);
+      };
       const check = () => {
         this.check();
         for (const item of chain) {
           const st = statOrNull(`/proc/self/fd/${item.fd}/${item.name}`);
-          if (!st || !st.isDirectory() || st.dev !== item.dev || st.ino !== item.ino) throw new Error("parent moved during apply");
+          if (!st || !st.isDirectory() || st.dev !== item.dev || st.ino !== item.ino)
+            throw new Error("parent moved during apply");
         }
       };
       check();
       return { fd, leaf: parts.at(-1)!, close, check };
-    } catch (error) { if (fd !== this.fd) closeSync(fd); for (const item of chain.slice(0, -1)) if (item.fd !== this.fd) closeSync(item.fd); throw error; }
+    } catch (error) {
+      if (fd !== this.fd) closeSync(fd);
+      for (const item of chain.slice(0, -1))
+        if (item.fd !== this.fd) closeSync(item.fd);
+      throw error;
+    }
   }
   withParent<T>(path: string, fn: (target: string, check: () => void, dir: number) => T): T {
     const parent = this.parent(path);
     try {
       parent.check();
       const result = fn(`/proc/self/fd/${parent.fd}/${parent.leaf}`, parent.check, parent.fd);
-      parent.check(); return result;
+      parent.check();
+      return result;
     } finally { parent.close(); }
   }
   at(path: string): Stats | null {

@@ -1,5 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants, closeSync, fchmodSync, fsyncSync, fstatSync, linkSync, lstatSync, openSync, readSync, unlinkSync, writeSync, type Stats } from "node:fs";
+import {
+  constants, closeSync, fchmodSync, fsyncSync, fstatSync, linkSync, lstatSync,
+  openSync, readSync, unlinkSync, writeSync, type Stats,
+} from "node:fs";
 import { resolve } from "node:path";
 import { CHUNK_SIZE, parseObjectId, type VisibleObjectReference } from "@nanosync/protocol";
 import { manifestPaths, type HttpRemote, type ManifestV1 } from "@nanosync/sync-core";
@@ -7,16 +10,25 @@ import { ClientLocal, type HydrationIntent } from "@nanosync/client-local";
 
 const dirFlags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
 const fileFlags = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
-function at(path: string): Stats | null { try { return lstatSync(path); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; } }
+function at(path: string): Stats | null {
+  try {
+    return lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
 function ownedFile(st: Stats, linked = false) {
   if (!st.isFile() || st.nlink !== (linked ? 2 : 1) || st.uid !== process.getuid!() || st.mode & 0o022) throw new Error("unsafe hydration file");
 }
 function fileDigest(fd: number, st: Stats, links = 1): string {
-  const digest = createHash("sha256"), buffer = Buffer.allocUnsafe(64 * 1024);
+  const digest = createHash("sha256");
+  const buffer = Buffer.allocUnsafe(64 * 1024);
   for (let offset = 0; offset < st.size;) {
     const count = readSync(fd, buffer, 0, Math.min(buffer.length, st.size - offset), offset);
     if (!count) throw new Error("hydration file truncated");
-    digest.update(buffer.subarray(0, count)); offset += count;
+    digest.update(buffer.subarray(0, count));
+    offset += count;
   }
   const after = fstatSync(fd);
   if (after.dev !== st.dev || after.ino !== st.ino || after.nlink !== links || after.size !== st.size || after.mtimeMs !== st.mtimeMs || after.ctimeMs !== st.ctimeMs)
@@ -27,10 +39,12 @@ class Anchor {
   readonly fd: number;
   readonly stat: Stats;
   constructor(readonly path: string, expected?: HydrationIntent) {
-    this.fd = openSync(path, dirFlags); this.stat = fstatSync(this.fd);
+    this.fd = openSync(path, dirFlags);
+    this.stat = fstatSync(this.fd);
     if (!this.stat.isDirectory() || this.stat.uid !== process.getuid!() || this.stat.mode & 0o022 ||
       expected && (String(this.stat.dev) !== expected.rootDevice || String(this.stat.ino) !== expected.rootInode)) {
-      closeSync(this.fd); throw new Error("unsafe hydration root");
+      closeSync(this.fd);
+      throw new Error("unsafe hydration root");
     }
     this.check();
   }
@@ -48,14 +62,26 @@ class Anchor {
       for (const part of parts.slice(0, -1)) {
         const fd = openSync(`/proc/self/fd/${parent}/${part}`, dirFlags), st = fstatSync(fd);
         if (!st.isDirectory() || st.uid !== process.getuid!() || st.mode & 0o022) { closeSync(fd); throw new Error("unsafe hydration parent"); }
-        chain.push({ fd: parent, name: part, dev: st.dev, ino: st.ino }); parent = fd;
+        chain.push({ fd: parent, name: part, dev: st.dev, ino: st.ino });
+        parent = fd;
       }
       const check = () => {
         this.check();
-        for (const item of chain) { const st = at(`/proc/self/fd/${item.fd}/${item.name}`); if (!st || st.dev !== item.dev || st.ino !== item.ino) throw new Error("hydration parent moved"); }
+        for (const item of chain) {
+          const st = at(`/proc/self/fd/${item.fd}/${item.name}`);
+          if (!st || st.dev !== item.dev || st.ino !== item.ino)
+            throw new Error("hydration parent moved");
+        }
       };
-      check(); const result = fn(`/proc/self/fd/${parent}/${parts.at(-1)}`, parent, check); check(); return result;
-    } finally { if (parent !== this.fd) closeSync(parent); for (const item of chain.slice(0, -1)) if (item.fd !== this.fd) closeSync(item.fd); }
+      check();
+      const result = fn(`/proc/self/fd/${parent}/${parts.at(-1)}`, parent, check);
+      check();
+      return result;
+    } finally {
+      if (parent !== this.fd) closeSync(parent);
+      for (const item of chain.slice(0, -1))
+        if (item.fd !== this.fd) closeSync(item.fd);
+    }
   }
   close() { closeSync(this.fd); }
 }
@@ -72,9 +98,18 @@ function verifyFile(anchor: Anchor, path: string, size: number, digest: string, 
 function stageName(intent: HydrationIntent) { return `.nanosync-hydrate-${intent.id}`; }
 
 /** Same-head hydration. The daemon must serialize this with sync and check the remote head. */
-export async function hydrateFile(root: string, local: ClientLocal, remote: HttpRemote, manifest: ManifestV1,
-  revision: { references: readonly VisibleObjectReference[] }, master: Uint8Array, direction: "evict" | "download", path: string,
-  existing?: HydrationIntent, hooks: { beforeLink?: () => void; afterLink?: () => void } = {}): Promise<{ path: string; hydration: "evicted" | "downloaded"; revisionId: string }> {
+export async function hydrateFile(
+  root: string,
+  local: ClientLocal,
+  remote: HttpRemote,
+  manifest: ManifestV1,
+  revision: { references: readonly VisibleObjectReference[] },
+  master: Uint8Array,
+  direction: "evict" | "download",
+  path: string,
+  existing?: HydrationIntent,
+  hooks: { beforeLink?: () => void; afterLink?: () => void } = {},
+): Promise<{ path: string; hydration: "evicted" | "downloaded"; revisionId: string }> {
   const paths = manifestPaths(manifest), file = paths.get(path), localEntry = local.entries().find(entry => entry.path === path);
   if (!file || file.kind !== "file" || !localEntry || localEntry.id !== file.id || localEntry.fingerprint !== file.sha256 ||
       localEntry.revision !== manifest.revisionId) throw new Error("hydration path differs from authenticated manifest");
@@ -95,8 +130,17 @@ export async function hydrateFile(root: string, local: ClientLocal, remote: Http
       }
       const stat = direction === "evict" ? verifyFile(anchor, path, file.size!, file.sha256!, file.executable!) : null;
       if (direction === "download" && anchor.parent(path, target => at(target))) throw new Error("download target already exists");
-      intent = { id: randomUUID(), entryId: file.id, revision: manifest.revisionId, sequence: local.head("applied").sequence,
-        direction, rootDevice: String(anchor.stat.dev), rootInode: String(anchor.stat.ino), fileDevice: stat ? String(stat.dev) : null, fileInode: stat ? String(stat.ino) : null };
+      intent = {
+        id: randomUUID(),
+        entryId: file.id,
+        revision: manifest.revisionId,
+        sequence: local.head("applied").sequence,
+        direction,
+        rootDevice: String(anchor.stat.dev),
+        rootInode: String(anchor.stat.ino),
+        fileDevice: stat ? String(stat.dev) : null,
+        fileInode: stat ? String(stat.ino) : null,
+      };
       local.beginHydration(intent);
     } else if (intent.entryId !== file.id || intent.direction !== direction || intent.revision !== manifest.revisionId || intent.sequence !== local.head("applied").sequence)
       throw new Error("hydration recovery context differs");
