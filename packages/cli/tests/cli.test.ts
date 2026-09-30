@@ -27,6 +27,21 @@ test("CLI rejects unknown flags and missing args", async () => {
   expect(await main(["resolve", "copy", "--confirm-discard", "--confirm-discard"])).toBe(2);
 });
 
+test("CLI maps typed local daemon failures to stable process codes", async () => {
+  const root = directory(); chmodSync(root, 0o700);
+  writeFileSync(join(root, "ipc.secret"), "a".repeat(64), { mode: 0o600 });
+  let state = "auth_required";
+  const server = Bun.serve({ unix: join(root, "daemon.sock"), fetch: () => Response.json({ error: "arbitrary message", state }, { status: 409 }) });
+  try {
+    for (const [category, code] of [["auth_required", 3], ["offline", 5], ["integrity_failure", 6],
+      ["capacity_incomplete", 7], ["conflict_blocked", 8]] as const) {
+      state = category;
+      expect(await main(["status", "--client-dir", root, "--json"])).toBe(code);
+    }
+  } finally { server.stop(true); }
+  expect(await main(["status", "--client-dir", root])).toBe(5);
+});
+
 test("server init provisions owner-only secrets and refuses overwrite", async () => {
   const root = directory(); chmodSync(root, 0o700);
   expect(await main(["server", "init", "--server-dir", root])).toBe(0);
@@ -128,6 +143,12 @@ test("runtime server accepts encrypted genesis, approves second device, and revo
     expect((await api(url, "/v1/bootstrap/complete", { method: "POST", body: JSON.stringify({ protocolVersion: 1, vaultId, genesisRevision }) }, undefined, proof)).sequence).toBe(1);
     const adminToken = await login(url, password);
     expect((await enroll(url, adminToken, deviceId, proof)).status).toBe("approved");
+    const adminDir = directory();
+    saveCredentials(adminDir, { baseUrl: url, vaultId, deviceId, token: adminToken, masterKey: Buffer.from(master).toString("hex") });
+    for (const command of ["storage", "retention-dry-run", "gc-dry-run", "scan", "diagnostics"]) {
+      expect(await main(["admin", command, "--client-dir", adminDir, "--json"])).toBe(0);
+    }
+    expect(await main(["admin", "collect", "--client-dir", adminDir])).toBe(2);
     const second = randomUUID(), secondDir = directory();
     const nativeFetch = globalThis.fetch;
     let dropped = false;
@@ -216,7 +237,9 @@ test("runtime server accepts encrypted genesis, approves second device, and revo
     } finally { await stopDaemon(daemon); }
     const other = JSON.parse(secureRead(join(secondDir, "client.json")).toString("utf8"));
     expect((await api(url, "/v1/head", {}, other.token)).sequence).toBe(5);
+    expect(await main(["admin", "storage", "--client-dir", secondDir])).toBe(3);
     await api(url, `/v1/admin/devices/${second}/revoke`, { method: "POST", body: JSON.stringify({ protocolVersion: 1 }) }, adminToken);
+    expect(await main(["admin", "storage", "--client-dir", secondDir])).toBe(3);
     await expect(api(url, "/v1/head", {}, other.token)).rejects.toThrow(/401/);
   } finally { await server.stop(); }
 });

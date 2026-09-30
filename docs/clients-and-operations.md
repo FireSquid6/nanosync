@@ -139,6 +139,21 @@ Commands intended for scripts should provide stable structured output and meanin
 - Incomplete due to storage capacity.
 - Integrity failure.
 
+Linux `status --json` returns `state` (stable classification), `exitCode`, and
+`phase` (daemon activity, independently). Exit codes: 0 synchronized; 2 unknown
+or command error; 3 authorization/approval required; 4 pending, active, paused,
+or remote-only; 5 offline; 6 integrity failure; 7 capacity incomplete; 8 conflict
+blocked. `status` exits with its reported code; other successful commands exit
+0 except pending enrollment (3). Failed commands report `{error,state,exitCode}`
+on stderr. A conflict copy remains blocked until resolved; an evicted remote-only
+file is `remote_only`, never fully synchronized. Durable heads alone do not prove
+completion. `status` inventories pathname and file metadata without reading file
+content, contacting the server, or changing local state. A same-size edit with
+forged/restored metadata may escape this check; the next full sync verifies file
+content. Offline/auth/capacity/integrity classifications reflect the last failed
+sync, not a live network probe. Capacity reflects actual local disk errors or
+negotiated server object/reference limits, **not** Android storage forecasts.
+
 ## Server process
 
 The server is a single native process responsible for the API, metadata database, background maintenance, and object storage.
@@ -191,13 +206,15 @@ Administrative capabilities include:
 
 Administration is CLI-only in version 1, backed by the same authenticated server API used for administration rather than a privileged side channel.
 
+With an approved administrator's client directory, run `nanosync admin storage`, `nanosync admin retention-dry-run`, `nanosync admin gc-dry-run`, `nanosync admin scan`, or `nanosync admin diagnostics` (optionally `--json`). Reports are aggregate-only: no keys, tokens, object IDs, or plaintext names. Each `admin scan` verifies at most 100 catalog entries; repeat until `done: true` (scan position resets on server restart). Retention reports reject more than 10,000 revisions rather than silently truncating. No live GC execution command exists.
+
 ## Backup and restore
 
 ### Maintenance and offline GC (migration 4)
 
 `MaintenanceRepository.retentionDryRun(nowMs)` chooses by **server UTC acceptance time**: all accepted revisions at age ≤3 days, newest per UTC day through 30 days, newest per UTC month through 365 days. It also reports protected head, prepared revisions and their ancestor bases. This is **reporting only**: no client acknowledgement of merge bases exists, so even unselected revisions and their referenced ciphertext remain durable. Do not infer deletion authorization from the retention report. Active upload sessions protect their objects (including expired sessions until explicitly resolved). `ServerMaintenance.scan` streams complete object frames and compares frame identity, SHA-256 and catalog length; missing/corrupt catalog rows are flagged, not removed. Unexpected I/O errors abort the scan. A scan is advisable before planning GC.
 
-Step 16 must instantiate `PeriodicIntegrityScanner` with `ServerMaintenance` and wire `start()` to server startup and `await stop()` to shutdown. Configure a positive `intervalMs` and a `batchSize` of at most 1,000 (one bounded catalog page per tick); provide `onError` to report failures to operator monitoring, and observe `onBatch` counts. Only one batch runs at once, errors do not crash the scheduler, and shutdown aborts an in-flight scan. This is a runtime opt-in API, **not yet wired to the server process**; without that wiring checks remain manual and the periodic-verification requirement is not operational. A concurrent reupload that resets integrity state prevents an older scan result from overwriting it when the previous status/check time differs; the catalog has no generation counter for indistinguishable same-state writes.
+The production server entrypoint starts `PeriodicIntegrityScanner` with `ServerMaintenance` and awaits its stop on shutdown. It uses a positive interval and a batch size of at most 1,000 (one bounded catalog page per tick), reporting scan failures to stderr. Only one batch runs at once, errors do not crash the scheduler, and shutdown aborts an in-flight scan. A concurrent reupload that resets integrity state prevents an older scan result from overwriting it when the previous status/check time differs; the catalog has no generation counter for indistinguishable same-state writes.
 
 `ServerMaintenance.gcDryRun` reports already marked candidates and their grace eligibility without changing state. The only executable GC is `collectOffline(control, nowMs)`, not an HTTP route, scheduler or live admin command. Stop every API instance and writer first; take operator-exclusive control of **both** the database and object-store paths (including other hosts and backup/restore jobs), hold that control through the entire run, and implement `assertExclusiveOffline` to fail if exclusivity is lost. SQLite transaction locks alone do not serialize physical deletion against uploads. No shipped server-wide lease exists: **never run this against a live server**. A first offline pass transactionally marks verified unreferenced catalog objects older than 24 hours; a later pass after an additional full 24-hour marking grace rechecks catalog identity, integrity, revision references (including prepared), head and active uploads before physical deletion. A failed deletion leaves a durable candidate for re-evaluation. Uncataloged files and uncertain/corrupt objects are deliberately not collected; investigate manually. GC is useful for cataloged abandoned uploads only, not retention-based historical reclamation. Review dry-run results and secure a verified backup before any offline collection.
 

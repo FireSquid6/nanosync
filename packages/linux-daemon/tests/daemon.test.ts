@@ -68,14 +68,18 @@ test("two directories publish, download, pause, restart and reject revoked crede
   }, body: `{"extra":"${"x".repeat(2000)}"}` } as RequestInit & { unix: string });
   expect(invalid.status).toBe(413);
   await first.sync();
+  expect(first.status().state).toBe("synchronized");
   expect((await daemonCommand(a.clientDirectory, "status")).applied.sequence).toBe(1);
   await expect(startDaemon(a)).rejects.toThrow();
   writeFileSync(join(a.syncDirectory, "note"), "one", { mode: 0o600 });
+  expect(first.status().state).toBe("local_changes_pending");
+  expect(first.status().headsConverged).toBe(true); // legacy head-only signal
   expect((await daemonCommand(a.clientDirectory, "sync")).applied.sequence).toBe(2);
   const other = await startDaemon(b); daemons.push(other);
   await daemonCommand(b.clientDirectory, "sync");
   expect(readFileSync(join(b.syncDirectory, "note"), "utf8")).toBe("one");
   await daemonCommand(b.clientDirectory, "pause");
+  expect(other.status().state).toBe("paused");
   writeFileSync(join(a.syncDirectory, "note"), "two");
   await daemonCommand(a.clientDirectory, "sync");
   expect(readFileSync(join(b.syncDirectory, "note"), "utf8")).toBe("one");
@@ -86,6 +90,20 @@ test("two directories publish, download, pause, restart and reject revoked crede
   env.revoke();
   await expect(daemonCommand(b.clientDirectory, "sync")).rejects.toThrow();
   expect((await daemonCommand(b.clientDirectory, "status")).phase).toBe("error");
+  expect((await daemonCommand(b.clientDirectory, "status")).state).toBe("auth_required");
+});
+
+test("status remains conservative for evicted files and pending journals", async () => {
+  const env = await setup(), options = env.client("a", device);
+  const daemon = await startDaemon(options); daemons.push(daemon); await daemon.sync();
+  writeFileSync(join(options.syncDirectory, "note"), "data", { mode: 0o600 }); await daemon.sync();
+  await daemonCommand(options.clientDirectory, "evict", { path: "note" });
+  expect(daemon.status().remoteOnlyFiles).toBe(1);
+  expect(daemon.status().state).toBe("remote_only");
+  expect(daemon.status().exitCode).not.toBe(0);
+  await daemonCommand(options.clientDirectory, "download", { path: "note" });
+  await daemon.sync();
+  expect(daemon.status().state).toBe("synchronized");
 });
 
 test("concurrent starts have one owner and stop preserves a replacement socket", async () => {
@@ -246,6 +264,7 @@ test("accepted merge survives a lost response and replays local-branch metadata"
   } }); daemons.push(interrupted);
   await expect(interrupted.sync()).rejects.toThrow("lost merge acceptance");
   expect(interrupted.status().pendingProposal).toBe(true);
+  expect(interrupted.status().state).not.toBe("synchronized");
   await interrupted.stop(); daemons.splice(daemons.indexOf(interrupted), 1);
   const resumed = await startDaemon(b); daemons.push(resumed); await resumed.sync();
   const names = (await import("node:fs")).readdirSync(b.syncDirectory);

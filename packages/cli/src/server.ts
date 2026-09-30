@@ -28,7 +28,7 @@ export async function runServer(options: RunServerOptions): Promise<{ stop(): Pr
       onBatch: counts => { if (counts.missing || counts.corrupt) console.error(`integrity failures: missing=${counts.missing}, corrupt=${counts.corrupt}`); },
       onError: () => console.error("integrity scan failed; investigate storage") });
     const server = startServer({ filesystem, catalog: new ObjectCatalogRepository(database), revisions: new RevisionRepository(database),
-      bootstrap: new BootstrapRepository(database), authentication, authorizeBootstrap, config });
+      bootstrap: new BootstrapRepository(database), authentication, maintenance, authorizeBootstrap, config });
     scanner.start();
     return { url: server.url.href, stop: async () => { server.stop(true); await scanner.stop(); database.close(); } };
   } catch (error) { database.close(); throw error; }

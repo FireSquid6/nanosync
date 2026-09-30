@@ -2,7 +2,7 @@
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
-import { daemonCommand, startDaemon } from "@nanosync/linux-daemon";
+import { daemonCommand, exitCode, failureState, startDaemon, type SyncState } from "@nanosync/linux-daemon";
 import { parseDeviceId } from "@nanosync/protocol";
 import { api, bootstrap, credentials, joinVault, readPassword } from "./client.ts";
 import { privateDirectory, secureCreate, secureRead } from "./security.ts";
@@ -19,6 +19,7 @@ const HELP = `nanosync [--client-dir DIR] COMMAND [arguments]
   conflicts | doctor             Inspect local daemon
   devices                         List devices (administrator)
   approve DEVICE_ID | revoke DEVICE_ID   Administrator actions
+  admin storage | retention-dry-run | gc-dry-run | scan | diagnostics   Aggregate administrator reports (scan: next 100 objects)
   bootstrap --url URL --proof-file FILE  First device (password from stdin, recovery to TTY)
   enroll --url URL --device-id UUID    Request enrollment (password from stdin)
   enroll --url URL --device-id UUID --recovery-file FILE  Finish approved enrollment
@@ -94,6 +95,15 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
       case "restore": count(rest, 1, 2); result = await daemonCommand(directory, "restore", { revision: rest[0], ...(rest[1] === undefined ? {} : { path: rest[1] }) }); break;
       case "resolve": count(rest, 1); if (flags["--confirm-discard"] !== true) throw new Error("resolve requires --confirm-discard; the named conflict copy will be removed from the live tree (retained in history)"); result = await daemonCommand(directory, "resolve", { path: rest[0] }); break;
       case "devices": count(rest, 0); { const creds = credentials(directory); result = await api(creds.baseUrl, "/v1/admin/devices", {}, creds.token); break; }
+      case "admin": {
+        count(rest, 1);
+        const paths: Record<string, string> = { storage: "storage", "retention-dry-run": "retention/dry-run", "gc-dry-run": "gc/dry-run", scan: "integrity/scan", diagnostics: "diagnostics" };
+        const path = paths[rest[0]!];
+        if (!path) throw new Error("unknown admin report; see nanosync help");
+        const creds = credentials(directory);
+        result = await api(creds.baseUrl, `/v1/admin/${path}`, rest[0] === "scan" ? { method: "POST" } : {}, creds.token);
+        break;
+      }
       case "approve": case "revoke": {
         count(rest, 1); const id = parseDeviceId(rest[0]); const creds = credentials(directory);
         result = await api(creds.baseUrl, command === "approve" ? `/v1/admin/enrollments/${id}/approve` : `/v1/admin/devices/${id}/revoke`,
@@ -102,11 +112,14 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
       case "evict": case "download": count(rest, 1); result = await daemonCommand(directory, command, { path: rest[0] }); break;
       default: throw new Error(`unknown command: ${command}; see nanosync help`);
     }
-    output(result, flags["--json"] === true); return 0;
+    output(result, flags["--json"] === true);
+    if (command === "status") return exitCode((result as { state: SyncState }).state);
+    if (command === "enroll" && (result as { status?: string }).status === "pending") return 3;
+    return 0;
   } catch (error) {
     const message = error instanceof Error ? error.message : "command failed";
-    const code = /unauthorized|server 401|server 403/i.test(message) ? 3 : /pending|approval/i.test(message) ? 4 : /not available/i.test(message) ? 5 : 2;
-    console.error(JSON.stringify({ error: message, exitCode: code }));
+    const state = failureState(error), code = exitCode(state);
+    console.error(JSON.stringify({ error: message, state, exitCode: code }));
     return code;
   }
 }

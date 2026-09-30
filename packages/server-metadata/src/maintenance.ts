@@ -43,7 +43,18 @@ export class MaintenanceRepository {
 
   retentionDryRun(nowMs: number): RetentionReport {
     validTime(nowMs);
-    const rows = this.db.all<RevisionRow>("SELECT * FROM revisions ORDER BY accepted_sequence, revision_id");
+    return this.retentionFromRows(nowMs, this.db.all<RevisionRow>("SELECT * FROM revisions ORDER BY accepted_sequence, revision_id"));
+  }
+
+  retentionDryRunBounded(nowMs: number, maxRows = 10_000): RetentionReport {
+    validTime(nowMs);
+    if (!Number.isInteger(maxRows) || maxRows < 1 || maxRows > 10_000) throw new RangeError("Invalid retention limit");
+    const rows = this.db.all<RevisionRow>("SELECT * FROM revisions ORDER BY accepted_sequence, revision_id LIMIT ?", [maxRows + 1]);
+    if (rows.length > maxRows) throw new RangeError("Retention report exceeds revision limit");
+    return this.retentionFromRows(nowMs, rows);
+  }
+
+  private retentionFromRows(nowMs: number, rows: RevisionRow[]): RetentionReport {
     const chosen = selectRetention(rows, nowMs);
     const protectedIds = new Set<string>();
     const head = this.db.get<{ current_head_revision_id: string | null }>("SELECT current_head_revision_id FROM server_state WHERE singleton = 1");
@@ -63,6 +74,18 @@ export class MaintenanceRepository {
   catalog(cursor = "", limit = 100): ObjectCatalogRow[] {
     if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new RangeError("Invalid page limit");
     return this.db.all<ObjectCatalogRow>("SELECT * FROM object_catalog WHERE object_id > ? ORDER BY object_id LIMIT ?", [cursor, limit]);
+  }
+
+  integritySummary(): { total: number; unchecked: number; verified: number; missing: number; corrupt: number; ciphertextBytes: number } {
+    const rows = this.db.all<{ integrity_status: string; count: number; bytes: number }>(
+      "SELECT integrity_status, count(*) AS count, coalesce(sum(ciphertext_length), 0) AS bytes FROM object_catalog GROUP BY integrity_status");
+    const result = { total: 0, unchecked: 0, verified: 0, missing: 0, corrupt: 0, ciphertextBytes: 0 };
+    for (const row of rows) {
+      if (row.integrity_status in result && row.integrity_status !== "total" && row.integrity_status !== "ciphertextBytes")
+        result[row.integrity_status as "unchecked" | "verified" | "missing" | "corrupt"] = row.count;
+      result.total += row.count; result.ciphertextBytes += row.bytes;
+    }
+    return result;
   }
 
   setIntegrity(row: ObjectCatalogRow, status: "verified" | "missing" | "corrupt", atMs: number): boolean {
@@ -102,6 +125,20 @@ export class MaintenanceRepository {
 
   candidates(): { vault_id: string; object_id: string; marked_at_ms: number }[] {
     return this.db.all("SELECT * FROM gc_candidates ORDER BY marked_at_ms, object_id");
+  }
+
+
+  candidateSummary(nowMs: number): { pending: number; eligible: number } {
+    validTime(nowMs);
+    const result = this.db.get<{ pending: number; eligible: number }>(`SELECT count(*) AS pending, coalesce(sum(CASE WHEN
+      c.marked_at_ms <= ? AND o.durable_created_at_ms <= ? AND o.integrity_status = 'verified'
+      AND NOT EXISTS (SELECT 1 FROM revision_objects r WHERE r.vault_id = o.vault_id AND r.object_id = o.object_id)
+      AND NOT EXISTS (SELECT 1 FROM revisions r WHERE r.vault_id = o.vault_id AND r.manifest_object_id = o.object_id)
+      AND NOT EXISTS (SELECT 1 FROM upload_sessions u WHERE u.vault_id = o.vault_id AND u.object_id = o.object_id AND u.state = 'active')
+      THEN 1 ELSE 0 END), 0) AS eligible
+      FROM gc_candidates c LEFT JOIN object_catalog o USING (vault_id, object_id)`,
+      [Math.max(0, nowMs - GC_GRACE_MS), Math.max(0, nowMs - GC_GRACE_MS)]);
+    return result ?? { pending: 0, eligible: 0 };
   }
 
   eligibleDryRun(vaultId: string, objectId: string, nowMs: number): boolean {

@@ -74,6 +74,17 @@ The completed second client stores its token and vault key in `client.json`,
 mode 0600. Restrict backups of this file accordingly. Expired enrollment
 sessions require operator intervention; do not delete pending state casually.
 
+Administrator maintenance reports use the authenticated server API and the
+approved administrator's `--client-dir`: `nanosync admin storage`,
+`nanosync admin retention-dry-run`, `nanosync admin gc-dry-run`,
+`nanosync admin scan`, and `nanosync admin diagnostics` (all accept `--json`).
+Reports contain aggregate counts only, never credentials, object IDs or file
+names. Each `admin scan` checks at most 100 catalog objects; repeat until
+`done: true` to finish a pass (the cursor is kept in server memory and resets
+on restart). The retention report refuses more than 10,000 revisions rather
+than returning an incomplete result. GC dry runs do not mark or delete anything;
+there is no live GC execution command or HTTP endpoint.
+
 The server binds 127.0.0.1:7337 by default. Keep `server run` running under a
 service manager with persistent private storage. Non-loopback requires
 `--host HOST --acknowledge-exposure` and **an external TLS/VPN boundary**;

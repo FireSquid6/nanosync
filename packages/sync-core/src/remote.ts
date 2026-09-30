@@ -10,6 +10,7 @@ import {
   type EncryptedObject,
 } from "./index.ts";
 import { parseManifest, validateManifestReferences, type ManifestV1 } from "./manifest.ts";
+export class IntegrityError extends Error { constructor(message: string) { super(message); this.name = "IntegrityError"; } }
 
 const encoder = new TextEncoder();
 const MAX_RESPONSE_JSON = MAX_JSON_METADATA_BYTES;
@@ -268,7 +269,8 @@ export class HttpRemote {
       } catch (error) { void reader.cancel().catch(() => {}); throw new RetryableDownloadError("download stream interrupted", { cause: error }); }
       finally { reader.releaseLock(); }
       if (offset !== frame.length) throw new RetryableDownloadError("truncated download");
-      validateFrame(frame, stableReference, vaultId);
+      try { validateFrame(frame, stableReference, vaultId); }
+      catch { throw new IntegrityError("download frame identity mismatch"); }
       return frame;
     });
   }
@@ -277,7 +279,9 @@ export class HttpRemote {
     if (reference.objectType !== "chunk") throw new Error("use authenticated manifest fetch for manifest objects");
     if (!(master instanceof Uint8Array) || master.byteLength !== 32) throw new Error("invalid master key");
     const stableMaster = master.slice(), stableReference = { ...reference };
-    return decryptObject(await this.downloadFrame(stableReference, vaultIdInput), stableMaster, vaultIdInput, stableReference);
+    const frame = await this.downloadFrame(stableReference, vaultIdInput);
+    try { return await decryptObject(frame, stableMaster, vaultIdInput, stableReference); }
+    catch { throw new IntegrityError("download authentication failed"); }
   }
 
   /** MAC-authenticate the envelope before downloading its manifest frame; bind the plaintext to the envelope. */
@@ -286,7 +290,8 @@ export class HttpRemote {
     const reference = revision.references.find(ref => ref.objectId === revision.encryptedManifestObjectId);
     if (!reference || reference.objectType !== "manifest") throw new Error("missing manifest reference");
     const frame = await this.downloadFrame(reference, revision.vaultId);
-    return { manifest: await decryptManifest(frame, revision, master), revision, sequence };
+    try { return { manifest: await decryptManifest(frame, revision, master), revision, sequence }; }
+    catch { throw new IntegrityError("manifest authentication failed"); }
   }
 
   /** Each yielded chunk is fully authenticated; retries never restart an exposed chunk. */
@@ -327,7 +332,7 @@ export class HttpRemote {
     const revision = parsePersistedRevisionEnvelope(result.revision);
     if (result.protocolVersion !== 1 || revision.revisionId !== id ||
         !(result.sequence === null || Number.isSafeInteger(result.sequence) && (result.sequence as number) > 0) ||
-        !await verifyReferenceSetMac(revision, master)) throw new Error("invalid or unauthenticated revision");
+        !await verifyReferenceSetMac(revision, master)) throw new IntegrityError("invalid or unauthenticated revision");
     return { revision, sequence: result.sequence as number | null };
   }
 

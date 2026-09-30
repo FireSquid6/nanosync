@@ -5,6 +5,7 @@ import { isatty } from "node:tty";
 import { spawnSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { encryptManifest, decryptManifest, generateRecoverySecret, generateVaultMasterKey, displayRecoverySecret, decodeRecoverySecret, wrapMasterKey, unwrapMasterKey, referenceSetMac, verifyReferenceSetMac, type ManifestV1 } from "@nanosync/sync-core";
+import { RemoteError } from "@nanosync/sync-core";
 import { decodeCanonicalBase64Url, parseAuthToken, parseDeviceId, parseVaultId, parsePrincipalId, parseRevisionId, parseReferenceSetMac, parsePersistedRevisionEnvelope, parseRecoveryWrap, type RecoveryWrapV1, type RevisionEnvelope } from "@nanosync/protocol";
 import { privateDirectory, secureCreate, secureInstall, secureRead, syncPrivateDirectory } from "./security.ts";
 
@@ -33,7 +34,7 @@ export async function api(url: string, path: string, init: RequestInit = {}, tok
   if (init.body && !headers.has("content-type") && !(init.body instanceof Uint8Array)) headers.set("content-type", "application/json");
   const response = await fetch(`${baseUrl(url)}${path}`, { ...init, headers });
   const result = await response.json() as Record<string, any>;
-  if (!response.ok) throw new Error(`server ${response.status}: ${String(result.code ?? "ERROR")}`);
+  if (!response.ok) throw new RemoteError(response.status, String(result.code ?? "ERROR"), `server ${response.status}: ${String(result.code ?? "ERROR")}`);
   return result;
 }
 export async function secretPrompt(label: string): Promise<string> {

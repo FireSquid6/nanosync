@@ -3,9 +3,11 @@ import { constants, chmodSync, closeSync, existsSync, fsyncSync, linkSync, lstat
 import { join, resolve } from "node:path";
 import { ClientLocal } from "@nanosync/client-local";
 import { applyNewFiles, hydrateFile, LinuxScanner, LinuxWatcher, type ScanOptions, type ScanPlan } from "@nanosync/linux-client";
-import { decryptManifest, HttpRemote, manifestPaths, mergeManifests, parseManifest, verifyReferenceSetMac, history, planRestore, planRestoreRevision, restoreReferences, type ManifestV1, type RemoteOptions } from "@nanosync/sync-core";
+import { decryptManifest, HttpRemote, IntegrityError, manifestPaths, mergeManifests, parseManifest, verifyReferenceSetMac, history, planRestore, planRestoreRevision, restoreReferences, type ManifestV1, type RemoteOptions } from "@nanosync/sync-core";
 import { parseDeviceId, parseRevisionId, parseVaultId, type RevisionEnvelope, type VisibleObjectReference } from "@nanosync/protocol";
 import { acquireStartupGate, type FileIdentity } from "./startup-lock.ts";
+import { CommandError, exitCode, failureState, type FailureState, type SyncState } from "./status.ts";
+export { CommandError, exitCode, failureState, type SyncState } from "./status.ts";
 
 type Verified = { manifest: ManifestV1; revision: RevisionEnvelope; sequence: number | null };
 export interface DaemonOptions {
@@ -21,6 +23,9 @@ export interface DaemonOptions {
   scan?: ScanOptions;
 }
 export interface DaemonStatus {
+  state: SyncState;
+  /** Stable exit code for this status snapshot; nonzero means not completely synchronized. */
+  exitCode: number;
   phase: "starting" | "idle" | "syncing" | "paused" | "error";
   /** Head equality only, not a claim that unscanned filesystem edits do not exist. */
   headsConverged: boolean;
@@ -91,6 +96,8 @@ export class LinuxDaemon {
   private stopped = false;
   private phase: DaemonStatus["phase"] = "starting";
   private error: string | null = null;
+  private failure: FailureState | "unknown" | null = null;
+  private diskBaseline: string | null = null;
   private lastSuccessMs: number | null = null;
   private socketIdentity?: FileIdentity;
 
@@ -164,13 +171,34 @@ export class LinuxDaemon {
     const pendingProposal = !!this.local.proposal(), pendingApplies = this.local.pendingApplies().length;
     const pendingOperations = this.local.listWork("operations").filter(item => item.state !== "done").length;
     const files = this.local.entries().filter(item => item.kind === "file");
-    return { phase: this.phase, paused: this.paused, error: this.error, observed,
-      headsConverged: this.phase === "idle" && !pendingProposal && !pendingApplies && !pendingOperations && !!applied.revisionId &&
+    // Metadata inventory is read-only. A changing or unsafe tree is never called synchronized.
+    let diskCurrent = false;
+    try { diskCurrent = this.diskBaseline !== null && this.diskSignature() === this.diskBaseline; }
+    catch { /* inspection cannot establish a clean tree */ }
+    const openConflicts = this.local.listWork("conflicts").some(item => item.state === "open");
+    const pendingHydration = this.local.pendingHydration();
+    const pendingTransfers = this.local.listWork("transfers").filter(item => item.state !== "done");
+    const remoteOnlyFiles = files.filter(item => item.hydration === "evicted").length;
+    const headsConverged = this.phase === "idle" && !pendingProposal && !pendingApplies && !pendingOperations && !!applied.revisionId &&
         observed.revisionId === accepted.revisionId && accepted.revisionId === applied.revisionId &&
-        observed.sequence === accepted.sequence && accepted.sequence === applied.sequence,
+        observed.sequence === accepted.sequence && accepted.sequence === applied.sequence;
+    const state: SyncState = this.failure && this.failure !== "unknown" ? this.failure :
+      openConflicts ? "conflict_blocked" : this.paused ? "paused" :
+      this.phase === "syncing" ? pendingApplies || pendingHydration?.direction === "download" || pendingTransfers.some(item => item.direction === "download")
+        ? "downloading" : pendingProposal || pendingTransfers.some(item => item.direction === "upload") ? "uploading" : "syncing" :
+      this.phase === "error" ? "unknown" :
+      !diskCurrent || pendingProposal || pendingOperations || pendingApplies || pendingHydration || pendingTransfers.length ||
+        observed.revisionId !== applied.revisionId || accepted.revisionId !== applied.revisionId ? "local_changes_pending" :
+      remoteOnlyFiles ? "remote_only" : headsConverged && diskCurrent ? "synchronized" : "unknown";
+    return { state, exitCode: exitCode(state), phase: this.phase, paused: this.paused, error: this.error, observed,
+      headsConverged,
       accepted, applied, pendingProposal, pendingApplies, pendingOperations,
-      remoteOnlyFiles: files.filter(item => item.hydration === "evicted").length,
+      remoteOnlyFiles,
       downloadedFiles: files.filter(item => item.hydration === "downloaded").length, lastSuccessMs: this.lastSuccessMs };
+  }
+  private diskSignature(): string {
+    return JSON.stringify(this.scanner.snapshot().map(item => [item.path, item.kind, item.stat.dev, item.stat.ino,
+      item.stat.size, item.stat.mtimeMs, item.stat.ctimeMs, item.stat.mode]));
   }
   pause() { this.paused = true; this.phase = "paused"; }
   resume() { this.paused = false; this.watcher.notify(0); this.phase = "idle"; void this.sync().catch(() => {}); }
@@ -195,6 +223,7 @@ export class LinuxDaemon {
           this.local.head("accepted").revisionId !== applied.revisionId || this.local.proposal()) throw new Error("accepted revision changed; synchronize before hydration");
       const verified = await this.verified(applied.revisionId);
       const result = await hydrateFile(this.scanner.root, this.local, this.remote, verified.manifest, verified.revision, this.key, direction, path);
+      this.diskBaseline = this.diskSignature();
       this.watcher.notify(0);
       return result;
     } finally { this.restoring = false; }
@@ -318,9 +347,11 @@ export class LinuxDaemon {
         if (applied.revisionId) this.local.reconcileConflicts((await this.verified(applied.revisionId)).manifest);
         this.local.recordHead("observed", await this.remote.head());
         this.watcher.refresh();
-        this.error = null; this.phase = this.paused ? "paused" : "idle"; this.lastSuccessMs = Date.now();
+        this.diskBaseline = this.diskSignature();
+        this.error = null; this.failure = null; this.phase = this.paused ? "paused" : "idle"; this.lastSuccessMs = Date.now();
       } catch (error) {
         this.error = error instanceof Error ? error.message : "synchronization failed";
+        this.failure = failureState(error);
         this.phase = this.paused ? "paused" : "error"; throw error;
       }
     })();
@@ -332,7 +363,7 @@ export class LinuxDaemon {
   private async verified(id: string): Promise<Verified> {
     const result = await this.remote.manifest(id, this.key);
     if (result.manifest.vaultId !== this.vault || result.revision.vaultId !== this.vault ||
-        result.manifest.creatingDeviceId !== result.revision.creatingDeviceId) throw new Error("vault or device binding mismatch");
+        result.manifest.creatingDeviceId !== result.revision.creatingDeviceId) throw new IntegrityError("vault or device binding mismatch");
     return result;
   }
   private async recoverHydration() {
@@ -658,7 +689,7 @@ export class LinuxDaemon {
       }
       if ((command === "evict" || command === "download" || command === "resolve") && typeof value.path !== "string") throw new Error("file path required");
       return Response.json(await commands[command]!(value));
-    } catch (error) { return Response.json({ error: error instanceof Error ? error.message : "failed" }, { status: 409 }); }
+    } catch (error) { return Response.json({ error: error instanceof Error ? error.message : "failed", state: failureState(error) }, { status: 409 }); }
   }
 }
 
@@ -666,9 +697,12 @@ export async function startDaemon(options: DaemonOptions) { return LinuxDaemon.s
 export async function stopDaemon(daemon: LinuxDaemon) { await daemon.stop(); }
 export async function daemonCommand(clientDirectory: string, command: "status" | "pause" | "resume" | "sync" | "history" | "restore" | "resolve" | "conflicts" | "doctor" | "evict" | "download", args: { path?: string; revision?: string } = {}): Promise<any> {
   const root = privateDirectory(clientDirectory), token = secret(join(root, "ipc.secret"));
-  const response = await fetch(`http://localhost/${command}`, { unix: join(root, "daemon.sock"), method: "POST",
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(args) } as RequestInit & { unix: string });
-  const result = await response.json() as DaemonStatus | { error: string };
-  if (!response.ok) throw new Error((result as { error: string }).error);
+  let response: Response;
+  try {
+    response = await fetch(`http://localhost/${command}`, { unix: join(root, "daemon.sock"), method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(args) } as RequestInit & { unix: string });
+  } catch { throw new CommandError("local daemon unavailable", "offline"); }
+  const result = await response.json() as DaemonStatus | { error: string; state?: FailureState | "unknown" };
+  if (!response.ok) throw new CommandError((result as { error: string }).error, (result as { state?: FailureState | "unknown" }).state ?? "unknown");
   return result as DaemonStatus;
 }

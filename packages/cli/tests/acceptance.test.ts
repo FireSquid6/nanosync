@@ -172,7 +172,7 @@ test("real enrolled devices: encrypted convergence, stale multi-hop conflicts, r
   expect((await status(e.firstDir)).applied).toEqual((await status(e.secondDir)).applied);
   expect(await daemonCommand(e.secondDir, "conflicts")).toBeInstanceOf(Array);
   expect((await daemonCommand(e.firstDir, "history")).length).toBeGreaterThan(3);
-  expect(await main(["status", "--client-dir", e.firstDir, "--json"])).toBe(0);
+  expect(await main(["status", "--client-dir", e.firstDir, "--json"])).toBe(8);
   expect(await main(["history", "--client-dir", e.firstDir])).toBe(0);
   expect(await main(["conflicts", "--client-dir", e.secondDir])).toBe(0);
   const prior = (await daemonCommand(e.firstDir, "history")).find((item: any) => item.revisionId === before.revisionId);

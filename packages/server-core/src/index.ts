@@ -16,6 +16,8 @@ import { readBootstrapComplete, readBootstrapInitialize } from "./bootstrap-rout
 import { Argon2idPasswordHasher, type PasswordHasher } from "./password-hasher.ts";
 import { AuthenticationService } from "./auth-service.ts";
 import { handleAuthRoute } from "./auth-routes.ts";
+import { adminMaintenanceRoutes } from "./admin-maintenance-routes.ts";
+import type { ServerMaintenance } from "./maintenance.ts";
 
 export * from "./config.ts";
 export * from "./http.ts";
@@ -35,6 +37,7 @@ export interface ServerDependencies {
   revisions: RevisionRepository;
   authorize?: Authorize;
   authentication?: AuthenticationService;
+  maintenance?: ServerMaintenance;
   bootstrap?: BootstrapRepository;
   authorizeBootstrap?: AuthorizeBootstrap;
   passwordHasher?: PasswordHasher;
@@ -48,6 +51,8 @@ export function createServerHandler(dependencies: ServerDependencies): (request:
   const service = new ObjectService({ filesystem: dependencies.filesystem, catalog: dependencies.catalog, maximumObjectSize: config.maximumObjectSize, clock: dependencies.clock });
   const revisionService = new RevisionService({ filesystem: dependencies.filesystem, revisions: dependencies.revisions, clock: dependencies.clock });
   const bootstrapService = dependencies.bootstrap ? new BootstrapService(dependencies.bootstrap, dependencies.filesystem, dependencies.passwordHasher ?? new Argon2idPasswordHasher(), dependencies.clock) : null;
+  const maintenanceRoute = dependencies.authentication && dependencies.maintenance
+    ? adminMaintenanceRoutes(dependencies.authentication, dependencies.maintenance, dependencies.clock ?? Date.now) : null;
   return async (request: Request): Promise<Response> => {
     try {
       const url = new URL(request.url); const pathname = url.pathname;
@@ -72,6 +77,10 @@ export function createServerHandler(dependencies: ServerDependencies): (request:
         if (request.method !== "GET") throw new ApiError(405, "MALFORMED_REQUEST", "Method is not supported for this route", { allow: "GET" });
         if (!bootstrapService) throw new ApiError(503, "UNAVAILABLE", "Bootstrap service is unavailable");
         return bootstrapService.status();
+      }
+      if (["/v1/admin/storage", "/v1/admin/retention/dry-run", "/v1/admin/gc/dry-run", "/v1/admin/integrity/scan", "/v1/admin/diagnostics"].includes(pathname)) {
+        if (!maintenanceRoute) throw new ApiError(503, "UNAVAILABLE", "Maintenance service is unavailable");
+        return await maintenanceRoute(request, pathname, url.search);
       }
       if (pathname.startsWith("/v1/auth/") || pathname.startsWith("/v1/admin/") || pathname === "/v1/recovery-wrap") {
         if (!dependencies.authentication) throw new ApiError(503, "UNAVAILABLE", "Authentication service is unavailable");

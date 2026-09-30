@@ -56,9 +56,15 @@ export class ServerMaintenance {
   gcDryRun(nowMs: number): { potential: number; eligible: number; pending: number; graceMs: number } {
     assertTime(nowMs);
     // Read-only inspection; no candidate marking or physical deletion.
-    const pending = this.metadata.candidates();
-    return { potential: this.metadata.potentialCandidates(nowMs), eligible: pending.filter((c) => c.marked_at_ms <= nowMs - GC_GRACE_MS && !!this.metadata.eligibleDryRun(c.vault_id, c.object_id, nowMs)).length,
-      pending: pending.length, graceMs: GC_GRACE_MS };
+    const { pending, eligible } = this.metadata.candidateSummary(nowMs);
+    return { potential: this.metadata.potentialCandidates(nowMs), eligible, pending, graceMs: GC_GRACE_MS };
+  }
+
+  storageStatus(): ReturnType<MaintenanceRepository["integritySummary"]> { return this.metadata.integritySummary(); }
+
+  retentionDryRun(nowMs: number): { selected: number; protected: number; notSelected: number; deletableRevisions: 0 } {
+    const report = this.metadata.retentionDryRunBounded(nowMs);
+    return { selected: report.selected.length, protected: report.protected.length, notSelected: report.notSelected.length, deletableRevisions: report.deletableRevisions };
   }
 
   /** Never invoke while serving requests. No HTTP route or background scheduler exposes this operation. */

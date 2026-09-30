@@ -7,7 +7,7 @@ import {
 } from "@nanosync/protocol";
 export { MAX_FILE_BYTES, parseManifest, encodeManifest, decodeManifest, validateManifestReferences, encryptManifest, decryptManifest, type ManifestV1, type ManifestEntry, type ManifestChunk } from "./manifest.ts";
 export { mergeManifests, type MergeOptions, type MergeConflict, type MergeResult } from "./merge.ts";
-export { HttpRemote, RemoteError, type RemoteOptions, type ChunkJournal } from "./remote.ts";
+export { HttpRemote, RemoteError, IntegrityError, type RemoteOptions, type ChunkJournal } from "./remote.ts";
 export { history, manifestPaths, planRestore, planRestoreRevision, restoreReferences } from "./history.ts";
 
 const text = new TextEncoder();

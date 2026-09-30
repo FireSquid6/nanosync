@@ -2,9 +2,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AuthenticationRepository, BootstrapRepository, ObjectCatalogRepository, RevisionRepository, ServerMetadataDatabase, type PasswordVerifierRecord } from "@nanosync/server-metadata";
+import { AuthenticationRepository, BootstrapRepository, MaintenanceRepository, ObjectCatalogRepository, RevisionRepository, ServerMetadataDatabase, type PasswordVerifierRecord } from "@nanosync/server-metadata";
 import { LocalFilesystem } from "@nanosync/server-object-storage";
-import { AuthenticationService, createServerHandler, type PasswordHasher } from "../src/index.ts";
+import { AuthenticationService, createServerHandler, ServerMaintenance, type PasswordHasher } from "../src/index.ts";
 import { Argon2idPasswordHasher } from "../src/index.ts";
 import { hashRaw } from "@node-rs/argon2";
 
@@ -31,7 +31,7 @@ async function setup(authorizeBootstrap: ((request: Request) => Promise<boolean>
   let now = 10, randomCounter = 1;
   const auth = new AuthenticationService(new AuthenticationRepository(database), { pepper: new Uint8Array(32).fill(9), password, clock: () => now, random: () => new Uint8Array(32).fill(randomCounter++) });
   const catalog = new ObjectCatalogRepository(database), revisions = new RevisionRepository(database);
-  const handle = createServerHandler({ filesystem, catalog, revisions, bootstrap, authentication: auth, authorizeBootstrap: authorizeBootstrap ?? undefined });
+  const handle = createServerHandler({ filesystem, catalog, revisions, bootstrap, authentication: auth, maintenance: new ServerMaintenance(new MaintenanceRepository(database), filesystem), clock: () => now, authorizeBootstrap: authorizeBootstrap ?? undefined });
   return { database, handle, auth, setNow: (value: number) => { now = value; } };
 }
 function post(path: string, body: unknown, token?: string, extraHeaders: Record<string, string> = {}): Request { return new Request(`http://local${path}`, { method: "POST", headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}), ...extraHeaders }, body: JSON.stringify(body) }); }
@@ -40,6 +40,51 @@ async function login(handle: (request: Request) => Promise<Response>): Promise<s
 function enrollment(deviceId: string) { return { protocolVersion: 1, deviceId, displayName: deviceId === initialId ? "Initial laptop" : "Phone", platform: "linux", clientVersion: "1.0.0", fingerprint: Buffer.alloc(32, deviceId === initialId ? 3 : 4).toString("base64url") }; }
 
 describe("production authentication lifecycle", () => {
+  test("manual scan advances one 100-object page per authenticated request", async () => {
+    const { database, handle } = await setup();
+    const token = await login(handle);
+    await handle(post("/v1/auth/enrollments", enrollment(initialId), token, { "x-nanosync-bootstrap-authorization": bootstrapProof }));
+    database.writeTransaction(tx => {
+      for (let i = 0; i < 100; i++) tx.run(
+        "INSERT INTO object_catalog(vault_id, object_id, object_type, ciphertext_checksum, ciphertext_length, object_format_version, durable_created_at_ms) VALUES (?, ?, 'manifest', ?, 109, 1, 2)",
+        [vaultId, i.toString(16).padStart(64, "0"), checksum]);
+    });
+    const scan = () => handle(new Request("http://local/v1/admin/integrity/scan", { method: "POST", headers: { authorization: `Bearer ${token}` } }));
+    expect(await json(await scan())).toEqual({ protocolVersion: 1, limit: 100, done: false, counts: { verified: 0, missing: 100, corrupt: 0 } });
+    expect(await json(await scan())).toEqual({ protocolVersion: 1, limit: 100, done: true, counts: { verified: 0, missing: 1, corrupt: 0 } });
+    expect((await json(await scan())).done).toBe(false);
+  });
+  test("maintenance reports require a live administrator and never execute GC or reveal secrets", async () => {
+    const { database, handle } = await setup();
+    const first = await login(handle);
+    await handle(post("/v1/auth/enrollments", enrollment(initialId), first, { "x-nanosync-bootstrap-authorization": bootstrapProof }));
+    const second = await login(handle);
+    await handle(post("/v1/auth/enrollments", enrollment(secondId), second));
+    await handle(post(`/v1/admin/enrollments/${secondId}/approve`, { protocolVersion: 1 }, first));
+    const paths = ["storage", "retention/dry-run", "gc/dry-run", "integrity/scan", "diagnostics"];
+    for (const path of paths) {
+      const request = (token?: string) => new Request(`http://local/v1/admin/${path}`, { method: path === "integrity/scan" ? "POST" : "GET", headers: token ? { authorization: `Bearer ${token}` } : {} });
+      expect((await handle(request())).status).toBe(401);
+      expect((await handle(request(second))).status).toBe(403);
+      const response = await handle(request(first));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      const body = JSON.stringify(await json(response));
+      expect(body).not.toContain(first); expect(body).not.toContain(second);
+      expect(body).not.toContain("Initial laptop"); expect(body).not.toContain(manifestId);
+      expect(body).not.toContain("recoveryWrap");
+    }
+    expect((await json(await handle(new Request("http://local/v1/admin/storage", { headers: { authorization: `Bearer ${first}` } })))).total).toBe(1);
+    expect((await json(await handle(new Request("http://local/v1/admin/retention/dry-run", { headers: { authorization: `Bearer ${first}` } })))).deletableRevisions).toBe(0);
+    expect(database.get<{ count: number }>("SELECT count(*) AS count FROM gc_candidates")?.count).toBe(0);
+    expect(database.get<{ count: number }>("SELECT count(*) AS count FROM object_catalog")?.count).toBe(1);
+    expect((await handle(post("/v1/admin/gc/collect", {}, first))).status).toBe(404);
+    expect((await handle(new Request("http://local/v1/admin/storage?extra=1", { headers: { authorization: `Bearer ${first}` } }))).status).toBe(400);
+    expect((await handle(new Request("http://local/v1/admin/integrity/scan", { method: "POST",
+      headers: { authorization: `Bearer ${first}` }, body: "ignored" }))).status).toBe(400);
+    await handle(post(`/v1/admin/devices/${secondId}/revoke`, { protocolVersion: 1 }, first));
+    for (const path of paths) expect((await handle(new Request(`http://local/v1/admin/${path}`, { method: path === "integrity/scan" ? "POST" : "GET", headers: { authorization: `Bearer ${second}` } }))).status).toBe(401);
+  });
   test("requires a strong external pepper and verifies/upgrades a real legacy Argon2id record", async () => {
     const { database } = await setup();
     expect(() => new AuthenticationService(new AuthenticationRepository(database), { pepper: new Uint8Array(31), password })).toThrow();
