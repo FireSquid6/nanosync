@@ -9,7 +9,7 @@ flowchart LR
     subgraph Linux[User-integrated Linux client]
         LF[Sync folder]
         LW[Watcher and scanner adapters]
-        LE[Integrator-provided runner using sync libraries]
+        LE[Foreground CLI sync runner using sync libraries]
         LD[(Local metadata DB)]
         LK[Integrator-managed key store]
         LU[Optional integrator UI]
@@ -57,7 +57,7 @@ flowchart LR
 
 ## Architectural principles
 
-The version 1 server, Linux adapters, and server/account CLI use Bun and TypeScript. Portable shared code is restricted to Web Crypto and WHATWG interfaces rather than Bun APIs; Android integration is later platform-adapter work. No Linux runner or desktop UI is shipped.
+The version 1 server, Linux adapters, and CLI use Bun and TypeScript. Portable shared code is restricted to Web Crypto and WHATWG interfaces rather than Bun APIs; Android integration is later platform-adapter work. The foreground CLI runner is not a separately packaged service, and no desktop UI or startup integration is shipped.
 
 ### Immutable data, mutable pointers
 
@@ -160,7 +160,7 @@ A reusable library provides primitives for:
 - Revision publication.
 - History inspection and restore planning; an integrator orchestrates publication and filesystem application.
 
-The user-provided runner supplies scheduling, single-owner access, recovery sequencing, and any user-facing controls. The server/account CLI does not perform client synchronization.
+The foreground CLI `sync` command supplies scheduling, single-owner access and recovery sequencing for Linux. Other platforms can integrate the same libraries; starting continuous sync automatically is the user's responsibility.
 
 ### Local metadata database
 
@@ -179,7 +179,7 @@ Each device tracks:
 
 Local mutations are journaled before network publication. After a crash, the client can determine whether an operation needs to be scanned again, uploaded, published, or applied locally.
 
-The Bun-specific `@nanosync/client-local` adapter is the first concrete local journal. It lives outside portable `sync-core` and implements its `ChunkJournal` interface. SQLite metadata is private to one vault/device pair; it records independent monotonic observed/accepted/applied heads, stable entry identities and hydration state, pending operations/transfers/conflicts, watcher suppression, and one immutable encrypted publication proposal. Database writes use immediate transactions, WAL and `synchronous=FULL`; checksummed ordered migrations, schema/integrity checks and identity checks fail closed on reopen. The cache is bounded private plaintext chunk files rather than a large SQLite blob table. The integrating runner must serialize access to the directory and explicitly authenticate cached plaintext with the vault master key on read (as `HttpRemote.downloadChunks` does). No runner or local IPC is shipped.
+The Bun-specific `@nanosync/client-local` adapter is the first concrete local journal. It lives outside portable `sync-core` and implements its `ChunkJournal` interface. SQLite metadata is private to one vault/device pair; it records independent monotonic observed/accepted/applied heads, stable entry identities and hydration state, pending operations/transfers/conflicts, watcher suppression, and one immutable encrypted publication proposal. Database writes use immediate transactions, WAL and `synchronous=FULL`; checksummed ordered migrations, schema/integrity checks and identity checks fail closed on reopen. The cache is bounded private plaintext chunk files rather than a large SQLite blob table. The foreground CLI runner serializes access to the directory and authenticates cached plaintext with the vault master key on read (as `HttpRemote.downloadChunks` does). No local IPC is shipped.
 
 ## Deployment boundary
 

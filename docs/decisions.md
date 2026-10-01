@@ -7,7 +7,7 @@
 | Initial audience | One household or small trusted team, initially one user |
 | Server tenancy | One user and one vault per server |
 | Topology | Central authoritative server |
-| Initial client libraries | Portable sync core and Linux adapters; Android integration remains platform work |
+| Initial clients | Portable sync core and Linux adapters with foreground CLI sync; Android integration remains platform work |
 | Encryption | Client-side encryption; server does not have the vault master key |
 | Recovery | User-held recovery key; no server-side plaintext recovery |
 | Device enrollment | Password authentication, admin approval, then recovery-key entry |
@@ -29,7 +29,7 @@
 | Server durability | Validate checksums; operator manages backups |
 | Device revocation | Prevent future server access only |
 | Transport security | External reverse proxy, VPN, or trusted network; no built-in TLS |
-| CLI role | Server runtime, bootstrap/enrollment, device administration, and maintenance reports only; no built-in client daemon or local IPC |
+| CLI role | Server runtime, bootstrap/enrollment, device administration, maintenance reports, and foreground one-shot/continuous sync; no client service package or local IPC |
 
 ## Frozen version 1 implementation decisions
 

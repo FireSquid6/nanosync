@@ -14,16 +14,18 @@ const roots: string[] = [];
 function directory() { const path = mkdtempSync(join(tmpdir(), "nanosync-cli-")); roots.push(path); return path; }
 afterEach(() => { for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true }); });
 
-test("CLI help lists supported commands and rejects removed local sync commands", async () => {
+test("CLI help lists foreground sync and rejects removed local service commands", async () => {
   const stdout = spyOn(process.stdout, "write").mockImplementation(() => true);
   const stderr = spyOn(console, "error").mockImplementation(() => {});
   try {
     expect(await main(["--help"])).toBe(0);
     const help = stdout.mock.calls.flat().join("");
-    for (const name of ["server", "bootstrap", "enroll", "devices", "approve", "revoke", "admin"]) {
+    for (const name of ["server", "bootstrap", "enroll", "sync", "devices", "approve", "revoke", "admin"]) {
       expect(help).toContain(name);
     }
-    for (const name of ["daemon", "status", "sync", "pause", "resume", "history", "restore", "resolve", "conflicts", "doctor", "evict", "download"]) {
+    expect(await main(["sync", "--help"])).toBe(0);
+    expect(stdout.mock.calls.flat().join("")).toContain("--continuous");
+    for (const name of ["daemon", "status", "pause", "resume", "history", "restore", "resolve", "conflicts", "doctor", "evict", "download"]) {
       expect(help).not.toMatch(new RegExp(`^\\s+${name}\\s`, "m"));
       expect(await main([name])).toBe(2);
       expect(JSON.parse(String(stderr.mock.lastCall?.[0]))).toMatchObject({ state: "unknown", exitCode: 2 });

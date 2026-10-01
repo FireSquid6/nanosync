@@ -1,6 +1,6 @@
-# `@nanosync/cli` — Bun server and account commands
+# `@nanosync/cli` — Bun server, account and foreground sync commands
 
-This package provides server initialization/runtime, client bootstrap/enrollment, device approval/revocation, and administrator maintenance reports. It does **not** ship a client daemon, local IPC, or CLI sync/status/history/restore/conflict/eviction commands. Users integrate and supervise their own sync runner using `@nanosync/sync-core`, `@nanosync/client-local`, and `@nanosync/linux-client`.
+This package provides server initialization/runtime, client bootstrap/enrollment, device approval/revocation, administrator maintenance reports, and foreground Linux synchronization. `sync` and `sync --continuous` coordinate `@nanosync/sync-core`, `@nanosync/client-local`, and `@nanosync/linux-client` inside the CLI process. There is no separate service package, local IPC, or automatic startup setup.
 
 Install dependencies with `bun install` at the repository root. Run `bun packages/cli/src/main.ts --help` or link the `nanosync` executable. Commands emit JSON. Successful commands exit 0; pending enrollment and authorization failures exit 3; other command errors exit 2 and report structured `{error,state,exitCode}` on stderr.
 
@@ -16,6 +16,8 @@ printf '%s' "$PASSWORD" | bun packages/cli/src/main.ts bootstrap \
 unset PASSWORD
 ```
 
+Create an owner-only ordinary sync directory, separate from the private client directory. In another terminal run `nanosync sync --client-dir "$HOME/.local/share/nanosync" --sync-dir "$HOME/Sync"` for one pass, or add `--continuous` for foreground watching. You decide how to launch it at login; no service or startup configuration is installed.
+
 ## Secrets, backup, and network boundary
 
 Bootstrap displays the recovery secret privately through `/dev/tty` and requires exact confirmation. Store it offline. Before server initialization, the client fsyncs `bootstrap.checkpoint`, mode 0600, containing a **plaintext vault master key**, encrypted genesis, and recovery wrap (not the recovery secret or password). Protect the checkpoint directory and backups like the eventual `client.json` key; mode 0600 does not protect against the owner or compromised backups. Rerun the same bootstrap command and retain the checkpoint if interrupted: a wrong password on a retry may seal bootstrap before login fails. Never delete it to start over; loss after initialization requires offline operator recovery.
@@ -29,3 +31,7 @@ The server defaults to `127.0.0.1:7337`. Non-loopback exposure requires `--host 
 Enroll each device with its own retained UUID, for example `nanosync enroll --client-dir "$HOME/second-client" --url https://SERVER --device-id UUID`. Enrollment state is written before the request so retries reuse the same pending session/fingerprint. Approve it from the first device with `nanosync devices` and `nanosync approve UUID`; after approval, repeat enrollment and supply the recovery key via an owned mode-0600 file or `/dev/tty`. The completed `client.json` holds the token and vault key; restrict backups. Do not casually remove pending enrollment state.
 
 Admin commands (`admin storage`, `retention-dry-run`, `gc-dry-run`, `scan`, `diagnostics`) use an approved administrator client. Reports are aggregate-only; scans check at most 100 objects per invocation. GC commands are dry-run only; no live GC command exists. See [Clients and Operations](../../docs/clients-and-operations.md) for maintenance and backup procedures.
+
+## Foreground sync
+
+The one-shot command recovers interrupted work, reconciles encrypted revisions, and exits after a successful authenticated pass. An existing folder can be imported on first sync only if the server still has empty genesis; when the remote already contains files, a fresh device must start with an empty local sync directory rather than risk overwriting or deleting its untracked files. The continuous command first synchronizes, then debounces file activity (250 ms quiet plus two stable snapshots at least 500 ms apart), periodically rescans and retries failures. SIGINT/SIGTERM ends the foreground loop after any in-flight pass. Concurrent runs for the same client directory are refused. There is no local IPC or CLI status/history/restore/conflict/eviction command.

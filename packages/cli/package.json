@@ -7,6 +7,8 @@
   "dependencies": {
     "@nanosync/protocol": "workspace:*",
     "@nanosync/sync-core": "workspace:*",
+    "@nanosync/client-local": "workspace:*",
+    "@nanosync/linux-client": "workspace:*",
     "@nanosync/server-core": "workspace:*",
     "@nanosync/server-metadata": "workspace:*",
     "@nanosync/server-object-storage": "workspace:*",

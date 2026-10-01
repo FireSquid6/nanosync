@@ -8,7 +8,7 @@ The single user who owns the server account, vault, recovery key, and synchroniz
 
 ### Approved device
 
-An integrator-provided Linux or future Android client authorized to authenticate, obtain encrypted vault objects, and publish revisions. The shipped CLI provisions credentials and manages enrollment but does not synchronize files.
+An approved Linux CLI client, integrator-provided client, or future Android client authorized to authenticate, obtain encrypted vault objects, and publish revisions. The CLI provisions credentials, manages enrollment, and can synchronize a Linux directory in the foreground.
 
 ### Server operator
 
@@ -65,7 +65,7 @@ Retention must never remove the current head, an unresolved conflict required by
 
 ### CLI
 
-Provide CLI commands for server initialization/runtime, client bootstrap/enrollment, device approval/revocation, and administrator reports. Portable core and Linux adapters support user-provided synchronization orchestration; shipping a daemon, local IPC, and local sync/status/history/restore/conflict/eviction commands is out of scope.
+Provide CLI commands for server initialization/runtime, client bootstrap/enrollment, device approval/revocation, administrator reports, a one-shot Linux sync and a foreground continuous Linux sync with debounced filesystem watching and periodic rescan. The user chooses how to run the continuous command at startup. Separate background services, local IPC, and local status/history/restore/conflict/eviction commands are out of scope; the portable libraries retain primitives for integrators.
 
 ## Security requirements
 
@@ -91,7 +91,7 @@ Provide CLI commands for server initialization/runtime, client bootstrap/enrollm
 
 ## Non-goals for version 1
 
-- A built-in client daemon, its local IPC, or CLI-driven local synchronization.
+- A separately packaged client service, its local IPC, or built-in startup integration.
 - Multiple users or vaults on one server.
 - Shared folders or access-control lists.
 - Peer-to-peer synchronization.

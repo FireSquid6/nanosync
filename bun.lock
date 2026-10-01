@@ -17,6 +17,8 @@
         "nanosync": "./src/main.ts",
       },
       "dependencies": {
+        "@nanosync/client-local": "workspace:*",
+        "@nanosync/linux-client": "workspace:*",
         "@nanosync/protocol": "workspace:*",
         "@nanosync/server-core": "workspace:*",
         "@nanosync/server-metadata": "workspace:*",

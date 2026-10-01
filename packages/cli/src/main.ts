@@ -8,8 +8,9 @@ import { RemoteError } from "@nanosync/sync-core";
 import { api, bootstrap, credentials, joinVault, readPassword } from "./client.ts";
 import { privateDirectory, secureCreate, secureRead } from "./security.ts";
 import { runServer } from "./server.ts";
+import { SyncRunner } from "./sync-runner.ts";
 
-type CliOptions = { clientDir?: string; serverDir?: string; url?: string; proofFile?: string;
+type CliOptions = { clientDir?: string; syncDir?: string; continuous?: boolean; serverDir?: string; url?: string; proofFile?: string;
   deviceId?: string; recoveryFile?: string; host?: string; port?: string; acknowledgeExposure?: boolean;
   json?: boolean };
 function required(value: string | undefined, label: string): string {
@@ -48,7 +49,7 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
       return command;
     }
     const common = ["--client-dir <dir>", "--json"];
-    flags(program, ...common, "--server-dir <dir>", "--url <url>", "--proof-file <file>",
+    flags(program, ...common, "--sync-dir <dir>", "--continuous", "--server-dir <dir>", "--url <url>", "--proof-file <file>",
       "--device-id <uuid>", "--recovery-file <file>", "--host <host>", "--port <port>",
       "--acknowledge-exposure");
     const opts = (command: Command): CliOptions => command.optsWithGlobals<CliOptions>();
@@ -109,6 +110,49 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
         result = await joinVault(dir, url, id, existsSync(join(dir, "enrollment.json")) ? undefined : readPassword(), recovery);
         if ((result as { status?: string }).status === "pending") code = 3;
       });
+    flags(
+      program.command("sync").description("Synchronize once, or watch and synchronize continuously in the foreground"),
+      "--sync-dir <dir>", "--continuous", ...common,
+    ).action(async (_options: CliOptions, command: Command) => {
+      const dir = directory(command);
+      const syncDirectory = required(opts(command).syncDir, "--sync-dir");
+      const creds = credentials(dir);
+      const masterKey = Buffer.from(creds.masterKey, "hex");
+      let runner: SyncRunner;
+      try {
+        runner = SyncRunner.start({
+          clientDirectory: dir,
+          syncDirectory,
+          vaultId: creds.vaultId,
+          deviceId: creds.deviceId,
+          masterKey,
+          baseUrl: creds.baseUrl,
+          token: creds.token,
+        });
+      } finally {
+        masterKey.fill(0);
+      }
+      try {
+        if (!opts(command).continuous) {
+          result = await runner.syncOnce();
+        } else {
+          const controller = new AbortController();
+          const stop = () => controller.abort();
+          process.once("SIGINT", stop);
+          process.once("SIGTERM", stop);
+          try {
+            await runner.watch(controller.signal, head => output(head, true), error => {
+              console.error(JSON.stringify({ error: error instanceof Error ? error.message : "sync failed" }));
+            });
+          } finally {
+            process.off("SIGINT", stop);
+            process.off("SIGTERM", stop);
+          }
+        }
+      } finally {
+        await runner.stop();
+      }
+    });
     flags(program.command("devices").description("List devices (administrator)"), ...common)
       .action(async (_options: CliOptions, command: Command) => {
         const creds = credentials(directory(command)); result = await api(creds.baseUrl, "/v1/admin/devices", {}, creds.token);

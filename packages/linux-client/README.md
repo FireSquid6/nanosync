@@ -1,6 +1,6 @@
 # `@nanosync/linux-client` — Linux filesystem adapter
 
-This package scans and watches a Linux sync directory and safely materializes authenticated remote manifests and files. It builds on `sync-core` and `client-local`; users must integrate and supervise their own synchronization runner. The shipped CLI does not drive local sync.
+This package scans and watches a Linux sync directory and safely materializes authenticated remote manifests and files. It builds on `sync-core` and `client-local`; the CLI's foreground `sync` command supplies one-shot and continuous orchestration. Users choose how to run continuous sync at startup.
 
 ## Step 13 materialization boundary
 

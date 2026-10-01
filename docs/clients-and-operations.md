@@ -2,7 +2,7 @@
 
 ## Shared client engine
 
-Linux and future Android clients can share a synchronization core where practical. Platform integrators implement storage, event observation, background execution, secure credentials, and user interaction. The shipped CLI handles server, enrollment, and administration, not local synchronization.
+Linux and future Android clients can share a synchronization core where practical. The shipped CLI orchestrates foreground Linux synchronization in addition to server, enrollment, and administration. Integrators of other clients provide their own storage, event observation, background execution, secure credentials, and user interaction.
 
 The shared libraries provide primitives and interfaces for (with scheduling and lifecycle orchestration supplied by the integrator):
 
@@ -47,7 +47,7 @@ The client must safely handle:
 
 ### Remote-only entries
 
-An evicted file is absent from the sync directory. Its identity and remote file object reference remain available through the local metadata adapter for an integrator-provided UI; the shipped CLI does not list or download it.
+An evicted file is absent from the sync directory. Its identity and remote file object reference remain available through the local metadata adapter for an integrator-provided UI; the shipped CLI does not expose eviction or download commands.
 
 Because absence can mean either eviction or deletion, caller-initiated eviction must write durable intent before removing the local file.
 
@@ -91,11 +91,13 @@ Background synchronization is best-effort and must be supplemented by:
 
 Opening or editing through another application may require temporary copies or platform-mediated document access. The Android client must detect the resulting edited content and clearly communicate when an external copy is no longer managed by Nanosync.
 
-## CLI and user-managed client orchestration
+## CLI and foreground sync
 
-The shipped CLI runs and initializes the server (`server init`, `server run`), bootstraps or enrolls a client (`bootstrap`, `enroll`), manages devices (`devices`, `approve`, `revoke`), and requests administrator maintenance reports (`admin storage`, `admin retention-dry-run`, `admin gc-dry-run`, `admin scan`, `admin diagnostics`). It does not ship a sync daemon, local IPC endpoint, or local sync/status/history/restore/conflict/eviction commands. Commands return JSON; successful commands exit 0, pending enrollment exits 3, and other command errors report `{error,state:"unknown",exitCode:2}` on stderr. API authorization errors can also return 3 (see the client API error handling).
+The CLI runs and initializes the server (`server init`, `server run`), bootstraps or enrolls a client (`bootstrap`, `enroll`), manages devices (`devices`, `approve`, `revoke`), and requests administrator maintenance reports (`admin storage`, `admin retention-dry-run`, `admin gc-dry-run`, `admin scan`, `admin diagnostics`). `sync --client-dir DIR --sync-dir DIR` runs a single authenticated snapshot pass and exits only after the local accepted/applied heads match the observed server head. `sync --continuous --client-dir DIR --sync-dir DIR` runs in the foreground: it first synchronizes, then watches for activity, waits for debounce and stable snapshots, and periodically retries/rescans for missed notifications. It logs errors rather than claiming success and exits cleanly on SIGINT/SIGTERM. Supply an external user service manager or startup script if you want it at login; Nanosync does not install one.
 
-Users who need ongoing synchronization must integrate and supervise their own runner around `sync-core`, `client-local`, and `linux-client`. The runner must serialize ownership of its data root and journal, handle watcher/scanner scheduling, credentials and restart recovery, replay unresolved publication and hydration intents, and surface errors rather than claim convergence based only on stored head sequences. The portable library APIs remain available for history, merge, restoration, conflicts and hydration; the CLI does not orchestrate them.
+Only one sync command can own a private client directory at a time. Keep the sync directory separate from the private client directory; neither may contain the other. On each run, the client resumes interrupted hydration/apply and frozen publication proposals before scanning new edits. A pre-existing local folder can be imported when the remote still has empty genesis; if the remote already contains files, initial sync requires an empty local folder rather than guessing how untracked files should merge. The sync commands do not provide local IPC, status, history, restore, conflict-resolution, eviction or download controls. Successful one-shot commands print `{revisionId,sequence}` and exit 0; pending enrollment exits 3; other failures report structured errors on stderr. The continuous command prints heads on successful passes, logs failures, and retries while running.
+
+Integrators of other clients can use `sync-core`, `client-local`, and `linux-client` directly. The portable library APIs remain available for history, merge, restoration, conflicts and hydration; these are not separate CLI commands.
 
 ## Server process
 
