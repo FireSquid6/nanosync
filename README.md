@@ -6,6 +6,8 @@ To install dependencies:
 bun install
 ```
 
+To run the Linux CLI and server, see [packages/cli/README.md](packages/cli/README.md).
+
 To run:
 
 ```bash
