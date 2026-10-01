@@ -7,7 +7,7 @@
 | Initial audience | One household or small trusted team, initially one user |
 | Server tenancy | One user and one vault per server |
 | Topology | Central authoritative server |
-| Initial clients | Linux desktop, Android, and CLI daemon |
+| Initial client libraries | Portable sync core and Linux adapters; Android integration remains platform work |
 | Encryption | Client-side encryption; server does not have the vault master key |
 | Recovery | User-held recovery key; no server-side plaintext recovery |
 | Device enrollment | Password authentication, admin approval, then recovery-key entry |
@@ -20,7 +20,7 @@
 | Transfer restart | Resume at completed chunk boundaries |
 | Deduplication | Within the one-user vault |
 | Server storage | Local filesystem through an abstract `Filesystem` interface |
-| Linux local model | Ordinary folder; evicted entries visible only in app and CLI |
+| Linux local model | Ordinary folder; evicted entries available through local-state adapters to integrator-provided interfaces |
 | Linux local encryption | Plaintext files; rely on device disk encryption |
 | Android local model | Complete offline vault |
 | Android capacity failure | Fail visibly if the vault does not fit |
@@ -29,7 +29,7 @@
 | Server durability | Validate checksums; operator manages backups |
 | Device revocation | Prevent future server access only |
 | Transport security | External reverse proxy, VPN, or trusted network; no built-in TLS |
-| CLI role | Continuous daemon plus status, history, restore, and management commands |
+| CLI role | Server runtime, bootstrap/enrollment, device administration, and maintenance reports only; no built-in client daemon or local IPC |
 
 ## Frozen version 1 implementation decisions
 
@@ -37,7 +37,7 @@ These choices are part of persistent format `1` and protocol `1`. Details and li
 
 | Area | Version 1 decision |
 |---|---|
-| Runtime | Bun/TypeScript for server and Linux CLI; shared core uses portable Web Crypto and WHATWG interfaces. Android integration is later platform work. |
+| Runtime | Bun/TypeScript for server, Linux adapters, and server/account CLI; shared core uses portable Web Crypto and WHATWG interfaces. Android integration is later platform work. |
 | Chunking | Fixed 4 MiB, recorded per file/format; only the final chunk may be smaller; all 50 GB paths stream. |
 | Crypto | SHA-256 ciphertext checksums, HMAC-SHA-256 vault chunk IDs, HKDF-SHA-256 domain derivation, and AES-256-GCM as specified in `security.md`; independent review is required. |
 | Authentication | Argon2id password verifier and independent random 256-bit per-device bearer credentials; no v1 credential expiry, rotation on re-enrollment. |

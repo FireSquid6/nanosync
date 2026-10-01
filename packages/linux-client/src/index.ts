@@ -21,7 +21,7 @@ export interface ScanPlan {
   manifest: ManifestV1;
   /** A factory, not a one-shot iterator. Open and verify files again in manifest order for Step 9. */
   chunks(knownObjectIds?: ReadonlySet<string>): AsyncGenerator<EncryptedObject>;
-  /** Commit only after the daemon has accepted/applied the revision, never on a failed upload. */
+  /** Commit only after the caller has accepted/applied the revision, never on a failed upload. */
   commit(): void;
   suppressed: string[];
 }

@@ -1,5 +1,5 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, chmodSync, rmSync, writeFileSync, readFileSync, symlinkSync, unlinkSync, existsSync, lstatSync } from "node:fs";
+import { mkdtempSync, chmodSync, rmSync, writeFileSync, existsSync, lstatSync } from "node:fs";
 import { randomUUID, randomBytes, createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,24 +7,28 @@ import { main } from "../src/main.ts";
 import { runServer } from "../src/server.ts";
 import { secureInstall, secureRead } from "../src/security.ts";
 import { api, bootstrapWorkflow, enroll, login, saveCredentials, joinVault } from "../src/client.ts";
-import { encryptManifest, generateRecoverySecret, generateVaultMasterKey, wrapMasterKey, referenceSetMac, displayRecoverySecret, HttpRemote } from "@nanosync/sync-core";
-import { startDaemon, stopDaemon, daemonCommand } from "@nanosync/linux-daemon";
-import { hydrateFile } from "../../linux-client/src/hydration.ts";
+import { encryptManifest, generateRecoverySecret, generateVaultMasterKey, wrapMasterKey, referenceSetMac, displayRecoverySecret } from "@nanosync/sync-core";
 import { parsePersistedRevisionEnvelope } from "@nanosync/protocol";
-import { ClientLocal } from "../../client-local/src/index.ts";
 
 const roots: string[] = [];
 function directory() { const path = mkdtempSync(join(tmpdir(), "nanosync-cli-")); roots.push(path); return path; }
 afterEach(() => { for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true }); });
 
-test("CLI rejects unknown flags and missing args", async () => {
-  expect(await main(["--help"])).toBe(0);
-  expect(await main(["--bogus", "status"])).toBe(2);
-  expect(await main(["restore"])).toBe(2);
-  expect(await main(["evict"])).toBe(2);
-  expect(await main(["download"])).toBe(2);
-  expect(await main(["resolve", "copy"])).toBe(2);
-  expect(await main(["resolve", "copy", "--confirm-discard", "--confirm-discard"])).toBe(2);
+test("CLI help lists supported commands and rejects removed local sync commands", async () => {
+  const stdout = spyOn(process.stdout, "write").mockImplementation(() => true);
+  const stderr = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    expect(await main(["--help"])).toBe(0);
+    const help = stdout.mock.calls.flat().join("");
+    for (const name of ["server", "bootstrap", "enroll", "devices", "approve", "revoke", "admin"]) {
+      expect(help).toContain(name);
+    }
+    for (const name of ["daemon", "status", "sync", "pause", "resume", "history", "restore", "resolve", "conflicts", "doctor", "evict", "download"]) {
+      expect(help).not.toMatch(new RegExp(`^\\s+${name}\\s`, "m"));
+      expect(await main([name])).toBe(2);
+      expect(JSON.parse(String(stderr.mock.lastCall?.[0]))).toMatchObject({ state: "unknown", exitCode: 2 });
+    }
+  } finally { stdout.mockRestore(); stderr.mockRestore(); }
 });
 
 test("Commander help and validation preserve structured errors across repeated main calls", async () => {
@@ -33,38 +37,21 @@ test("Commander help and validation preserve structured errors across repeated m
   try {
     expect(await main(["server", "run", "--help"])).toBe(0);
     expect(stdout.mock.calls.flat().join("")).toContain("--acknowledge-exposure");
-    expect(await main(["status", "--help"])).toBe(0);
+    expect(await main(["enroll", "--help"])).toBe(0);
     expect(stdout.mock.calls.flat().join("")).toContain("--client-dir");
     expect(await main(["help"])).toBe(0);
     for (const args of [
-      ["status", "--unexpected"], ["status", "--json", "--json"],
-      ["--client-dir", "/unused", "status", "--client-dir", "/unused"],
-      ["admin", "scan", "--client-dir"], ["restore", "one", "two", "three"],
-      ["resolve", "copy", "--confirm-discard", "--confirm-discard"]
+      ["devices", "--unexpected"], ["devices", "--json", "--json"],
+      ["--client-dir", "/unused", "devices", "--client-dir", "/unused"],
+      ["admin", "scan", "--client-dir"], ["approve"], ["revoke", "one", "two"]
     ]) {
       expect(await main(args)).toBe(2);
       expect(JSON.parse(String(stderr.mock.lastCall?.[0]))).toMatchObject({ state: "unknown", exitCode: 2 });
     }
     expect(await main(["--server-dir", directory(), "server", "init", "--json"])).toBe(0);
     expect(await main(["server", "--server-dir", directory(), "init"])).toBe(0);
-    expect(await main(["resolve", "copy"])).toBe(2);
-    expect(String(stderr.mock.lastCall?.[0])).toContain("--confirm-discard");
+    expect(await main(["--bogus", "devices"])).toBe(2);
   } finally { stdout.mockRestore(); stderr.mockRestore(); }
-});
-
-test("CLI maps typed local daemon failures to stable process codes", async () => {
-  const root = directory(); chmodSync(root, 0o700);
-  writeFileSync(join(root, "ipc.secret"), "a".repeat(64), { mode: 0o600 });
-  let state = "auth_required";
-  const server = Bun.serve({ unix: join(root, "daemon.sock"), fetch: () => Response.json({ error: "arbitrary message", state }, { status: 409 }) });
-  try {
-    for (const [category, code] of [["auth_required", 3], ["offline", 5], ["integrity_failure", 6],
-      ["capacity_incomplete", 7], ["conflict_blocked", 8]] as const) {
-      state = category;
-      expect(await main(["status", "--client-dir", root, "--json"])).toBe(code);
-    }
-  } finally { server.stop(true); }
-  expect(await main(["status", "--client-dir", root])).toBe(5);
 });
 
 test("server init provisions owner-only secrets and refuses overwrite", async () => {
@@ -189,81 +176,14 @@ test("runtime server accepts encrypted genesis, approves second device, and revo
     const pending = JSON.parse(secureRead(join(secondDir, "enrollment.json")).toString("utf8"));
     expect((await joinVault(secondDir, url, second, undefined)).status).toBe("pending");
     expect(JSON.parse(secureRead(join(secondDir, "enrollment.json")).toString("utf8"))).toEqual(pending);
+    expect(await main(["devices", "--client-dir", adminDir])).toBe(0);
     expect((await api(url, "/v1/admin/enrollments", {}, adminToken)).enrollments).toHaveLength(1);
-    await api(url, `/v1/admin/enrollments/${second}/approve`, { method: "POST", body: JSON.stringify({ protocolVersion: 1 }) }, adminToken);
+    expect(await main(["approve", second, "--client-dir", adminDir])).toBe(0);
     expect((await joinVault(secondDir, url, second, undefined, await displayRecoverySecret(recovery))).status).toBe("approved");
-    const client = directory(), sync = directory();
-    saveCredentials(client, { baseUrl: url, vaultId, deviceId, token: adminToken, masterKey: Buffer.from(master).toString("hex") });
-    const daemonOptions = { clientDirectory: client, syncDirectory: sync, vaultId, deviceId, masterKey: master, baseUrl: url, token: adminToken, pollMs: 3_600_000 };
-    let daemon = await startDaemon(daemonOptions);
-    try {
-      expect((await daemonCommand(client, "sync")).applied.sequence).toBe(1);
-      expect((await daemonCommand(client, "history")).length).toBe(1);
-      expect((await daemonCommand(client, "conflicts"))).toEqual([]);
-      writeFileSync(join(sync, "note.txt"), "original", { mode: 0o600 }); chmodSync(join(sync, "note.txt"), 0o600);
-      await daemonCommand(client, "sync");
-      const first = (await daemonCommand(client, "status")).applied.revisionId;
-      writeFileSync(join(sync, "note.txt"), "updated");
-      await daemonCommand(client, "sync");
-      const unchangedHead = (await daemonCommand(client, "status")).applied;
-      chmodSync(join(sync, "note.txt"), 0o622);
-      await expect(daemonCommand(client, "evict", { path: "note.txt" })).rejects.toThrow(/unsafe hydration file/);
-      expect(readFileSync(join(sync, "note.txt"), "utf8")).toBe("updated");
-      chmodSync(join(sync, "note.txt"), 0o600);
-      const finish = ClientLocal.prototype.finishHydration;
-      ClientLocal.prototype.finishHydration = function (...args) { ClientLocal.prototype.finishHydration = finish; throw new Error("injected crash before hydration metadata commit"); };
-      try { await expect(daemonCommand(client, "evict", { path: "note.txt" })).rejects.toThrow(/injected crash/); }
-      finally { ClientLocal.prototype.finishHydration = finish; }
-      await stopDaemon(daemon); daemon = await startDaemon(daemonOptions);
-      await daemonCommand(client, "sync");
-      expect((await daemonCommand(client, "status")).remoteOnlyFiles).toBe(1);
-      expect((await daemonCommand(client, "status")).applied).toEqual(unchangedHead);
-      symlinkSync("/etc/passwd", join(sync, "note.txt"));
-      try { await expect(daemonCommand(client, "download", { path: "note.txt" })).rejects.toThrow(/unsafe filesystem entry|already exists/); }
-      finally { unlinkSync(join(sync, "note.txt")); }
-      await stopDaemon(daemon);
-      const local = new ClientLocal(client, vaultId, deviceId);
-      try {
-        const remote = new HttpRemote({ baseUrl: url, token: adminToken, fetch, journal: local });
-        const authenticated = await remote.manifest(unchangedHead.revisionId, master);
-        await expect(hydrateFile(sync, local, remote, authenticated.manifest, authenticated.revision, master,
-          "download", "note.txt", undefined, { afterLink: () => { throw new Error("injected process exit with two links"); } }))
-          .rejects.toThrow(/two links/);
-        expect(lstatSync(join(sync, "note.txt")).nlink).toBe(2);
-      } finally { local.close(); }
-      daemon = await startDaemon(daemonOptions); // Replay before watcher rejects the nlink=2 stage.
-      await daemonCommand(client, "sync");
-      expect((await daemonCommand(client, "status")).downloadedFiles).toBe(1);
-      await daemonCommand(client, "evict", { path: "note.txt" });
-      ClientLocal.prototype.finishHydration = function (...args) { ClientLocal.prototype.finishHydration = finish; throw new Error("injected crash after downloaded file installation"); };
-      try { await expect(daemonCommand(client, "download", { path: "note.txt" })).rejects.toThrow(/injected crash/); }
-      finally { ClientLocal.prototype.finishHydration = finish; }
-      await stopDaemon(daemon); daemon = await startDaemon(daemonOptions);
-      await daemonCommand(client, "sync");
-      expect((await daemonCommand(client, "status")).downloadedFiles).toBe(1);
-      expect(readFileSync(join(sync, "note.txt"), "utf8")).toBe("updated");
-      expect((await daemonCommand(client, "status")).applied).toEqual(unchangedHead);
-      await expect(daemonCommand(client, "evict", { path: "../unsafe" })).rejects.toThrow(/invalid relative path/);
-      const accept = ClientLocal.prototype.acceptProposal;
-      ClientLocal.prototype.acceptProposal = function (sequence) { accept.call(this, sequence); ClientLocal.prototype.acceptProposal = accept; throw new Error("injected crash after restore acceptance"); };
-      try { await expect(daemonCommand(client, "restore", { revision: first, path: "note.txt" })).rejects.toThrow(/injected crash/); }
-      finally { ClientLocal.prototype.acceptProposal = accept; }
-      await stopDaemon(daemon); daemon = await startDaemon(daemonOptions);
-      await daemonCommand(client, "sync");
-      expect((await daemonCommand(client, "status")).applied.sequence).toBeGreaterThan(2);
-      expect(readFileSync(join(sync, "note.txt"), "utf8")).toBe("original");
-      writeFileSync(join(sync, "empty.txt"), "", { mode: 0o600 }); chmodSync(join(sync, "empty.txt"), 0o600);
-      await daemonCommand(client, "sync");
-      const emptyHead = (await daemonCommand(client, "status")).applied;
-      expect(await main(["evict", "empty.txt", "--client-dir", client])).toBe(0);
-      expect(await main(["download", "empty.txt", "--client-dir", client])).toBe(0);
-      expect(readFileSync(join(sync, "empty.txt"), "utf8")).toBe("");
-      expect((await daemonCommand(client, "status")).applied).toEqual(emptyHead);
-    } finally { await stopDaemon(daemon); }
     const other = JSON.parse(secureRead(join(secondDir, "client.json")).toString("utf8"));
-    expect((await api(url, "/v1/head", {}, other.token)).sequence).toBe(5);
+    expect((await api(url, "/v1/head", {}, other.token)).sequence).toBe(1);
     expect(await main(["admin", "storage", "--client-dir", secondDir])).toBe(3);
-    await api(url, `/v1/admin/devices/${second}/revoke`, { method: "POST", body: JSON.stringify({ protocolVersion: 1 }) }, adminToken);
+    expect(await main(["revoke", second, "--client-dir", adminDir])).toBe(0);
     expect(await main(["admin", "storage", "--client-dir", secondDir])).toBe(3);
     await expect(api(url, "/v1/head", {}, other.token)).rejects.toThrow(/401/);
   } finally { await server.stop(); }

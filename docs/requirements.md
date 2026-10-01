@@ -8,7 +8,7 @@ The single user who owns the server account, vault, recovery key, and synchroniz
 
 ### Approved device
 
-A Linux, Android, or CLI installation authorized to authenticate, obtain encrypted vault objects, and publish revisions.
+An integrator-provided Linux or future Android client authorized to authenticate, obtain encrypted vault objects, and publish revisions. The shipped CLI provisions credentials and manages enrollment but does not synchronize files.
 
 ### Server operator
 
@@ -54,7 +54,7 @@ Retention must never remove the current head, an unresolved conflict required by
 - Store downloaded files as plaintext, relying on device-level disk encryption.
 - Allow explicit eviction of downloaded files.
 - Remove evicted files from the ordinary directory.
-- Show remote-only entries in the Nanosync application and CLI, not as transparent filesystem placeholders.
+- Expose remote-only entries through local client state for an integrator-provided UI, not as transparent filesystem placeholders.
 
 ### Android
 
@@ -65,15 +65,7 @@ Retention must never remove the current head, an unresolved conflict required by
 
 ### CLI
 
-Provide a continuous daemon and commands for:
-
-- Status and manual synchronization.
-- Pausing and resuming synchronization.
-- Viewing history.
-- Restoring revisions or paths.
-- Viewing and resolving conflicts.
-- Downloading and evicting files.
-- Viewing device status.
+Provide CLI commands for server initialization/runtime, client bootstrap/enrollment, device approval/revocation, and administrator reports. Portable core and Linux adapters support user-provided synchronization orchestration; shipping a daemon, local IPC, and local sync/status/history/restore/conflict/eviction commands is out of scope.
 
 ## Security requirements
 
@@ -99,6 +91,7 @@ Provide a continuous daemon and commands for:
 
 ## Non-goals for version 1
 
+- A built-in client daemon, its local IPC, or CLI-driven local synchronization.
 - Multiple users or vaults on one server.
 - Shared folders or access-control lists.
 - Peer-to-peer synchronization.

@@ -1,8 +1,8 @@
-# `@nanosync/cli` — Bun commands for Linux
+# `@nanosync/cli` — Bun server and account commands
 
-This package is Nanosync's Bun command entrypoint for setting up/running the local server and daemon, managing a Linux client, and performing authenticated administrator tasks. It uses the daemon's private local IPC for client operations and the server API for enrollment and administration.
+This package provides server initialization/runtime, client bootstrap/enrollment, device approval/revocation, and administrator maintenance reports. It does **not** ship a client daemon, local IPC, or CLI sync/status/history/restore/conflict/eviction commands. Users integrate and supervise their own sync runner using `@nanosync/sync-core`, `@nanosync/client-local`, and `@nanosync/linux-client`.
 
-Install Bun and dependencies with `bun install` at the repository root. Run `bun packages/cli/src/main.ts --help` or link the package's `nanosync` executable. Commands emit JSON and stable status exit codes: 0 synchronized, 2 command error, 3 authorization/approval, 4 pending/active/paused/remote-only, 5 offline, 6 integrity, 7 capacity, 8 conflict. See [Clients and Operations](../../docs/clients-and-operations.md) for details.
+Install dependencies with `bun install` at the repository root. Run `bun packages/cli/src/main.ts --help` or link the `nanosync` executable. Commands emit JSON. Successful commands exit 0; pending enrollment and authorization failures exit 3; other command errors exit 2 and report structured `{error,state,exitCode}` on stderr.
 
 Typical local setup (password is read from stdin, not an argument):
 
@@ -14,7 +14,6 @@ printf '%s' "$PASSWORD" | bun packages/cli/src/main.ts bootstrap \
   --client-dir "$HOME/.local/share/nanosync" --url http://127.0.0.1:7337 \
   --proof-file "$HOME/nanosync-server/bootstrap.hex"
 unset PASSWORD
-bun packages/cli/src/main.ts daemon --client-dir "$HOME/.local/share/nanosync" --sync-dir "$HOME/Sync"
 ```
 
 ## Secrets, backup, and network boundary
@@ -25,10 +24,8 @@ Read passwords from stdin; avoid shell history/arguments and remember shell vari
 
 The server defaults to `127.0.0.1:7337`. Non-loopback exposure requires `--host HOST --acknowledge-exposure` and an external TLS/VPN boundary; the server has no built-in transport encryption. Use HTTPS via a trusted proxy for all routes or a VPN. Never expose bare HTTP to an untrusted network. The integrity scanner runs on server startup; offline GC is not run by the server.
 
-## Devices and conflict resolution
+## Devices and administration
 
 Enroll each device with its own retained UUID, for example `nanosync enroll --client-dir "$HOME/second-client" --url https://SERVER --device-id UUID`. Enrollment state is written before the request so retries reuse the same pending session/fingerprint. Approve it from the first device with `nanosync devices` and `nanosync approve UUID`; after approval, repeat enrollment and supply the recovery key via an owned mode-0600 file or `/dev/tty`. The completed `client.json` holds the token and vault key; restrict backups. Do not casually remove pending enrollment state.
 
-Admin commands (`admin storage`, `retention-dry-run`, `gc-dry-run`, `scan`, `diagnostics`) use an approved administrator client. Reports are aggregate-only; scans check at most 100 objects per invocation. GC commands are dry-run only; no live GC command exists. See the operations guide for maintenance and backup procedures.
-
-`restore REVISION [PATH]` publishes a new revision, not a history rewind; synchronize devices afterward. `conflicts` lists live conflict copies. Inspect both files before `resolve 'EXACT/PATH' --confirm-discard`: it synchronizes pending edits and tombstones that file copy, leaving prior bytes in immutable history. It does not merge contents or resolve directory/location conflicts and requires a running daemon.
+Admin commands (`admin storage`, `retention-dry-run`, `gc-dry-run`, `scan`, `diagnostics`) use an approved administrator client. Reports are aggregate-only; scans check at most 100 objects per invocation. GC commands are dry-run only; no live GC command exists. See [Clients and Operations](../../docs/clients-and-operations.md) for maintenance and backup procedures.

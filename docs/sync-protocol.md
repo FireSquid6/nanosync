@@ -210,7 +210,7 @@ Eviction sequence:
 2. Record remote-only state and watcher suppression transactionally.
 3. Delete the local plaintext.
 4. Consume the expected watcher event without creating a tombstone.
-5. Show the entry in the app and CLI as remote-only.
+5. Retain the remote-only entry in local client state so an integrator-provided UI can display it; the shipped CLI does not display it.
 
 An unexpected external deletion is treated as a synchronized deletion after the normal debounce period.
 

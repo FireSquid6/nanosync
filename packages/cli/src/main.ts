@@ -3,15 +3,15 @@ import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { Command, CommanderError, Option } from "commander";
-import { daemonCommand, exitCode, failureState, startDaemon, type SyncState } from "@nanosync/linux-daemon";
 import { parseDeviceId } from "@nanosync/protocol";
+import { RemoteError } from "@nanosync/sync-core";
 import { api, bootstrap, credentials, joinVault, readPassword } from "./client.ts";
 import { privateDirectory, secureCreate, secureRead } from "./security.ts";
 import { runServer } from "./server.ts";
 
-type CliOptions = { clientDir?: string; syncDir?: string; serverDir?: string; url?: string; proofFile?: string;
+type CliOptions = { clientDir?: string; serverDir?: string; url?: string; proofFile?: string;
   deviceId?: string; recoveryFile?: string; host?: string; port?: string; acknowledgeExposure?: boolean;
-  confirmDiscard?: boolean; json?: boolean };
+  json?: boolean };
 function required(value: string | undefined, label: string): string {
   if (!value) throw new Error(`required ${label}`);
   return value;
@@ -48,9 +48,9 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
       return command;
     }
     const common = ["--client-dir <dir>", "--json"];
-    flags(program, ...common, "--sync-dir <dir>", "--server-dir <dir>", "--url <url>", "--proof-file <file>",
+    flags(program, ...common, "--server-dir <dir>", "--url <url>", "--proof-file <file>",
       "--device-id <uuid>", "--recovery-file <file>", "--host <host>", "--port <port>",
-      "--acknowledge-exposure", "--confirm-discard");
+      "--acknowledge-exposure");
     const opts = (command: Command): CliOptions => command.optsWithGlobals<CliOptions>();
     const directory = (command: Command) => opts(command).clientDir ?? join(process.env.HOME ?? "", ".local/share/nanosync");
     let result: unknown, code = 0;
@@ -109,64 +109,6 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
         result = await joinVault(dir, url, id, existsSync(join(dir, "enrollment.json")) ? undefined : readPassword(), recovery);
         if ((result as { status?: string }).status === "pending") code = 3;
       });
-    flags(
-      program.command("daemon").description("Run the single-owner Linux sync daemon"),
-      "--sync-dir <dir>",
-      ...common,
-    )
-      .action(async (_options: CliOptions, command: Command) => {
-        const dir = directory(command);
-        const creds = credentials(dir);
-        const daemon = await startDaemon({
-          clientDirectory: dir,
-          syncDirectory: required(opts(command).syncDir, "--sync-dir"),
-          vaultId: creds.vaultId,
-          deviceId: creds.deviceId,
-          masterKey: Buffer.from(creds.masterKey, "hex"),
-          baseUrl: creds.baseUrl,
-          token: creds.token,
-        });
-        console.error("Daemon started");
-        await new Promise<void>(resolveStop => {
-          process.once("SIGINT", resolveStop);
-          process.once("SIGTERM", resolveStop);
-        });
-        await daemon.stop();
-      });
-    for (const name of ["status", "sync", "pause", "resume", "conflicts", "doctor"] as const) {
-      flags(program.command(name).description(`${name} local daemon`), ...common)
-        .action(async (_options: CliOptions, command: Command) => {
-          result = await daemonCommand(directory(command), name);
-          if (name === "status") code = exitCode((result as { state: SyncState }).state);
-        });
-    }
-    flags(program.command("history").description("Authenticated revision history").argument("[path]"), ...common)
-      .action(async (path: string | undefined, _options: CliOptions, command: Command) => {
-        result = await daemonCommand(directory(command), "history", path ? { path } : {});
-      });
-    flags(
-      program.command("restore")
-        .description("Restore historical tree or file as a new revision")
-        .argument("<revision>")
-        .argument("[path]"),
-      ...common,
-    )
-      .action(async (revision: string, path: string | undefined, _options: CliOptions, command: Command) => {
-        result = await daemonCommand(directory(command), "restore", { revision, ...(path === undefined ? {} : { path }) });
-      });
-    flags(program.command("resolve").description("Tombstone named conflict copy; bytes remain in history").argument("<path>"), "--confirm-discard", ...common)
-      .action(async (path: string, _options: CliOptions, command: Command) => {
-        if (!opts(command).confirmDiscard) {
-          throw new Error("resolve requires --confirm-discard; the named conflict copy will be removed from the live tree (retained in history)");
-        }
-        result = await daemonCommand(directory(command), "resolve", { path });
-      });
-    for (const name of ["evict", "download"] as const) {
-      flags(program.command(name).description(`${name} local file without publishing`).argument("<path>"), ...common)
-        .action(async (path: string, _options: CliOptions, command: Command) => {
-          result = await daemonCommand(directory(command), name, { path });
-        });
-    }
     flags(program.command("devices").description("List devices (administrator)"), ...common)
       .action(async (_options: CliOptions, command: Command) => {
         const creds = credentials(directory(command)); result = await api(creds.baseUrl, "/v1/admin/devices", {}, creds.token);
@@ -207,7 +149,8 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
     if (error instanceof CommanderError && error.exitCode === 0 &&
       (error.code === "commander.helpDisplayed" || error.code === "commander.help")) return 0;
     const message = error instanceof Error ? error.message : "command failed";
-    const state = failureState(error), code = exitCode(state);
+    const state = error instanceof RemoteError && (error.status === 401 || error.status === 403) ? "auth_required" : "unknown";
+    const code = state === "auth_required" ? 3 : 2;
     console.error(JSON.stringify({ error: message, state, exitCode: code }));
     return code;
   }

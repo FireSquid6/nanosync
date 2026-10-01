@@ -97,7 +97,7 @@ function verifyFile(anchor: Anchor, path: string, size: number, digest: string, 
 }
 function stageName(intent: HydrationIntent) { return `.nanosync-hydrate-${intent.id}`; }
 
-/** Same-head hydration. The daemon must serialize this with sync and check the remote head. */
+/** Same-head hydration. The caller must serialize this with sync and check the remote head. */
 export async function hydrateFile(
   root: string,
   local: ClientLocal,

@@ -2,22 +2,22 @@
 
 ## Shared client engine
 
-The Linux, Android, and CLI experiences should share a synchronization core where practical. Platform adapters implement storage, event observation, background execution, secure credentials, and user interaction.
+Linux and future Android clients can share a synchronization core where practical. Platform integrators implement storage, event observation, background execution, secure credentials, and user interaction. The shipped CLI handles server, enrollment, and administration, not local synchronization.
 
-The shared engine owns:
+The shared libraries provide primitives and interfaces for (with scheduling and lifecycle orchestration supplied by the integrator):
 
 - Local metadata schema and migrations.
 - Object encoding, chunking, and cryptography.
-- Transfer queues and retries.
+- Durable transfer state and bounded retries.
 - Revision creation and publication.
 - Three-way merge and conflict rules.
 - History inspection and restore logic.
 
 ### Bun local journal contract (initial adapter)
 
-`packages/client-local` implements the portable `sync-core` `ChunkJournal` with Bun SQLite and private chunk files. Construct `new ClientLocal(privateDirectory, vaultId, deviceId, maxCacheBytes)` once per daemon process. The directory must already be owner-only if it exists; database, WAL/SHM and cache files must be owner-only regular files without symlinks or hardlinks. The adapter creates its own subdirectory and files and refuses conflicting identities, schema changes, malformed migration ledgers, and failed SQLite integrity checks. No vault master, recovery secret, password, or bearer credential belongs in this database or in operation detail; the adapter currently accepts only empty operation detail.
+`packages/client-local` implements the portable `sync-core` `ChunkJournal` with Bun SQLite and private chunk files. Construct `new ClientLocal(privateDirectory, vaultId, deviceId, maxCacheBytes)` once per owner process. The directory must already be owner-only if it exists; database, WAL/SHM and cache files must be owner-only regular files without symlinks or hardlinks. The adapter creates its own subdirectory and files and refuses conflicting identities, schema changes, malformed migration ledgers, and failed SQLite integrity checks. No vault master, recovery secret, password, or bearer credential belongs in this database or in operation detail; the adapter currently accepts only empty operation detail.
 
-Scanner/merge/daemon callers use `upsertEntry`/`entry`/`entries`, `recordHead`/`head`, `enqueueOperation`/`enqueueTransfer`/`addConflict`, `listWork`/`transition`, and `suppress`/`consumeSuppression`. Stable entry IDs survive path changes; evicted files retain metadata. `beginHydration` durably records same-revision eviction/download intent before changing the filesystem; `finishHydration` atomically updates hydration, identity, suppression and operation state. Interrupted hydration is replayed before scanning. Operations and transfers retain running state across restart; the daemon decides which running operations to retry and must scan ambiguous filesystem changes. Head sequences never decrease, and equal sequences must name the same revision; accepted/applied ordering is enforced. Rollback protection assumes the private local state itself has not been replaced by an older backup; hardware-backed monotonic counters are not yet provided.
+Scanner/merge/integrator callers use `upsertEntry`/`entry`/`entries`, `recordHead`/`head`, `enqueueOperation`/`enqueueTransfer`/`addConflict`, `listWork`/`transition`, and `suppress`/`consumeSuppression`. Stable entry IDs survive path changes; evicted files retain metadata. `beginHydration` durably records same-revision eviction/download intent before changing the filesystem; `finishHydration` atomically updates hydration, identity, suppression and operation state. Interrupted hydration must be replayed before scanning. Operations and transfers retain running state across restart; the integrating runner decides which running operations to retry and must scan ambiguous filesystem changes. Head sequences never decrease, and equal sequences must name the same revision; accepted/applied ordering is enforced. Rollback protection assumes the private local state itself has not been replaced by an older backup; hardware-backed monotonic counters are not yet provided.
 
 For publication, call `freezeProposal(request, encryptedManifestFrame)` **before** the first advance request. It saves the exact validated wire request (expected head, immutable envelope, idempotency key) and encrypted manifest frame in one FULL-synchronous transaction. On restart, `proposal()` retrieves those exact bytes and request; upload the manifest if needed and replay `HttpRemote.advance(proposal.request)` rather than calling `publish()` again. Keep the proposal for ambiguous responses and stale/missing-object resolution; `acceptProposal(sequence)` durably advances the accepted head and records the outcome together, and only an accepted proposal can be `clearProposal()`-ed. A new proposal cannot replace an unresolved one. This adapter does not yet integrate the publish workflow, perform merge/rebase, or persist every upload frame.
 
@@ -27,7 +27,7 @@ For publication, call `freezeProposal(request, encryptedManifestFrame)` **before
 
 ### Local directory
 
-The Linux client manages an ordinary directory. Downloaded files are ordinary plaintext files usable by any application. Nanosync does not interpose a virtual filesystem.
+An integrator-provided Linux runner can manage an ordinary directory using the Linux adapter. Downloaded files are ordinary plaintext files usable by any application. Nanosync does not interpose a virtual filesystem.
 
 ### Change observation
 
@@ -47,9 +47,9 @@ The client must safely handle:
 
 ### Remote-only entries
 
-An evicted file is absent from the sync directory. It appears only in the desktop UI and CLI until the user requests download. The local metadata database retains its stable identity and remote file object reference.
+An evicted file is absent from the sync directory. Its identity and remote file object reference remain available through the local metadata adapter for an integrator-provided UI; the shipped CLI does not list or download it.
 
-Because absence can mean either eviction or deletion, app-initiated eviction must write durable intent before removing the local file.
+Because absence can mean either eviction or deletion, caller-initiated eviction must write durable intent before removing the local file.
 
 ### Unsupported filesystem cases
 
@@ -91,68 +91,11 @@ Background synchronization is best-effort and must be supplemented by:
 
 Opening or editing through another application may require temporary copies or platform-mediated document access. The Android client must detect the resulting edited content and clearly communicate when an external copy is no longer managed by Nanosync.
 
-## CLI and daemon
+## CLI and user-managed client orchestration
 
-One daemon process owns the synchronization directory, local metadata database, and operation journal. CLI commands communicate with it through a local authenticated IPC endpoint.
+The shipped CLI runs and initializes the server (`server init`, `server run`), bootstraps or enrolls a client (`bootstrap`, `enroll`), manages devices (`devices`, `approve`, `revoke`), and requests administrator maintenance reports (`admin storage`, `admin retention-dry-run`, `admin gc-dry-run`, `admin scan`, `admin diagnostics`). It does not ship a sync daemon, local IPC endpoint, or local sync/status/history/restore/conflict/eviction commands. Commands return JSON; successful commands exit 0, pending enrollment exits 3, and other command errors report `{error,state:"unknown",exitCode:2}` on stderr. API authorization errors can also return 3 (see the client API error handling).
 
-Suggested command surface:
-
-```text
-nanosync daemon
-nanosync status [--json]
-nanosync sync
-nanosync pause
-nanosync resume
-nanosync history [PATH]
-nanosync restore REVISION [PATH]
-nanosync conflicts
-nanosync resolve PATH --confirm-discard
-nanosync evict PATH
-nanosync download PATH
-nanosync devices
-nanosync doctor
-```
-
-The shipped Linux CLI supports whole-revision restore when `PATH` is omitted,
-or a historical single-file restore when supplied. Both publish a new immutable
-revision branching from the accepted head after settling local edits; history
-is not rewound. Deleted identities are not resurrected: restored files and
-directories whose old IDs were tombstoned receive fresh IDs, with deletion
-markers retained. Other devices must synchronize and verify plaintext files
-and head after a restore.
-
-`resolve PATH --confirm-discard` explicitly removes a live **file conflict
-copy** from the current tree by publishing its tombstone after synchronizing
-pending edits. The discarded bytes remain in immutable history. Inspect both
-copies and combine content in the intended survivor first; this command does
-not merge bytes, and does not handle directory or location-only conflicts.
-
-Commands intended for scripts should provide stable structured output and meaningful exit codes. `status` should distinguish:
-
-- Fully synchronized.
-- Local changes pending.
-- Uploading or downloading.
-- Paused.
-- Offline.
-- Blocked by conflict.
-- Authentication or approval required.
-- Incomplete due to storage capacity.
-- Integrity failure.
-
-Linux `status --json` returns `state` (stable classification), `exitCode`, and
-`phase` (daemon activity, independently). Exit codes: 0 synchronized; 2 unknown
-or command error; 3 authorization/approval required; 4 pending, active, paused,
-or remote-only; 5 offline; 6 integrity failure; 7 capacity incomplete; 8 conflict
-blocked. `status` exits with its reported code; other successful commands exit
-0 except pending enrollment (3). Failed commands report `{error,state,exitCode}`
-on stderr. A conflict copy remains blocked until resolved; an evicted remote-only
-file is `remote_only`, never fully synchronized. Durable heads alone do not prove
-completion. `status` inventories pathname and file metadata without reading file
-content, contacting the server, or changing local state. A same-size edit with
-forged/restored metadata may escape this check; the next full sync verifies file
-content. Offline/auth/capacity/integrity classifications reflect the last failed
-sync, not a live network probe. Capacity reflects actual local disk errors or
-negotiated server object/reference limits, **not** Android storage forecasts.
+Users who need ongoing synchronization must integrate and supervise their own runner around `sync-core`, `client-local`, and `linux-client`. The runner must serialize ownership of its data root and journal, handle watcher/scanner scheduling, credentials and restart recovery, replay unresolved publication and hydration intents, and surface errors rather than claim convergence based only on stored head sequences. The portable library APIs remain available for history, merge, restoration, conflicts and hydration; the CLI does not orchestrate them.
 
 ## Server process
 
