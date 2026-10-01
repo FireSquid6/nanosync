@@ -1,0 +1,38 @@
+name: Release Linux binary
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - run: bun run test
+      - run: bun run typecheck
+      - run: bash build/test-install.sh
+      - run: bun run build:binary
+      - name: Check binary and prepare release assets
+        run: |
+          ./dist/nanosync --help
+          mv dist/nanosync dist/nanosync-linux-x64
+          (cd dist && sha256sum nanosync-linux-x64 > nanosync-linux-x64.sha256)
+          (cd dist && sha256sum --check nanosync-linux-x64.sha256)
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/nanosync-linux-x64 dist/nanosync-linux-x64.sha256 --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/nanosync-linux-x64 dist/nanosync-linux-x64.sha256 --verify-tag --generate-notes
+          fi
