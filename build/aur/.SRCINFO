@@ -1,0 +1,15 @@
+pkgbase = nanosync-git
+	pkgdesc = Linux file synchronization CLI and server (development version)
+	pkgver = r39.g4f59890
+	pkgrel = 1
+	url = https://github.com/FireSquid6/nanosync
+	arch = x86_64
+	license = unknown
+	makedepends = bun
+	makedepends = git
+	provides = nanosync
+	conflicts = nanosync
+	source = nanosync::git+https://github.com/FireSquid6/nanosync.git
+	sha256sums = SKIP
+
+pkgname = nanosync-git

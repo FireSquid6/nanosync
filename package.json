@@ -6,6 +6,7 @@
   "scripts": {
     "test": "bun test",
     "typecheck": "bun run --filter '*' typecheck",
+    "build:binary": "bash build/binary.sh",
     "nanosync": "bun packages/cli/src/main.ts"
   },
   "devDependencies": {

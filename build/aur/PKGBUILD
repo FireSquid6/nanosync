@@ -1,0 +1,28 @@
+# Maintainer: FireSquid6 <https://github.com/FireSquid6>
+pkgname=nanosync-git
+pkgver=r39.g4f59890
+pkgrel=1
+pkgdesc='Linux file synchronization CLI and server (development version)'
+arch=('x86_64')
+url='https://github.com/FireSquid6/nanosync'
+license=('unknown')
+makedepends=('bun' 'git')
+provides=('nanosync')
+conflicts=('nanosync')
+source=('nanosync::git+https://github.com/FireSquid6/nanosync.git')
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$srcdir/nanosync"
+  printf 'r%s.g%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+build() {
+  cd "$srcdir/nanosync"
+  bun install --frozen-lockfile
+  bun run build:binary
+}
+
+package() {
+  install -Dm755 "$srcdir/nanosync/dist/nanosync" "$pkgdir/usr/bin/nanosync"
+}
