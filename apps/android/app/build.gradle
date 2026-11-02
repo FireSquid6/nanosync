@@ -1,0 +1,14 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'org.nanosync.mobile'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'org.nanosync.mobile'
+        minSdk 26
+        targetSdk 36
+    }
+}
