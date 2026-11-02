@@ -230,7 +230,16 @@ async function stage(root: Root, plan: Plan, remote: HttpRemote, master: Uint8Ar
 
 function planApply(root: Root, local: ClientLocal, manifest: ManifestV1, sequence: number, evict: ReadonlySet<string>, ignore: IgnoreRules): Plan {
   const paths = manifestPaths(manifest), oldEntries = local.entries(), identities = new Map(local.identities().map(i => [i.entryId, i]));
-  local.markIgnored(oldEntries.filter(e => e.path && ignore.ignores(e.path, e.kind === "directory")).map(e => e.id));
+  const ignored = oldEntries.filter(e => e.path && ignore.ignores(e.path, e.kind === "directory"));
+  const ignoredIds = new Set(ignored.map(e => e.id));
+  const remoteById = new Map([...paths].map(([path, entry]) => [entry.id, { path, entry }]));
+  local.markIgnored(ignored.map(e => e.id));
+  for (const entry of ignored) {
+    const destination = remoteById.get(entry.id);
+    if (destination && destination.entry.kind !== "tombstone" &&
+        !ignore.ignores(destination.path, destination.entry.kind === "directory"))
+      throw new Error(`ignored entry moved to included path; manual reconciliation required: ${entry.path}`);
+  }
   const old: Old[] = oldEntries.filter(e => e.kind !== "tombstone" && e.hydration === "downloaded" &&
     (e.path === "" || !ignore.ignores(e.path, e.kind === "directory"))).map(entry => {
     const ident = identities.get(entry.id); if (!ident) throw new Error(`missing local identity: ${entry.path}`);
@@ -246,6 +255,7 @@ function planApply(root: Root, local: ClientLocal, manifest: ManifestV1, sequenc
     ignoredIdentities: local.identities().filter(i => oldEntries.some(e => e.id === i.entryId && e.path &&
       ignore.ignores(e.path, e.kind === "directory"))) };
   for (const [path, e] of paths) {
+    if (ignoredIds.has(e.id)) continue;
     if (path && ignore.ignores(path, e.kind === "directory")) continue;
     const prior = byId.get(e.id);
     if (prior && prior.kind !== e.kind && !(e.kind === "tombstone" && prior.kind === e.deletedKind))

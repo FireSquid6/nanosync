@@ -158,9 +158,16 @@ export class LinuxScanner {
     for (const e of prior.entries) priorPath.set(index(e), e);
     const hints = identityHints ? manifestPaths(parseManifest(identityHints)) : new Map<string, ManifestEntry>();
     const localPath = new Map(localEntries.map(e => [e.path, e]));
+    const visible = new Set(files.map(f => f.path));
+    for (const recorded of localEntries) if (recorded.path && this.local.wasIgnored(recorded.id) &&
+        !rules.ignores(recorded.path, recorded.kind === "directory") &&
+        (!visible.has(recorded.path) || priorPath.get(recorded.path)?.id !== recorded.id ||
+          priorPath.get(recorded.path)?.kind === "tombstone"))
+      throw new Error(`previously ignored local path requires manual reconciliation: ${recorded.path}`);
     for (const file of files) {
       const previous = priorPath.get(file.path), recorded = localPath.get(file.path);
-      if (recorded && !old.has(recorded.id) || file.path && previous && previous.kind !== "tombstone" && (!recorded || recorded.id !== previous.id ||
+      if (recorded && this.local.wasIgnored(recorded.id) && (!previous || previous.kind === "tombstone" || previous.id !== recorded.id) ||
+          recorded && !old.has(recorded.id) || file.path && previous && previous.kind !== "tombstone" && (!recorded || recorded.id !== previous.id ||
           previous.kind === "file" && recorded.fingerprint !== previous.sha256))
         throw new Error(`previously ignored or divergent local path requires manual reconciliation: ${file.path}`);
     }
@@ -298,8 +305,12 @@ export class LinuxScanner {
       const parent = nextById.get(entry.parentId)!;
       return [nextPath(parent), entry.name].filter(Boolean).join("/");
     }
-    for (const entry of entries.filter(e => e.kind === "tombstone"))
+    const ignoredLocalIds = new Set(localEntries.filter(local => local.path &&
+      rules.ignores(local.path, local.kind === "directory")).map(local => local.id));
+    for (const entry of entries.filter(e => e.kind === "tombstone" && !ignoredLocalIds.has(e.id)))
       updates.push({ id: entry.id, path: nextPath(entry), kind: "tombstone", fingerprint: null, hydration: "downloaded", revision });
+    const updatedIds = new Set(updates.map(update => update.id));
+    for (const local of localEntries) if (ignoredLocalIds.has(local.id) && !updatedIds.has(local.id)) updates.push(local);
     const manifest = parseManifest({
       version: 1,
       vaultId: prior.vaultId,

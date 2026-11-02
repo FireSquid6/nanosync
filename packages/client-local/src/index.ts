@@ -267,6 +267,7 @@ export class ClientLocal implements ChunkJournal {
   /** Durable guard: an ignored absence must never become a deletion upon unignoring. */
   markIgnored(ids: readonly string[]) {
     for (const id of ids) uuid(id);
+    if (!ids.length) return;
     this.write(() => { for (const id of ids) run(this.db, "INSERT OR IGNORE INTO ignored_entries VALUES(?)", id); });
   }
   wasIgnored(id: string): boolean {
@@ -274,6 +275,7 @@ export class ClientLocal implements ChunkJournal {
   }
   clearIgnored(ids: readonly string[]) {
     for (const id of ids) uuid(id);
+    if (!ids.length) return;
     this.write(() => { for (const id of ids) run(this.db, "DELETE FROM ignored_entries WHERE entry_id=?", id); });
   }
   private work(table: "operations" | "transfers" | "conflicts", id: string, fields: (string | number | null)[]) {

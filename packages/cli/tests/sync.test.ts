@@ -195,10 +195,47 @@ test("unignoring a tracked path deleted while excluded cannot publish a deletion
   writeFileSync(join(e.firstFiles, ".nanosyncignore"), "tracked\n");
   unlinkSync(join(e.firstFiles, "tracked"));
   await a.syncOnce();
+  await stop(a);
   unlinkSync(join(e.firstFiles, ".nanosyncignore"));
-  await expect(a.syncOnce()).rejects.toThrow(/previously ignored absence/);
+  await expect(start(e.a).syncOnce()).rejects.toThrow(/previously ignored local path/);
   const remote = new HttpRemote({ baseUrl: e.url, token: e.a.token, fetch });
   expect((await remote.head()).revisionId).toBe(head.revisionId);
+});
+
+test("remote deletion of ignored tracked content preserves local copy and unignore guard", async () => {
+  const e = await fixture();
+  const a = start(e.a), b = start(e.b);
+  await a.syncOnce(); await b.syncOnce();
+  writeFileSync(join(e.firstFiles, "tracked"), "local original");
+  await a.syncOnce(); await b.syncOnce();
+  writeFileSync(join(e.firstFiles, ".nanosyncignore"), "tracked\n");
+  unlinkSync(join(e.secondFiles, "tracked"));
+  const deleted = await b.syncOnce();
+  await a.syncOnce();
+  expect(readFileSync(join(e.firstFiles, "tracked"), "utf8")).toBe("local original");
+  writeFileSync(join(e.firstFiles, "unrelated"), "new");
+  await a.syncOnce();
+  unlinkSync(join(e.firstFiles, ".nanosyncignore"));
+  await expect(a.syncOnce()).rejects.toThrow(/previously ignored local path/);
+  const remote = new HttpRemote({ baseUrl: e.url, token: e.a.token, fetch });
+  const head = await remote.head();
+  expect(head.sequence).toBe(deleted.sequence + 1);
+  expect((await remote.manifest(head.revisionId!, e.a.masterKey)).manifest.entries.find(entry => entry.name === "tracked")?.kind).toBe("tombstone");
+});
+
+test("remote rename of an ignored tracked file refuses apply before creating an intent", async () => {
+  const e = await fixture();
+  const a = start(e.a), b = start(e.b);
+  await a.syncOnce(); await b.syncOnce();
+  writeFileSync(join(e.firstFiles, "tracked"), "local original");
+  await a.syncOnce(); await b.syncOnce();
+  writeFileSync(join(e.firstFiles, ".nanosyncignore"), "tracked\n");
+  renameSync(join(e.secondFiles, "tracked"), join(e.secondFiles, "moved"));
+  await b.syncOnce();
+  await expect(a.syncOnce()).rejects.toThrow(/ignored entry moved/);
+  expect(readFileSync(join(e.firstFiles, "tracked"), "utf8")).toBe("local original");
+  const local = new ClientLocal(e.firstDir, e.a.vaultId, e.a.deviceId);
+  try { expect(local.pendingApplies()).toEqual([]); } finally { local.close(); }
 });
 
 test("fresh client refuses ambiguous pre-existing local files when the remote already has data", async () => {
