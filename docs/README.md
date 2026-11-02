@@ -9,14 +9,14 @@ Nanosync is a self-hosted, client-encrypted file synchronization system with por
 - Keep file contents and manifests encrypted from the server.
 - Preserve file history, moves, renames, conflicts, and deletions.
 - Resume interrupted transfers at completed fixed-size chunk boundaries.
-- Provide Linux filesystem adapters for ordinary synchronization folders and a foundation for a complete offline Android copy.
+- Provide Linux filesystem adapters for ordinary synchronization folders and a foundation for complete offline Android and iOS copies.
 - Remain straightforward to self-host as a single server binary.
 
 ## Version 1 scope
 
 - One user and one vault per server.
 - Portable sync core and Linux filesystem/local-state libraries, with foreground one-shot and continuous CLI sync commands. Users choose how to launch continuous sync at startup; no background service or local IPC is shipped.
-- Android client integration remains future platform work.
+- Android and iOS sync-client integration remains future platform work; a local-only Android system-files prototype is under `apps/android`.
 - Local server storage behind an abstract `Filesystem` interface.
 - Password authentication, device approval, and recovery-key-based vault access.
 - Operator-managed network security through a reverse proxy or VPN.
@@ -30,6 +30,7 @@ Nanosync is a self-hosted, client-encrypted file synchronization system with por
 - [Version 1 formats and protocol contract](formats.md)
 - [Version 1 threat model](threat-model.md)
 - [Clients and operations](clients-and-operations.md)
+- [Mobile filesystem clients](mobile.md)
 - [Decisions and open questions](decisions.md)
 
 ## Terminology

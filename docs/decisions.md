@@ -24,6 +24,8 @@
 | Linux local encryption | Plaintext files; rely on device disk encryption |
 | Android local model | Complete offline vault |
 | Android capacity failure | Fail visibly if the vault does not fit |
+| Mobile filesystem integration | Android DocumentsProvider and iOS File Provider expose writable vault locations in system file browsers; external saves queue local changes for sync |
+| iOS local model | Complete offline vault in app-owned durable storage |
 | History trigger | Debounced completed filesystem changes |
 | Retention | All for 3 days, daily through 30 days, monthly through one year, then current state |
 | Server durability | Validate checksums; operator manages backups |
