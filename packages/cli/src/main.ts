@@ -111,7 +111,7 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
         if ((result as { status?: string }).status === "pending") code = 3;
       });
     flags(
-      program.command("sync").description("Synchronize once, or watch and synchronize continuously in the foreground"),
+      program.command("sync").description("Synchronize once or continuously; reads local .nanosyncignore in --sync-dir"),
       "--sync-dir <dir>", "--continuous", ...common,
     ).action(async (_options: CliOptions, command: Command) => {
       const dir = directory(command);

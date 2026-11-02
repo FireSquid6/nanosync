@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:net";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ClientLocal } from "@nanosync/client-local";
@@ -103,6 +103,102 @@ test("first snapshot sync imports an existing local file without deleting it", a
   expect(readFileSync(join(e.firstFiles, "existing"), "utf8")).toBe("kept");
   expect(await main(["sync", "--client-dir", e.secondDir, "--sync-dir", e.secondFiles])).toBe(0);
   expect(readFileSync(join(e.secondFiles, "existing"), "utf8")).toBe("kept");
+});
+
+test("first import prunes nested virtualenv links and hardlinks while preserving included files", async () => {
+  const e = await fixture();
+  writeFileSync(join(e.firstFiles, ".nanosyncignore"), ".venv/\n**/cache/\n");
+  mkdirSync(join(e.firstFiles, "project", ".venv"), { recursive: true });
+  mkdirSync(join(e.firstFiles, "project", "cache"));
+  writeFileSync(join(e.firstFiles, "project", "source"), "source");
+  symlinkSync("missing", join(e.firstFiles, "project", ".venv", "link"));
+  writeFileSync(join(e.firstFiles, "project", ".venv", "package"), "wheel");
+  linkSync(join(e.firstFiles, "project", ".venv", "package"), join(e.firstFiles, "project", ".venv", "package-copy"));
+  linkSync(join(e.firstFiles, "project", "source"), join(e.firstFiles, "project", ".venv", "hardlink"));
+  symlinkSync("missing", join(e.firstFiles, "project", "cache", "link"));
+  // The included source is now hardlinked, so safety still rejects it.
+  const a = start(e.a);
+  await expect(a.syncOnce()).rejects.toThrow(/unsafe filesystem entry/);
+  unlinkSync(join(e.firstFiles, "project", ".venv", "hardlink"));
+  const head = await a.syncOnce();
+  const remote = new HttpRemote({ baseUrl: e.url, token: e.a.token, fetch });
+  const names = (await remote.manifest(head.revisionId, e.a.masterKey)).manifest.entries.map(entry => entry.name);
+  expect(names).toContain("source");
+  expect(names).not.toContain(".venv");
+  expect(names).not.toContain("cache");
+  expect(names).not.toContain(".nanosyncignore");
+  await start(e.b).syncOnce();
+  expect(readFileSync(join(e.secondFiles, "project", "source"), "utf8")).toBe("source");
+  expect(existsSync(join(e.secondFiles, "project", ".venv"))).toBe(false);
+});
+
+test("local ignore preserves tracked remote state and never applies changes into ignored paths", async () => {
+  const e = await fixture();
+  const a = start(e.a), b = start(e.b);
+  await a.syncOnce(); await b.syncOnce();
+  writeFileSync(join(e.firstFiles, "shared"), "original");
+  const original = await a.syncOnce(); await b.syncOnce();
+  writeFileSync(join(e.firstFiles, ".nanosyncignore"), "shared\nprivate/\n");
+  mkdirSync(join(e.firstFiles, "private"));
+  symlinkSync("missing", join(e.firstFiles, "private", "unsafe"));
+  writeFileSync(join(e.firstFiles, "shared"), "locally ignored");
+  writeFileSync(join(e.secondFiles, "new"), "remote change");
+  mkdirSync(join(e.secondFiles, "private"));
+  writeFileSync(join(e.secondFiles, "private", "remote"), "only on second device");
+  await b.syncOnce();
+  await a.syncOnce();
+  expect(readFileSync(join(e.firstFiles, "shared"), "utf8")).toBe("locally ignored");
+  expect(existsSync(join(e.firstFiles, "private", "remote"))).toBe(false);
+  expect(readFileSync(join(e.secondFiles, "private", "remote"), "utf8")).toBe("only on second device");
+  const remote = new HttpRemote({ baseUrl: e.url, token: e.a.token, fetch });
+  const current = await remote.head();
+  expect((await remote.manifest(current.revisionId!, e.a.masterKey)).manifest.entries.find(entry => entry.name === "shared")?.id)
+    .toBe((await remote.manifest(original.revisionId, e.a.masterKey)).manifest.entries.find(entry => entry.name === "shared")?.id);
+  expect(readFileSync(join(e.firstFiles, "new"), "utf8")).toBe("remote change");
+  writeFileSync(join(e.firstFiles, "outside"), "published");
+  await a.syncOnce(); await b.syncOnce();
+  expect(readFileSync(join(e.secondFiles, "shared"), "utf8")).toBe("original");
+  expect(readFileSync(join(e.secondFiles, "outside"), "utf8")).toBe("published");
+  unlinkSync(join(e.firstFiles, "shared"));
+  symlinkSync("missing", join(e.firstFiles, "shared"));
+  writeFileSync(join(e.secondFiles, "shared"), "remote update");
+  await b.syncOnce(); await a.syncOnce();
+  expect(existsSync(join(e.firstFiles, "shared"))).toBe(false); // dangling link remains untouched
+  unlinkSync(join(e.firstFiles, "shared"));
+  writeFileSync(join(e.firstFiles, "shared"), "locally ignored");
+  unlinkSync(join(e.firstFiles, "private", "unsafe"));
+  unlinkSync(join(e.firstFiles, ".nanosyncignore"));
+  await expect(a.syncOnce()).rejects.toThrow(/divergent local path/);
+});
+
+test("unignoring a remote-only path cannot publish a deletion", async () => {
+  const e = await fixture();
+  writeFileSync(join(e.firstFiles, ".nanosyncignore"), "private/\n");
+  const a = start(e.a), b = start(e.b);
+  await a.syncOnce(); await b.syncOnce();
+  mkdirSync(join(e.secondFiles, "private"));
+  writeFileSync(join(e.secondFiles, "private", "only-remote"), "keep");
+  const published = await b.syncOnce(); await a.syncOnce();
+  unlinkSync(join(e.firstFiles, ".nanosyncignore"));
+  await expect(a.syncOnce()).rejects.toThrow(/untracked or divergent remote path/);
+  const remote = new HttpRemote({ baseUrl: e.url, token: e.a.token, fetch });
+  expect((await remote.head()).revisionId).toBe(published.revisionId);
+  expect(readFileSync(join(e.secondFiles, "private", "only-remote"), "utf8")).toBe("keep");
+});
+
+test("unignoring a tracked path deleted while excluded cannot publish a deletion", async () => {
+  const e = await fixture();
+  const a = start(e.a);
+  await a.syncOnce();
+  writeFileSync(join(e.firstFiles, "tracked"), "keep");
+  const head = await a.syncOnce();
+  writeFileSync(join(e.firstFiles, ".nanosyncignore"), "tracked\n");
+  unlinkSync(join(e.firstFiles, "tracked"));
+  await a.syncOnce();
+  unlinkSync(join(e.firstFiles, ".nanosyncignore"));
+  await expect(a.syncOnce()).rejects.toThrow(/previously ignored absence/);
+  const remote = new HttpRemote({ baseUrl: e.url, token: e.a.token, fetch });
+  expect((await remote.head()).revisionId).toBe(head.revisionId);
 });
 
 test("fresh client refuses ambiguous pre-existing local files when the remote already has data", async () => {
@@ -240,6 +336,28 @@ test("foreground continuous sync debounces changes and shuts down without retain
     expect(errors).toEqual([]);
   } finally { controller.abort(); await watching; await stop(runner); }
   expect(await main(["sync", "--client-dir", e.firstDir, "--sync-dir", e.firstFiles])).toBe(0);
+});
+
+test("continuous sync reloads ignore rules and prunes new unsafe directories", async () => {
+  const e = await fixture();
+  const runner = start({ ...e.a, pollMs: 10_000 });
+  const controller = new AbortController();
+  const heads: number[] = [], errors: unknown[] = [];
+  const watching = runner.watch(controller.signal, head => heads.push(head.sequence), error => errors.push(error));
+  try {
+    await waitFor(() => heads.length > 0);
+    writeFileSync(join(e.firstFiles, ".nanosyncignore"), ".venv/\n");
+    mkdirSync(join(e.firstFiles, ".venv"));
+    symlinkSync("missing", join(e.firstFiles, ".venv", "link"));
+    writeFileSync(join(e.firstFiles, "included"), "yes");
+    await waitFor(() => heads.some(sequence => sequence > 1));
+    expect(errors).toEqual([]);
+    const remote = new HttpRemote({ baseUrl: e.url, token: e.a.token, fetch });
+    const head = await remote.head();
+    expect((await remote.manifest(head.revisionId!, e.a.masterKey)).manifest.entries.map(entry => entry.name))
+      .toEqual(expect.arrayContaining(["included"]));
+    expect((await remote.manifest(head.revisionId!, e.a.masterKey)).manifest.entries.some(entry => entry.name === ".venv")).toBe(false);
+  } finally { controller.abort(); await watching; await stop(runner); }
 });
 
 test("continuous CLI command runs in the foreground and releases the lock on SIGTERM", async () => {

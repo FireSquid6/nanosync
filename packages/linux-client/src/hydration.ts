@@ -7,6 +7,7 @@ import { resolve } from "node:path";
 import { CHUNK_SIZE, parseObjectId, type VisibleObjectReference } from "@nanosync/protocol";
 import { manifestPaths, type HttpRemote, type ManifestV1 } from "@nanosync/sync-core";
 import { ClientLocal, type HydrationIntent } from "@nanosync/client-local";
+import { IgnoreRules } from "./ignore.ts";
 
 const dirFlags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
 const fileFlags = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
@@ -110,6 +111,7 @@ export async function hydrateFile(
   existing?: HydrationIntent,
   hooks: { beforeLink?: () => void; afterLink?: () => void } = {},
 ): Promise<{ path: string; hydration: "evicted" | "downloaded"; revisionId: string }> {
+  if (new IgnoreRules(resolve(root)).ignores(path)) throw new Error("hydration target is locally ignored");
   const paths = manifestPaths(manifest), file = paths.get(path), localEntry = local.entries().find(entry => entry.path === path);
   if (!file || file.kind !== "file" || !localEntry || localEntry.id !== file.id || localEntry.fingerprint !== file.sha256 ||
       localEntry.revision !== manifest.revisionId) throw new Error("hydration path differs from authenticated manifest");

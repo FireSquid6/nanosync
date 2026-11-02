@@ -33,7 +33,8 @@ const schema2 = `CREATE TABLE suppression(path TEXT PRIMARY KEY, fingerprint TEX
 const schema3 = `CREATE TABLE file_identity(entry_id TEXT PRIMARY KEY, device TEXT NOT NULL, inode TEXT NOT NULL, FOREIGN KEY(entry_id) REFERENCES entries(id)) STRICT;`;
 const schema4 = `CREATE TABLE hydration(id TEXT PRIMARY KEY, entry_id TEXT NOT NULL REFERENCES entries(id), revision TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence>0), direction TEXT NOT NULL CHECK(direction IN ('evict','download')), root_device TEXT NOT NULL, root_inode TEXT NOT NULL, file_device TEXT, file_inode TEXT, CHECK((direction='evict' AND file_device IS NOT NULL AND file_inode IS NOT NULL) OR (direction='download' AND file_device IS NULL AND file_inode IS NULL))) STRICT;`;
 const schema5 = `CREATE TABLE restores(singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision TEXT NOT NULL, base_revision TEXT NOT NULL) STRICT;`;
-const migrations = [schema1, schema2, schema3, schema4, schema5];
+const schema6 = `CREATE TABLE ignored_entries(entry_id TEXT PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE) STRICT;`;
+const migrations = [schema1, schema2, schema3, schema4, schema5, schema6];
 const schemaDigest = (db: Database) => hash(db.query<{ sql: string }, []>("SELECT sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY type,name").all().map(r => r.sql).join("\n"));
 let expectedSchema: string | undefined;
 function expectedDigest(): string {
@@ -262,6 +263,18 @@ export class ClientLocal implements ChunkJournal {
       for (const entry of entries) run(this.db, `INSERT INTO entries VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,kind=excluded.kind,fingerprint=excluded.fingerprint,hydration=excluded.hydration,revision=excluded.revision`, entry.id, entry.path, entry.kind, entry.fingerprint, entry.hydration, entry.revision);
       for (const item of identities) run(this.db, "INSERT INTO file_identity VALUES(?,?,?)", item.entryId, item.device, item.inode);
     });
+  }
+  /** Durable guard: an ignored absence must never become a deletion upon unignoring. */
+  markIgnored(ids: readonly string[]) {
+    for (const id of ids) uuid(id);
+    this.write(() => { for (const id of ids) run(this.db, "INSERT OR IGNORE INTO ignored_entries VALUES(?)", id); });
+  }
+  wasIgnored(id: string): boolean {
+    return !!row(this.db, "SELECT entry_id FROM ignored_entries WHERE entry_id=?", uuid(id));
+  }
+  clearIgnored(ids: readonly string[]) {
+    for (const id of ids) uuid(id);
+    this.write(() => { for (const id of ids) run(this.db, "DELETE FROM ignored_entries WHERE entry_id=?", id); });
   }
   private work(table: "operations" | "transfers" | "conflicts", id: string, fields: (string | number | null)[]) {
     uuid(id);

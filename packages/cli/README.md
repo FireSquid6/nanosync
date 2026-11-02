@@ -35,3 +35,21 @@ Admin commands (`admin storage`, `retention-dry-run`, `gc-dry-run`, `scan`, `dia
 ## Foreground sync
 
 The one-shot command recovers interrupted work, reconciles encrypted revisions, and exits after a successful authenticated pass. An existing folder can be imported on first sync only if the server still has empty genesis; when the remote already contains files, a fresh device must start with an empty local sync directory rather than risk overwriting or deleting its untracked files. The continuous command first synchronizes, then debounces file activity (250 ms quiet plus two stable snapshots at least 500 ms apart), periodically rescans and retries failures. SIGINT/SIGTERM ends the foreground loop after any in-flight pass. Concurrent runs for the same client directory are refused. There is no local IPC or CLI status/history/restore/conflict/eviction command.
+
+### Local ignore file
+
+Create `--sync-dir/.nanosyncignore` **before first import** to exclude virtual environments and other local-only data. For example:
+
+```gitignore
+# local to this device; not uploaded
+.venv/
+__pycache__/
+*.pyc
+node_modules/
+```
+
+This is a deliberately limited gitignore-style format, **not** `.gitignore` integration. Blank lines and whole-line `#` comments are ignored. A basename (`.venv/`) matches at any depth; a leading `/` anchors to the sync root (`/build/`); a slash elsewhere anchors a relative path to the root (`project/cache/`). `*` and `?` match within one path segment; `**` spans segments. A trailing `/` matches directories and their descendants, not a file of the same name. Patterns without `/` match files or directories at any depth. Rules are exclusions only: `!` negation, bracket expressions, escaping and per-directory ignore files are not supported (invalid syntax fails the pass). Matching is case-sensitive; an excluded directory is never opened or inventoried. The root is never excluded. `.nanosyncignore` is a reserved local control file: it is not uploaded, downloaded or interpreted from other devices. Use an owner-owned regular file, with no group/other write access, at most 64 KiB; unsafe control files fail closed.
+
+Each device can use different rules. Ignored paths are opaque: local changes there are never published as deletions, and remote additions, changes and deletions under those paths never touch local files. A previously tracked ignored entry remains in the shared manifest unchanged when this device publishes other changes; another device without that rule can still update or delete it. Local state records previously ignored identities durably. Removing an ignore rule does **not** automatically reconcile absent, changed or remote-only paths: sync fails visibly rather than guessing whether to upload a local edit or publish a deletion. Move or back up the local copy and reconcile deliberately before unignoring; restore the ignore rule to keep syncing unrelated paths in the meantime. Avoid excluding a parent directory that contains files you still wish to sync; there is no negation to re-include children.
+
+Continuous sync reloads this root file on watcher events and periodic full scans. Changing it during a scan or an in-progress apply aborts; for a persisted interrupted apply, restore the original rules until recovery completes. Do not edit ignore rules concurrently with sync. Ignoring existing remote data does not delete it from the server or reclaim storage. Included links, hardlinks and special files still fail safely.
