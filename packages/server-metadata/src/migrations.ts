@@ -357,6 +357,122 @@ CREATE TABLE gc_candidates (
 CREATE INDEX gc_candidates_marked ON gc_candidates(marked_at_ms);
 `;
 
+// Preserve legacy data, the migration ledger and all existing object/revision
+// identities. These four tables previously enforced a single vault through a
+// singleton or a device FK; rebuilding them is necessary even on fresh installs.
+const V5_SQL = `
+DROP TRIGGER server_state_valid_head_insert;
+DROP TRIGGER server_state_valid_head_update;
+CREATE TABLE server_state_new (
+  singleton INTEGER UNIQUE CHECK(singleton IS NULL OR singleton=1),
+  vault_id TEXT PRIMARY KEY CHECK(${uuid("vault_id")}),
+  name TEXT CHECK(name IS NULL OR (length(CAST(name AS BLOB)) BETWEEN 1 AND 128 AND name = trim(name))),
+  current_head_revision_id TEXT,
+  current_sequence INTEGER NOT NULL CHECK(current_sequence >= 0),
+  CHECK((current_head_revision_id IS NULL AND current_sequence = 0) OR (current_head_revision_id IS NOT NULL AND current_sequence > 0)),
+  FOREIGN KEY(vault_id, current_head_revision_id) REFERENCES revisions(vault_id, revision_id)
+) STRICT;
+INSERT INTO server_state_new(singleton,vault_id,name,current_head_revision_id,current_sequence)
+SELECT singleton,vault_id,NULL,current_head_revision_id,current_sequence FROM server_state;
+DROP TABLE server_state;
+ALTER TABLE server_state_new RENAME TO server_state;
+CREATE UNIQUE INDEX vault_name_unique ON server_state(name COLLATE NOCASE) WHERE name IS NOT NULL;
+CREATE TRIGGER vault_identity_immutable BEFORE UPDATE OF vault_id,singleton ON server_state
+BEGIN SELECT RAISE(ABORT,'vault identity is immutable'); END;
+
+CREATE TABLE revisions_new (
+  vault_id TEXT NOT NULL CHECK(${uuid("vault_id")}),
+  revision_id TEXT NOT NULL CHECK(${uuid("revision_id")}),
+  creating_device_id TEXT NOT NULL CHECK(${uuid("creating_device_id")}),
+  client_created_at TEXT NOT NULL CHECK(length(client_created_at)=24 AND client_created_at GLOB '????-??-??T??:??:??.???Z'),
+  manifest_object_id TEXT NOT NULL CHECK(${hex64("manifest_object_id")}),
+  protocol_version INTEGER NOT NULL CHECK(protocol_version=${PROTOCOL_VERSION}),
+  revision_format_version INTEGER NOT NULL CHECK(revision_format_version=${REVISION_FORMAT_VERSION}),
+  reference_set_mac TEXT NOT NULL CHECK(${hex64("reference_set_mac")}),
+  canonical_envelope_json TEXT NOT NULL CHECK(length(CAST(canonical_envelope_json AS BLOB)) BETWEEN 2 AND ${MAX_JSON_METADATA_BYTES} AND json_valid(canonical_envelope_json)),
+  request_digest TEXT NOT NULL CHECK(${hex64("request_digest")}),
+  accepted_sequence INTEGER CHECK(accepted_sequence IS NULL OR accepted_sequence>0),
+  server_created_at_ms INTEGER NOT NULL CHECK(${timestamp("server_created_at_ms")}),
+  PRIMARY KEY(vault_id,revision_id), UNIQUE(vault_id,accepted_sequence),
+  FOREIGN KEY(vault_id,manifest_object_id) REFERENCES object_catalog(vault_id,object_id)
+) STRICT;
+INSERT INTO revisions_new SELECT * FROM revisions;
+DROP TABLE revisions;
+ALTER TABLE revisions_new RENAME TO revisions;
+CREATE TRIGGER server_state_valid_head_insert BEFORE INSERT ON server_state WHEN NEW.current_head_revision_id IS NOT NULL
+BEGIN SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM revisions r WHERE r.vault_id=NEW.vault_id AND r.revision_id=NEW.current_head_revision_id AND r.accepted_sequence=NEW.current_sequence)
+  THEN RAISE(ABORT,'head must name the accepted revision at its sequence') END; END;
+CREATE TRIGGER server_state_valid_head_update BEFORE UPDATE OF vault_id,current_head_revision_id,current_sequence ON server_state WHEN NEW.current_head_revision_id IS NOT NULL
+BEGIN SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM revisions r WHERE r.vault_id=NEW.vault_id AND r.revision_id=NEW.current_head_revision_id AND r.accepted_sequence=NEW.current_sequence)
+  THEN RAISE(ABORT,'head must name the accepted revision at its sequence') END; END;
+CREATE TRIGGER revision_immutable BEFORE UPDATE OF vault_id,revision_id,creating_device_id,client_created_at,manifest_object_id,
+  protocol_version,revision_format_version,reference_set_mac,canonical_envelope_json,request_digest,server_created_at_ms ON revisions
+BEGIN SELECT RAISE(ABORT,'immutable revision metadata'); END;
+CREATE TRIGGER revision_accept_once BEFORE UPDATE OF accepted_sequence ON revisions
+WHEN NOT(OLD.accepted_sequence IS NULL AND NEW.accepted_sequence IS NOT NULL)
+BEGIN SELECT RAISE(ABORT,'revision acceptance is immutable'); END;
+CREATE TRIGGER revision_accept_complete BEFORE UPDATE OF accepted_sequence ON revisions WHEN NEW.accepted_sequence IS NOT NULL
+BEGIN SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM revision_objects ro WHERE ro.vault_id=NEW.vault_id AND ro.revision_id=NEW.revision_id
+  AND ro.object_id=NEW.manifest_object_id AND ro.object_type='manifest')
+  THEN RAISE(ABORT,'accepted revision requires its manifest reference') END; END;
+
+CREATE TABLE recovery_wraps_new (
+  singleton INTEGER UNIQUE CHECK(singleton IS NULL OR singleton=1),
+  vault_id TEXT PRIMARY KEY CHECK(${uuid("vault_id")}),
+  wrap_version INTEGER NOT NULL CHECK(wrap_version=1),
+  algorithm TEXT NOT NULL CHECK(algorithm='A256GCM'),
+  nonce BLOB NOT NULL CHECK(typeof(nonce)='blob' AND length(nonce)=12),
+  ciphertext BLOB NOT NULL CHECK(typeof(ciphertext)='blob' AND length(ciphertext)=48),
+  FOREIGN KEY(vault_id) REFERENCES server_state(vault_id)
+) STRICT;
+INSERT INTO recovery_wraps_new SELECT * FROM recovery_wraps;
+DROP TABLE recovery_wraps;
+ALTER TABLE recovery_wraps_new RENAME TO recovery_wraps;
+CREATE TRIGGER recovery_wrap_immutable BEFORE UPDATE ON recovery_wraps BEGIN SELECT RAISE(ABORT,'recovery wrap is immutable'); END;
+
+CREATE TABLE devices_new (
+  device_id TEXT PRIMARY KEY CHECK(${uuid("device_id")}),
+  principal_id TEXT NOT NULL,
+  vault_id TEXT,
+  state TEXT NOT NULL CHECK(state IN ('pending','active','revoked')),
+  role TEXT NOT NULL CHECK(role IN ('administrator','member')),
+  credential_digest BLOB UNIQUE CHECK(credential_digest IS NULL OR (typeof(credential_digest)='blob' AND length(credential_digest)=32)),
+  display_name TEXT CHECK(display_name IS NULL OR length(CAST(display_name AS BLOB)) BETWEEN 1 AND 128),
+  platform TEXT CHECK(platform IS NULL OR length(CAST(platform AS BLOB)) BETWEEN 1 AND 32),
+  client_version TEXT CHECK(client_version IS NULL OR length(CAST(client_version AS BLOB)) BETWEEN 1 AND 64),
+  fingerprint BLOB CHECK(fingerprint IS NULL OR (typeof(fingerprint)='blob' AND length(fingerprint)=32)),
+  is_initial INTEGER NOT NULL DEFAULT 0 CHECK(is_initial IN (0,1)),
+  created_at_ms INTEGER NOT NULL CHECK(${timestamp("created_at_ms")}),
+  approved_at_ms INTEGER CHECK(approved_at_ms IS NULL OR (${timestamp("approved_at_ms")})),
+  revoked_at_ms INTEGER CHECK(revoked_at_ms IS NULL OR (${timestamp("revoked_at_ms")})),
+  CHECK((state='pending' AND credential_digest IS NULL AND approved_at_ms IS NULL AND revoked_at_ms IS NULL)
+    OR (state='active' AND credential_digest IS NOT NULL AND approved_at_ms IS NOT NULL AND revoked_at_ms IS NULL)
+    OR (state='revoked' AND credential_digest IS NULL AND approved_at_ms IS NOT NULL AND revoked_at_ms IS NOT NULL)),
+  CHECK(is_initial=0 OR role='administrator'),
+  FOREIGN KEY(principal_id) REFERENCES accounts(principal_id),
+  FOREIGN KEY(vault_id) REFERENCES server_state(vault_id)
+) STRICT;
+INSERT INTO devices_new SELECT * FROM devices;
+DROP TABLE devices;
+ALTER TABLE devices_new RENAME TO devices;
+CREATE UNIQUE INDEX one_initial_device ON devices(is_initial) WHERE is_initial=1;
+-- Older releases allowed identical display names. Resolve only duplicate
+-- active/pending names deterministically so local name approval is unambiguous.
+UPDATE devices SET display_name=device_id WHERE state IN ('pending','active') AND display_name IS NOT NULL
+  AND (SELECT count(*) FROM devices other WHERE other.state IN ('pending','active') AND other.display_name=devices.display_name COLLATE NOCASE)>1;
+CREATE UNIQUE INDEX device_name_unique ON devices(display_name COLLATE NOCASE) WHERE state IN ('pending','active');
+CREATE TRIGGER device_identity_immutable BEFORE UPDATE OF device_id,principal_id,vault_id,is_initial,created_at_ms ON devices
+BEGIN SELECT RAISE(ABORT,'device identity is immutable'); END;
+CREATE TRIGGER device_transition_valid BEFORE UPDATE ON devices
+WHEN NOT((OLD.state='pending' AND NEW.state='active' AND OLD.credential_digest IS NULL AND NEW.credential_digest IS NOT NULL)
+  OR (OLD.state='active' AND NEW.state='revoked' AND NEW.credential_digest IS NULL)
+  OR (OLD.state='revoked' AND OLD.role='member' AND OLD.is_initial=0 AND NEW.state='active' AND OLD.credential_digest IS NULL AND NEW.credential_digest IS NOT NULL)) OR NEW.role<>OLD.role
+BEGIN SELECT RAISE(ABORT,'device transition is invalid'); END;
+CREATE TRIGGER device_last_admin BEFORE UPDATE OF state ON devices WHEN OLD.state='active' AND OLD.role='administrator' AND NEW.state='revoked'
+  AND NOT EXISTS (SELECT 1 FROM devices d WHERE d.device_id<>OLD.device_id AND d.state='active' AND d.role='administrator')
+BEGIN SELECT RAISE(ABORT,'last active administrator cannot be revoked'); END;
+`;
+
 export function migrationChecksum(version: number, name: string, sql: string): string {
   return createHash("sha256").update(`${version}\0${name}\0${sql}`, "utf8").digest("hex");
 }
@@ -370,4 +486,5 @@ export const METADATA_MIGRATIONS: readonly MetadataMigration[] = Object.freeze([
   migration(2, "account_and_bootstrap", V2_SQL),
   migration(3, "device_authentication", V3_SQL),
   migration(4, "offline_gc_candidates", V4_SQL),
+  migration(5, "multiple_vaults", V5_SQL),
 ]);

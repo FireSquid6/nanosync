@@ -31,7 +31,7 @@ export class BootstrapService {
     if (input.vaultId !== state.vault_id || input.genesisRevision.creatingDeviceId !== state.initial_device_id) throw new ApiError(409, "CONFLICT", "Genesis revision is invalid");
     const missing = new Set(this.repository.missingCatalogReferences(input.vaultId, input.genesisRevision));
     const candidates = input.genesisRevision.references.filter((ref) => !missing.has(ref.objectId));
-    for (const id of await verifyReferenceStorage(this.filesystem, candidates)) missing.add(id);
+     for (const id of await verifyReferenceStorage(this.filesystem, candidates)) missing.add(id);
     if (missing.size) return json({ protocolVersion: PROTOCOL_VERSION, status: "missingObjects", objectIds: [...missing].sort() });
     try { this.repository.complete(input.vaultId, input.genesisRevision, this.clock()); }
     catch (error) { this.map(error); }

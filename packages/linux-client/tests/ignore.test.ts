@@ -8,7 +8,7 @@ const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 function rules(text: string) {
   const dir = mkdtempSync(join(tmpdir(), "nanosync-ignore-")); dirs.push(dir);
-  writeFileSync(join(dir, ".nanosyncignore"), text);
+  writeFileSync(join(dir, ".nanosyncignore"), text, { mode: 0o600 });
   return { dir, policy: new IgnoreRules(dir) };
 }
 test("anchored, basename, glob, and directory-only patterns", () => {
@@ -23,6 +23,8 @@ test("anchored, basename, glob, and directory-only patterns", () => {
   expect(policy.ignores("project/cache/item")).toBe(true);
   expect(policy.ignores("nested/.nanosyncignore")).toBe(false);
   expect(policy.ignores(".nanosyncignore")).toBe(true);
+  expect(policy.ignores(".nanosync")).toBe(true);
+  expect(policy.ignores("nested/.nanosync")).toBe(false);
 });
 test("invalid policy fails closed; control file cannot be a link", () => {
   for (const pattern of ["!keep", "../private", "foo\\bar", "[ab]"]) {

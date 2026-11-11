@@ -57,6 +57,7 @@ export interface AdvanceRevisionInput {
 }
 
 const OPERATION = "advance-head-v1";
+const operation = (vaultId: VaultId) => `${OPERATION}.${vaultId}`;
 const QUERY_CHUNK = 350;
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -66,6 +67,9 @@ export class RevisionRepository {
   requireVault(vaultId: VaultId): void {
     requireVaultReader(this.database, vaultId);
   }
+  legacyVault(vaultId: VaultId): boolean {
+    return !!this.database.get("SELECT 1 FROM server_state WHERE vault_id=? AND singleton=1", [vaultId]);
+  }
 
   head(vaultId: VaultId): { revisionId: RevisionId | null; sequence: number } {
     requireVaultReader(this.database, vaultId);
@@ -73,7 +77,7 @@ export class RevisionRepository {
       current_head_revision_id: RevisionId | null;
       current_sequence: number;
     }>(
-      "SELECT current_head_revision_id, current_sequence FROM server_state WHERE singleton = 1 AND vault_id = ?",
+      "SELECT current_head_revision_id, current_sequence FROM server_state WHERE vault_id = ?",
       [vaultId],
     );
     if (!row)
@@ -168,7 +172,7 @@ export class RevisionRepository {
       [
         identity.principalId,
         identity.deviceId,
-        OPERATION,
+        this.legacyVault(identity.vaultId) ? OPERATION : operation(identity.vaultId),
         identity.idempotencyKey,
       ],
     );
@@ -221,7 +225,7 @@ export class RevisionRepository {
         current_head_revision_id: RevisionId | null;
         current_sequence: number;
       }>(
-        "SELECT current_head_revision_id, current_sequence FROM server_state WHERE singleton = 1 AND vault_id = ?",
+         "SELECT current_head_revision_id, current_sequence FROM server_state WHERE vault_id = ?",
         [input.identity.vaultId],
       );
       if (!state)
@@ -257,7 +261,7 @@ export class RevisionRepository {
           [sequence, input.identity.vaultId, input.envelope.revisionId],
         );
         tx.run(
-          "UPDATE server_state SET current_head_revision_id = ?, current_sequence = ? WHERE singleton = 1 AND vault_id = ?",
+           "UPDATE server_state SET current_head_revision_id = ?, current_sequence = ? WHERE vault_id = ?",
           [input.envelope.revisionId, sequence, input.identity.vaultId],
         );
         result = {
@@ -277,14 +281,15 @@ function requireVaultReader(
   vaultId: VaultId,
 ): void {
   const state = db.get<{ vault_id: string }>(
-    "SELECT vault_id FROM server_state WHERE singleton = 1",
+    "SELECT vault_id FROM server_state WHERE vault_id = ?",
+    [vaultId],
   );
-  if (!state)
+  if (!state && !db.get("SELECT 1 FROM server_state LIMIT 1"))
     throw new RevisionRepositoryError(
       "SERVER_UNINITIALIZED",
       "Server vault is not initialized",
     );
-  if (state.vault_id !== vaultId)
+  if (state?.vault_id !== vaultId)
     throw new RevisionRepositoryError(
       "VAULT_CONFLICT",
       "Authenticated vault does not match server vault",
@@ -292,14 +297,15 @@ function requireVaultReader(
 }
 function requireVault(tx: MetadataTransaction, vaultId: VaultId): void {
   const state = tx.get<{ vault_id: string }>(
-    "SELECT vault_id FROM server_state WHERE singleton = 1",
+    "SELECT vault_id FROM server_state WHERE vault_id = ?",
+    [vaultId],
   );
-  if (!state)
+  if (!state && !tx.get("SELECT 1 FROM server_state LIMIT 1"))
     throw new RevisionRepositoryError(
       "SERVER_UNINITIALIZED",
       "Server vault is not initialized",
     );
-  if (state.vault_id !== vaultId)
+  if (state?.vault_id !== vaultId)
     throw new RevisionRepositoryError(
       "VAULT_CONFLICT",
       "Authenticated vault does not match server vault",
@@ -464,7 +470,7 @@ function readIdempotency(
     [
       identity.principalId,
       identity.deviceId,
-      OPERATION,
+     tx.get("SELECT 1 FROM server_state WHERE singleton=1 AND vault_id=?", [identity.vaultId]) ? OPERATION : operation(identity.vaultId),
       identity.idempotencyKey,
     ],
   );
@@ -487,7 +493,7 @@ function persistResult(
     [
       identity.principalId,
       identity.deviceId,
-      OPERATION,
+       tx.get("SELECT 1 FROM server_state WHERE singleton=1 AND vault_id=?", [identity.vaultId]) ? OPERATION : operation(identity.vaultId),
       identity.idempotencyKey,
       identity.requestDigest,
       result.status,

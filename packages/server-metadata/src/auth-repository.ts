@@ -29,7 +29,7 @@ export type EnrollmentStatus = "pending" | "approved" | "denied" | "expired";
 export interface AuthIdentity {
   principalId: PrincipalId;
   deviceId: DeviceId;
-  vaultId: VaultId;
+  vaultId: VaultId | null;
   administrator: boolean;
 }
 export interface DeviceView {
@@ -65,7 +65,7 @@ export class AuthRepositoryError extends Error {
 interface DeviceRow {
   device_id: DeviceId;
   principal_id: PrincipalId;
-  vault_id: VaultId;
+  vault_id: VaultId | null;
   state: "pending" | "active" | "revoked";
   role: "administrator" | "member";
   credential_digest: Uint8Array | null;
@@ -90,7 +90,7 @@ export class AuthenticationRepository {
 
   passwordVerifier(): PasswordVerifierRecord | null {
     const row = this.database.get<Record<string, unknown>>(
-      "SELECT password_algorithm, password_version, password_memory_kib, password_iterations, password_parallelism, password_salt, password_hash FROM accounts WHERE singleton = 1 AND EXISTS (SELECT 1 FROM bootstrap_state WHERE singleton=1 AND lifecycle='sealed')",
+      "SELECT password_algorithm, password_version, password_memory_kib, password_iterations, password_parallelism, password_salt, password_hash FROM accounts WHERE singleton = 1",
     );
     if (!row) return null;
     const value: PasswordVerifierRecord = {
@@ -303,6 +303,8 @@ export class AuthenticationRepository {
         )?.count ?? 0;
       if (pending >= MAX_PENDING_ENROLLMENTS)
         throw new AuthRepositoryError("LIMIT", "Too many pending enrollments");
+      if (tx.get("SELECT 1 FROM devices WHERE display_name = ? COLLATE NOCASE AND state IN ('pending','active') AND device_id <> ?", [input.displayName, input.deviceId]))
+        throw new AuthRepositoryError("CONFLICT", "Device name is already registered");
       const current = tx.get<DeviceRow>(
         "SELECT * FROM devices WHERE device_id = ?",
         [input.deviceId],
@@ -348,7 +350,7 @@ export class AuthenticationRepository {
           throw new AuthRepositoryError("LIMIT", "Device limit reached");
         const state = "pending";
         tx.run(
-          "INSERT INTO devices(device_id, principal_id, vault_id, state, role, display_name, platform, client_version, fingerprint, is_initial, created_at_ms) SELECT ?, a.principal_id, s.vault_id, ?, 'member', ?, ?, ?, ?, 0, ? FROM accounts a, server_state s WHERE a.singleton=1 AND s.singleton=1",
+          "INSERT INTO devices(device_id, principal_id, vault_id, state, role, display_name, platform, client_version, fingerprint, is_initial, created_at_ms) SELECT ?, a.principal_id, b.vault_id, ?, 'member', ?, ?, ?, ?, 0, ? FROM accounts a LEFT JOIN bootstrap_state b ON b.singleton=1 WHERE a.singleton=1",
           [
             input.deviceId,
             state,
@@ -468,9 +470,9 @@ export class AuthenticationRepository {
       .map(view);
   }
 
-  approve(actor: DeviceId, target: DeviceId, nowMs: number): EnrollmentStatus {
+  approve(actor: DeviceId | null, target: DeviceId, nowMs: number): EnrollmentStatus {
     return this.database.writeTransaction((tx) => {
-      requireActiveAdministrator(tx, actor);
+      if (actor) requireActiveAdministrator(tx, actor);
       const request = tx.get<any>(
         "SELECT * FROM enrollment_requests WHERE device_id=?",
         [target],
@@ -503,9 +505,9 @@ export class AuthenticationRepository {
     });
   }
 
-  revoke(actor: DeviceId, target: DeviceId, nowMs: number): void {
+  revoke(actor: DeviceId | null, target: DeviceId, nowMs: number): void {
     this.database.writeTransaction((tx) => {
-      requireActiveAdministrator(tx, actor);
+      if (actor) requireActiveAdministrator(tx, actor);
       if (actor === target)
         throw new AuthRepositoryError(
           "FORBIDDEN",
@@ -537,14 +539,16 @@ export class AuthenticationRepository {
     });
   }
 
-  recoveryWrap(): RecoveryWrapV1 {
+  recoveryWrap(vaultId?: VaultId): RecoveryWrapV1 {
     const row = this.database.get<{
       wrap_version: number;
       algorithm: string;
       nonce: Uint8Array;
       ciphertext: Uint8Array;
     }>(
-      "SELECT wrap_version, algorithm, nonce, ciphertext FROM recovery_wraps WHERE singleton=1",
+      vaultId ? "SELECT wrap_version, algorithm, nonce, ciphertext FROM recovery_wraps WHERE vault_id=?" :
+        "SELECT wrap_version, algorithm, nonce, ciphertext FROM recovery_wraps WHERE singleton=1",
+      vaultId ? [vaultId] : [],
     );
     if (
       !row ||

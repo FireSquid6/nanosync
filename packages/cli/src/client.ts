@@ -29,7 +29,9 @@ export function saveCredentials(directory: string, value: ClientCredentials): vo
   privateDirectory(directory); secureInstall(join(directory, "client.json"), JSON.stringify(value));
 }
 export function baseUrl(url: string): string {
-  const parsed = new URL(url);
+  const address = /^https?:\/\//.test(url) ? url :
+    /^(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(url) ? `http://${url}` : `https://${url}`;
+  const parsed = new URL(address);
   if (
     !/^(http:|https:)$/.test(parsed.protocol) || parsed.username || parsed.password ||
     parsed.search || parsed.hash
@@ -90,7 +92,7 @@ export async function login(url: string, password: string): Promise<string> {
 const fingerprint = () => randomBytes(32).toString("base64url");
 export async function enroll(url: string, token: string, deviceId: string, proof?: string, deviceFingerprint = fingerprint()) {
   return api(url, "/v1/auth/enrollments", { method: "POST", body: JSON.stringify({ protocolVersion: 1, deviceId,
-    displayName: "nanosync Linux", platform: "linux", clientVersion: "1", fingerprint: deviceFingerprint }) }, token, proof);
+    displayName: deviceId, platform: "linux", clientVersion: "1", fingerprint: deviceFingerprint }) }, token, proof);
 }
 interface BootstrapCheckpoint {
   version: 1; url: string; vaultId: string; deviceId: string; principalId: string;

@@ -54,7 +54,7 @@ export class SyncRunner {
     this.key = Uint8Array.from(options.masterKey);
     try {
       this.scanner = new LinuxScanner(options.syncDirectory, this.local, options.scan);
-      this.remote = new HttpRemote({ baseUrl: options.baseUrl, token: options.token,
+      this.remote = new HttpRemote({ baseUrl: options.baseUrl, token: options.token, vaultId: this.vault,
         fetch: options.fetch ?? fetch, journal: this.local });
     } catch (error) {
       this.local.close();
@@ -400,17 +400,23 @@ export class SyncRunner {
     if (current.sequence !== head.sequence) throw new Error("head sequence mismatch");
     const latest = this.local.head("applied");
     if (!latest.revisionId) {
-      if (this.scanner.snapshot().length > 1) {
-        // A fresh vault's genesis has no remote files to apply. Record that
-        // empty base before scanning a pre-existing local folder for upload.
-        // If remote state already exists, do not guess whether these local
-        // paths should overwrite it or be treated as conflicts.
-        if (current.manifest.parents.length !== 0 || current.manifest.entries.length !== 1 || head.sequence !== 1) {
-          throw new Error("initial sync with remote files requires an empty local sync directory");
-        }
-        this.local.recordHead("accepted", head);
-        this.local.recordHead("applied", head);
-        return this.run();
+       if (this.scanner.snapshot().length > 1) {
+         // Treat local files as an independent branch from the verified empty
+         // genesis. Publishing against the current head produces a stale-head
+         // merge rather than overwriting either side's existing files.
+         let genesis = current;
+         const seen = new Set<string>();
+         while (genesis.manifest.parents.length) {
+           if (seen.size >= 16_384 || seen.has(genesis.manifest.revisionId)) throw new Error("unbounded genesis ancestry");
+           seen.add(genesis.manifest.revisionId);
+           genesis = await this.verified(genesis.manifest.parents[0]!);
+         }
+         if (genesis.sequence !== 1 || genesis.manifest.entries.length !== 1)
+           throw new Error("vault does not have an empty authenticated genesis");
+         const baseHead = { revisionId: genesis.manifest.revisionId, sequence: 1 };
+         this.local.recordHead("accepted", baseHead);
+         this.local.recordHead("applied", baseHead);
+         return this.run();
       }
       this.local.recordHead("accepted", head);
       await applyNewFiles(this.scanner.root, this.local, this.remote, current.manifest, head.sequence, this.key);

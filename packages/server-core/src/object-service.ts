@@ -27,7 +27,7 @@ export class ObjectService {
     this.repositoryCall(() => this.options.catalog.requireVault(context.vaultId));
     const cataloged = this.repositoryCall(() => this.options.catalog.find(context.vaultId, objectType, objectIds));
     const rows = objectIds.map((id) => cataloged.get(id));
-    const keys = rows.flatMap((row) => row ? [objectKey(row.object_type, row.object_id)] : []);
+    const keys = rows.flatMap((row) => row ? [objectKey(row.object_type, row.object_id, this.storageVault(context.vaultId))] : []);
     const existence = await this.options.filesystem.existsBatch(keys);
     let position = 0;
     const missing: ObjectId[] = [];
@@ -106,7 +106,7 @@ export class ObjectService {
     const stream = exactObjectStream(reader, prefix.header, prefix.remainder, frame.completeLength);
     let stored;
     try {
-      stored = await this.options.filesystem.putIfAbsent(objectKey(objectType, objectId), stream, metadata.checksum);
+      stored = await this.options.filesystem.putIfAbsent(objectKey(objectType, objectId, this.storageVault(context.vaultId)), stream, metadata.checksum);
     } catch (error) {
       throw storageError(error);
     }
@@ -132,7 +132,7 @@ export class ObjectService {
     const range = parseRange(request.headers.get("range"), row.ciphertext_length);
     let opened;
     try {
-      opened = await this.options.filesystem.open(objectKey(objectType, objectId), range ?? undefined);
+       opened = await this.options.filesystem.open(objectKey(objectType, objectId, this.storageVault(context.vaultId)), range ?? undefined);
     }
     catch (error) {
       if (error instanceof ObjectStorageError && error.code === "NOT_FOUND") {
@@ -173,6 +173,9 @@ export class ObjectService {
       }
       throw error;
     }
+  }
+  private storageVault(vaultId: VaultId): string | undefined {
+    return this.options.catalog.legacyVault(vaultId) ? undefined : vaultId;
   }
 }
 
@@ -224,7 +227,9 @@ function requestDigest(vaultId: VaultId, objectType: ObjectType, objectId: Objec
     ].join("\0"))
     .digest("hex");
 }
-export function objectKey(type: ObjectType, id: string): string { return `objects/v1/${type}/${id.slice(0, 2)}/${id}`; }
+export function objectKey(type: ObjectType, id: string, vaultId?: string): string {
+  return `objects/v1/${vaultId ? `${vaultId}/` : ""}${type}/${id.slice(0, 2)}/${id}`;
+}
 
 interface ByteReader {
   read(): Promise<{ done: boolean; value?: Uint8Array }>;

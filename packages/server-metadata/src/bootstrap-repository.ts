@@ -36,7 +36,21 @@ export class BootstrapRepositoryError extends Error {
 export class BootstrapRepository {
   constructor(private readonly database: ServerMetadataDatabase) {}
 
+  /** Password-only initialization; vault creation is deliberately separate. */
+  initializeOwner(principalId: string, verifier: PasswordVerifierRecord, nowMs: number): void {
+    validateVerifier(verifier, true);
+    this.database.writeTransaction(tx => {
+      if (tx.get("SELECT 1 FROM accounts WHERE singleton=1"))
+        throw new BootstrapRepositoryError("CONFLICT", "Server is already initialized");
+      tx.run(`INSERT INTO accounts(singleton,principal_id,password_algorithm,password_version,password_memory_kib,password_iterations,password_parallelism,password_salt,password_hash,created_at_ms,password_updated_at_ms)
+        VALUES (1,?,?,?,?,?,?,?,?,?,?)`, [principalId, verifier.algorithm, verifier.version, verifier.memoryKiB,
+          verifier.iterations, verifier.parallelism, verifier.salt, verifier.hash, nowMs, nowMs]);
+    });
+  }
+
   status(): BootstrapStatus {
+    if (!this.database.get("SELECT 1 FROM bootstrap_state WHERE singleton=1") &&
+        this.database.get("SELECT 1 FROM accounts WHERE singleton=1")) return "sealed";
     const state = this.validatedState();
     return state?.lifecycle === "sealed"
       ? "sealed"

@@ -93,9 +93,9 @@ Opening or editing through another application may require temporary copies or p
 
 ## CLI and foreground sync
 
-The CLI runs and initializes the server (`server init`, `server run`), bootstraps or enrolls a client (`bootstrap`, `enroll`), manages devices (`devices`, `approve`, `revoke`), and requests administrator maintenance reports (`admin storage`, `admin retention-dry-run`, `admin gc-dry-run`, `admin scan`, `admin diagnostics`). `sync --client-dir DIR --sync-dir DIR` runs a single authenticated snapshot pass and exits only after the local accepted/applied heads match the observed server head. `sync --continuous --client-dir DIR --sync-dir DIR` runs in the foreground: it first synchronizes, then watches for activity, waits for debounce and stable snapshots, and periodically retries/rescans for missed notifications. It logs errors rather than claiming success and exits cleanly on SIGINT/SIGTERM. Supply an external user service manager or startup script if you want it at login; Nanosync does not install one.
+The CLI initializes an owner password locally (`server init`), enrolls server-wide devices (`enroll` and local `approve NAME --server-dir DIR`), creates/lists/renames vaults (`vault`), connects directories (`setup`), and synchronizes (`sync` or `sync --watch`). See [CLI workflow](../packages/cli/README.md) for the commands and safe automation options. `sync` searches upward from cwd or `--path` for a secret-free `.nanosync` marker; `--watch` runs in the foreground and periodically rescans/retries. Supply your own user service manager if needed.
 
-Only one sync command can own a private client directory at a time. Keep the sync directory separate from the private client directory; neither may contain the other. On each run, the client resumes interrupted hydration/apply and frozen publication proposals before scanning new edits. A pre-existing local folder can be imported when the remote still has empty genesis; if the remote already contains files, initial sync requires an empty local folder rather than guessing how untracked files should merge. The sync commands do not provide local IPC, status, history, restore, conflict-resolution, eviction or download controls. Successful one-shot commands print `{revisionId,sequence}` and exit 0; pending enrollment exits 3; other failures report structured errors on stderr. The continuous command prints heads on successful passes, logs failures, and retries while running.
+Each connection has its own global-state journal, cache, pending proposals, and lock. Keep sync roots separate from global private state and each other. Initial sync reconciles existing local files against the verified empty genesis even when another replica has already published remote data; it never treats untracked local files as implicit deletions. On each run, interrupted hydration/apply and frozen proposals resume before new edits. The CLI has no local IPC, status, history, restore, conflict-resolution, eviction, or download controls. Successful one-shot commands print `{revisionId,sequence}` and exit 0; pending enrollment exits 3; other failures report structured errors on stderr.
 
 Integrators of other clients can use `sync-core`, `client-local`, and `linux-client` directly. The portable library APIs remain available for history, merge, restoration, conflicts and hydration; these are not separate CLI commands.
 
@@ -123,7 +123,14 @@ The server should create storage with restrictive permissions and refuse to star
 
 ## Administration
 
-Version 1 needs an explicit bootstrap flow:
+Current multi-vault initialization uses:
+
+1. `server init` to establish one owner password, even when the server has no vaults.
+2. `enroll` on each device, followed by `approve NAME --server-dir DIR` locally on the server.
+3. `vault create` from any approved device; protect the independent per-vault recovery secret.
+4. `setup` to select a server, vault and directory. A missing local key requires that vault's recovery secret.
+
+The legacy single-vault bootstrap protocol remains available for pre-existing deployments; its historical sequence was:
 
 1. Start an uninitialized server on a trusted local interface.
 2. Create the sole account.
@@ -149,7 +156,7 @@ Administrative capabilities include:
 - Trigger integrity scans.
 - Export diagnostics that exclude secrets and plaintext names.
 
-Administration is CLI-only in version 1, backed by the same authenticated server API used for administration rather than a privileged side channel.
+Administration is CLI-only; local access to the server's private metadata directory authorizes name-based approval and revocation without a sync client, while legacy HTTP admin routes remain available for legacy administrators.
 
 With an approved administrator's client directory, run `nanosync admin storage`, `nanosync admin retention-dry-run`, `nanosync admin gc-dry-run`, `nanosync admin scan`, or `nanosync admin diagnostics` (optionally `--json`). Reports are aggregate-only: no keys, tokens, object IDs, or plaintext names. Each `admin scan` verifies at most 100 catalog entries; repeat until `done: true` (scan position resets on server restart). Retention reports reject more than 10,000 revisions rather than silently truncating. No live GC execution command exists.
 
@@ -157,7 +164,7 @@ With an approved administrator's client directory, run `nanosync admin storage`,
 
 ### Maintenance and offline GC (migration 4)
 
-`MaintenanceRepository.retentionDryRun(nowMs)` chooses by **server UTC acceptance time**: all accepted revisions at age ≤3 days, newest per UTC day through 30 days, newest per UTC month through 365 days. It also reports protected head, prepared revisions and their ancestor bases. This is **reporting only**: no client acknowledgement of merge bases exists, so even unselected revisions and their referenced ciphertext remain durable. Do not infer deletion authorization from the retention report. Active upload sessions protect their objects (including expired sessions until explicitly resolved). `ServerMaintenance.scan` streams complete object frames and compares frame identity, SHA-256 and catalog length; missing/corrupt catalog rows are flagged, not removed. Unexpected I/O errors abort the scan. A scan is advisable before planning GC.
+`MaintenanceRepository.retentionDryRun(nowMs)` chooses **per vault** by server UTC acceptance time: all accepted revisions at age ≤3 days, newest per UTC day through 30 days, newest per UTC month through 365 days. It also reports protected heads, prepared revisions and their ancestor bases. This is **reporting only**: no client acknowledgement of merge bases exists, so even unselected revisions and their referenced ciphertext remain durable. Do not infer deletion authorization from the retention report. Active upload sessions protect their objects (including expired sessions until explicitly resolved). `ServerMaintenance.scan` pages the entire catalog by vault and object ID and compares complete frames, SHA-256 and catalog length; missing/corrupt rows are flagged, not removed. Unexpected I/O errors abort the scan.
 
 The production server entrypoint starts `PeriodicIntegrityScanner` with `ServerMaintenance` and awaits its stop on shutdown. It uses a positive interval and a batch size of at most 1,000 (one bounded catalog page per tick), reporting scan failures to stderr. Only one batch runs at once, errors do not crash the scheduler, and shutdown aborts an in-flight scan. A concurrent reupload that resets integrity state prevents an older scan result from overwriting it when the previous status/check time differs; the catalog has no generation counter for indistinguishable same-state writes.
 

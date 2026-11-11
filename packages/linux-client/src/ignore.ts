@@ -46,7 +46,9 @@ export class IgnoreRules {
     }
   }
   ignores(path: string, directory = false): boolean {
-    if (path === IGNORE_FILE) return true;
+    // The root marker is local connection metadata, never vault content. A
+    // user ignore file cannot opt it back into the synchronized tree.
+    if (path === IGNORE_FILE || path === ".nanosync") return true;
     const parts = path.split("/");
     return parts.some((_, i) => {
       const prefix = parts.slice(0, i + 1).join("/");

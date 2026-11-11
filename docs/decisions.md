@@ -5,7 +5,7 @@
 | Area | Decision |
 |---|---|
 | Initial audience | One household or small trusted team, initially one user |
-| Server tenancy | One user and one vault per server |
+| Server tenancy | One owner/password and multiple independent vaults per server (including zero vaults) |
 | Topology | Central authoritative server |
 | Initial clients | Portable sync core and Linux adapters with foreground CLI sync; Android integration remains platform work |
 | Encryption | Client-side encryption; server does not have the vault master key |
@@ -18,7 +18,7 @@
 | File size | Up to 50 GB per file |
 | Chunking | Fixed-size chunks |
 | Transfer restart | Resume at completed chunk boundaries |
-| Deduplication | Within the one-user vault |
+| Deduplication | Within each vault, not across vaults |
 | Server storage | Local filesystem through an abstract `Filesystem` interface |
 | Linux local model | Ordinary folder; evicted entries available through local-state adapters to integrator-provided interfaces |
 | Linux local encryption | Plaintext files; rely on device disk encryption |

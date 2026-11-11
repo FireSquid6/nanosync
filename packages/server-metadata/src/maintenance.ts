@@ -7,6 +7,7 @@ import {
 
 const DAY = 86_400_000;
 export const GC_GRACE_MS = DAY;
+const revisionKey = (row: { vault_id?: string; revision_id: string }) => row.vault_id ? `${row.vault_id}:${row.revision_id}` : row.revision_id;
 
 function validTime(nowMs: number): void {
   if (
@@ -20,6 +21,7 @@ function validTime(nowMs: number): void {
 /** Selection only: no persisted revisions are pruned without an acknowledged client base protocol. */
 export function selectRetention(
   rows: readonly {
+    vault_id?: string;
     revision_id: string;
     accepted_sequence: number | null;
     server_created_at_ms: number;
@@ -41,24 +43,24 @@ export function selectRetention(
   for (const row of ordered) {
     const age = nowMs - row.server_created_at_ms;
     if (age < 0) {
-      chosen.add(row.revision_id);
+      chosen.add(revisionKey(row));
       continue;
     }
     const date = new Date(row.server_created_at_ms);
     if (!Number.isFinite(date.getTime())) {
-      chosen.add(row.revision_id);
+      chosen.add(revisionKey(row));
       continue;
     }
     const month = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
     const day = `${month}-${String(date.getUTCDate()).padStart(2, "0")}`;
-    if (age <= 3 * DAY) chosen.add(row.revision_id);
-    if (age <= 30 * DAY && !daily.has(day)) {
-      daily.add(day);
-      chosen.add(row.revision_id);
+    if (age <= 3 * DAY) chosen.add(revisionKey(row));
+    if (age <= 30 * DAY && !daily.has(`${row.vault_id ?? ""}:${day}`)) {
+      daily.add(`${row.vault_id ?? ""}:${day}`);
+      chosen.add(revisionKey(row));
     }
-    if (age <= 365 * DAY && !monthly.has(month)) {
-      monthly.add(month);
-      chosen.add(row.revision_id);
+    if (age <= 365 * DAY && !monthly.has(`${row.vault_id ?? ""}:${month}`)) {
+      monthly.add(`${row.vault_id ?? ""}:${month}`);
+      chosen.add(revisionKey(row));
     }
   }
   return chosen;
@@ -74,6 +76,9 @@ export interface RetentionReport {
 
 export class MaintenanceRepository {
   constructor(private readonly db: ServerMetadataDatabase) {}
+  legacyVault(vaultId: string): boolean {
+    return !!this.db.get("SELECT 1 FROM server_state WHERE vault_id=? AND singleton=1", [vaultId]);
+  }
 
   retentionDryRun(nowMs: number): RetentionReport {
     validTime(nowMs);
@@ -104,34 +109,32 @@ export class MaintenanceRepository {
   ): RetentionReport {
     const chosen = selectRetention(rows, nowMs);
     const protectedIds = new Set<string>();
-    const head = this.db.get<{ current_head_revision_id: string | null }>(
-      "SELECT current_head_revision_id FROM server_state WHERE singleton = 1",
-    );
-    if (head?.current_head_revision_id)
-      protectedIds.add(head.current_head_revision_id);
+    for (const head of this.db.all<{vault_id:string;current_head_revision_id:string|null}>(
+      "SELECT vault_id,current_head_revision_id FROM server_state"))
+      if (head.current_head_revision_id) protectedIds.add(`${head.vault_id}:${head.current_head_revision_id}`);
     // All prepared revisions and all ancestors are merge bases until a client ACK protocol exists.
     for (const r of rows)
-      if (r.accepted_sequence === null) protectedIds.add(r.revision_id);
+      if (r.accepted_sequence === null) protectedIds.add(`${r.vault_id}:${r.revision_id}`);
     for (const r of rows)
       if (
         r.server_created_at_ms > nowMs ||
         !Number.isFinite(new Date(r.server_created_at_ms).getTime())
       )
-        protectedIds.add(r.revision_id);
-    for (const r of this.db.all<{ parent_revision_id: string }>(
-      "SELECT parent_revision_id FROM revision_parents",
+        protectedIds.add(`${r.vault_id}:${r.revision_id}`);
+    for (const r of this.db.all<{ vault_id:string;parent_revision_id: string }>(
+      "SELECT vault_id,parent_revision_id FROM revision_parents",
     ))
-      protectedIds.add(r.parent_revision_id);
+      protectedIds.add(`${r.vault_id}:${r.parent_revision_id}`);
     return {
       selected: rows
-        .filter((r) => chosen.has(r.revision_id))
+        .filter((r) => chosen.has(`${r.vault_id}:${r.revision_id}`))
         .map((r) => r.revision_id),
       protected: rows
-        .filter((r) => protectedIds.has(r.revision_id))
+        .filter((r) => protectedIds.has(`${r.vault_id}:${r.revision_id}`))
         .map((r) => r.revision_id),
       notSelected: rows
         .filter(
-          (r) => !chosen.has(r.revision_id) && !protectedIds.has(r.revision_id),
+          (r) => !chosen.has(`${r.vault_id}:${r.revision_id}`) && !protectedIds.has(`${r.vault_id}:${r.revision_id}`),
         )
         .map((r) => r.revision_id),
       deletableRevisions: 0,
@@ -141,9 +144,11 @@ export class MaintenanceRepository {
   catalog(cursor = "", limit = 100): ObjectCatalogRow[] {
     if (!Number.isInteger(limit) || limit < 1 || limit > 1000)
       throw new RangeError("Invalid page limit");
+    if (cursor && !/^[0-9a-f-]{36}:[0-9a-f]{64}$/.test(cursor)) throw new RangeError("Invalid catalog cursor");
+    const [vault = "", object = ""] = cursor.split(":");
     return this.db.all<ObjectCatalogRow>(
-      "SELECT * FROM object_catalog WHERE object_id > ? ORDER BY object_id LIMIT ?",
-      [cursor, limit],
+      "SELECT * FROM object_catalog WHERE vault_id > ? OR (vault_id=? AND object_id > ?) ORDER BY vault_id, object_id LIMIT ?",
+      [vault, vault, object, limit],
     );
   }
 

@@ -173,7 +173,7 @@ function scan(root: Root, ignore: IgnoreRules): Map<string, Stats> {
       if (!name.startsWith(".nanosync-") && ignore.ignores(path)) continue;
       const st = root.at(path); if (!st) throw new Error("directory changed during inventory");
       if (!name.startsWith(".nanosync-") && st.isDirectory() && ignore.ignores(path, true)) continue;
-      safe(st, st.isDirectory() ? "directory" : "file"); found.set(path, st);
+       safe(st, st.isDirectory() ? "directory" : "file"); found.set(path, st);
       if (st.isDirectory()) {
         const child = root.parent(path);
         try { const next = openSync(`/proc/self/fd/${child.fd}/${child.leaf}`, dirFlags);

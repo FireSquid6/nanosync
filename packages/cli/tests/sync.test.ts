@@ -107,7 +107,7 @@ test("first snapshot sync imports an existing local file without deleting it", a
 
 test("first import prunes nested virtualenv links and hardlinks while preserving included files", async () => {
   const e = await fixture();
-  writeFileSync(join(e.firstFiles, ".nanosyncignore"), ".venv/\n**/cache/\n");
+  writeFileSync(join(e.firstFiles, ".nanosyncignore"), ".venv/\n**/cache/\n", { mode: 0o600 });
   mkdirSync(join(e.firstFiles, "project", ".venv"), { recursive: true });
   mkdirSync(join(e.firstFiles, "project", "cache"));
   writeFileSync(join(e.firstFiles, "project", "source"), "source");
@@ -138,13 +138,13 @@ test("local ignore preserves tracked remote state and never applies changes into
   await a.syncOnce(); await b.syncOnce();
   writeFileSync(join(e.firstFiles, "shared"), "original");
   const original = await a.syncOnce(); await b.syncOnce();
-  writeFileSync(join(e.firstFiles, ".nanosyncignore"), "shared\nprivate/\n");
-  mkdirSync(join(e.firstFiles, "private"));
+  writeFileSync(join(e.firstFiles, ".nanosyncignore"), "shared\nprivate/\n", { mode: 0o600 });
+  mkdirSync(join(e.firstFiles, "private"), { mode: 0o700 });
   symlinkSync("missing", join(e.firstFiles, "private", "unsafe"));
   writeFileSync(join(e.firstFiles, "shared"), "locally ignored");
-  writeFileSync(join(e.secondFiles, "new"), "remote change");
-  mkdirSync(join(e.secondFiles, "private"));
-  writeFileSync(join(e.secondFiles, "private", "remote"), "only on second device");
+  writeFileSync(join(e.secondFiles, "new"), "remote change", { mode: 0o600 });
+  mkdirSync(join(e.secondFiles, "private"), { mode: 0o700 });
+  writeFileSync(join(e.secondFiles, "private", "remote"), "only on second device", { mode: 0o600 });
   await b.syncOnce();
   await a.syncOnce();
   expect(readFileSync(join(e.firstFiles, "shared"), "utf8")).toBe("locally ignored");
@@ -155,7 +155,7 @@ test("local ignore preserves tracked remote state and never applies changes into
   expect((await remote.manifest(current.revisionId!, e.a.masterKey)).manifest.entries.find(entry => entry.name === "shared")?.id)
     .toBe((await remote.manifest(original.revisionId, e.a.masterKey)).manifest.entries.find(entry => entry.name === "shared")?.id);
   expect(readFileSync(join(e.firstFiles, "new"), "utf8")).toBe("remote change");
-  writeFileSync(join(e.firstFiles, "outside"), "published");
+  writeFileSync(join(e.firstFiles, "outside"), "published", { mode: 0o600 });
   await a.syncOnce(); await b.syncOnce();
   expect(readFileSync(join(e.secondFiles, "shared"), "utf8")).toBe("original");
   expect(readFileSync(join(e.secondFiles, "outside"), "utf8")).toBe("published");
@@ -173,7 +173,7 @@ test("local ignore preserves tracked remote state and never applies changes into
 
 test("unignoring a remote-only path cannot publish a deletion", async () => {
   const e = await fixture();
-  writeFileSync(join(e.firstFiles, ".nanosyncignore"), "private/\n");
+  writeFileSync(join(e.firstFiles, ".nanosyncignore"), "private/\n", { mode: 0o600 });
   const a = start(e.a), b = start(e.b);
   await a.syncOnce(); await b.syncOnce();
   mkdirSync(join(e.secondFiles, "private"));
@@ -192,7 +192,7 @@ test("unignoring a tracked path deleted while excluded cannot publish a deletion
   await a.syncOnce();
   writeFileSync(join(e.firstFiles, "tracked"), "keep");
   const head = await a.syncOnce();
-  writeFileSync(join(e.firstFiles, ".nanosyncignore"), "tracked\n");
+  writeFileSync(join(e.firstFiles, ".nanosyncignore"), "tracked\n", { mode: 0o600 });
   unlinkSync(join(e.firstFiles, "tracked"));
   await a.syncOnce();
   await stop(a);
@@ -208,7 +208,7 @@ test("remote deletion of ignored tracked content preserves local copy and unigno
   await a.syncOnce(); await b.syncOnce();
   writeFileSync(join(e.firstFiles, "tracked"), "local original");
   await a.syncOnce(); await b.syncOnce();
-  writeFileSync(join(e.firstFiles, ".nanosyncignore"), "tracked\n");
+  writeFileSync(join(e.firstFiles, ".nanosyncignore"), "tracked\n", { mode: 0o600 });
   unlinkSync(join(e.secondFiles, "tracked"));
   const deleted = await b.syncOnce();
   await a.syncOnce();
@@ -229,7 +229,7 @@ test("remote rename of an ignored tracked file refuses apply before creating an 
   await a.syncOnce(); await b.syncOnce();
   writeFileSync(join(e.firstFiles, "tracked"), "local original");
   await a.syncOnce(); await b.syncOnce();
-  writeFileSync(join(e.firstFiles, ".nanosyncignore"), "tracked\n");
+  writeFileSync(join(e.firstFiles, ".nanosyncignore"), "tracked\n", { mode: 0o600 });
   renameSync(join(e.secondFiles, "tracked"), join(e.secondFiles, "moved"));
   await b.syncOnce();
   await expect(a.syncOnce()).rejects.toThrow(/ignored entry moved/);
@@ -238,15 +238,16 @@ test("remote rename of an ignored tracked file refuses apply before creating an 
   try { expect(local.pendingApplies()).toEqual([]); } finally { local.close(); }
 });
 
-test("fresh client refuses ambiguous pre-existing local files when the remote already has data", async () => {
+test("fresh client merges pre-existing local files with remote history", async () => {
   const e = await fixture();
   writeFileSync(join(e.firstFiles, "remote"), "uploaded", { mode: 0o600 });
   expect(await main(["sync", "--client-dir", e.firstDir, "--sync-dir", e.firstFiles])).toBe(0);
   writeFileSync(join(e.secondFiles, "local"), "must stay", { mode: 0o600 });
-  expect(await main(["sync", "--client-dir", e.secondDir, "--sync-dir", e.secondFiles])).toBe(2);
+  expect(await main(["sync", "--client-dir", e.secondDir, "--sync-dir", e.secondFiles])).toBe(0);
   expect(readFileSync(join(e.secondFiles, "local"), "utf8")).toBe("must stay");
+  expect(readFileSync(join(e.secondFiles, "remote"), "utf8")).toBe("uploaded");
   const local = new ClientLocal(e.secondDir, e.b.vaultId, e.b.deviceId);
-  try { expect(local.head("applied").revisionId).toBeNull(); }
+  try { expect(local.head("applied").revisionId).not.toBeNull(); }
   finally { local.close(); }
 });
 
@@ -383,7 +384,7 @@ test("continuous sync reloads ignore rules and prunes new unsafe directories", a
   const watching = runner.watch(controller.signal, head => heads.push(head.sequence), error => errors.push(error));
   try {
     await waitFor(() => heads.length > 0);
-    writeFileSync(join(e.firstFiles, ".nanosyncignore"), ".venv/\n");
+    writeFileSync(join(e.firstFiles, ".nanosyncignore"), ".venv/\n", { mode: 0o600 });
     mkdirSync(join(e.firstFiles, ".venv"));
     symlinkSync("missing", join(e.firstFiles, ".venv", "link"));
     writeFileSync(join(e.firstFiles, "included"), "yes");
