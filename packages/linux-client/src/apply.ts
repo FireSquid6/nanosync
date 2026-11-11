@@ -11,6 +11,7 @@ import {
   type HttpRemote, type ManifestEntry, type ManifestV1,
 } from "@nanosync/sync-core";
 import { ClientLocal, type Entry } from "@nanosync/client-local";
+import { IgnoreRules } from "./ignore.ts";
 
 const dirFlags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
 const fileFlags = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
@@ -25,6 +26,8 @@ type Plan = {
   stages: Record<string, string>;
   created: Record<string, { device: string; inode: string }>;
   operationId: string;
+  ignoreSignature?: string;
+  ignoredIdentities?: { entryId: string; device: string; inode: string }[];
 };
 
 function statOrNull(path: string): Stats | null {
@@ -161,14 +164,16 @@ class Root {
 }
 
 function temp(plan: Plan, id: string, suffix: "old" | "new") { return `.nanosync-${plan.operationId}-${id}-${suffix}`; }
-function scan(root: Root): Map<string, Stats> {
+function scan(root: Root, ignore: IgnoreRules): Map<string, Stats> {
   const found = new Map<string, Stats>();
   const walk = (prefix: string, fd: number) => {
     const names = readdirSync(`/proc/self/fd/${fd}`).sort();
     for (const name of names) {
       const path = prefix ? `${prefix}/${name}` : name;
+      if (!name.startsWith(".nanosync-") && ignore.ignores(path)) continue;
       const st = root.at(path); if (!st) throw new Error("directory changed during inventory");
-      safe(st, st.isDirectory() ? "directory" : "file"); found.set(path, st);
+      if (!name.startsWith(".nanosync-") && st.isDirectory() && ignore.ignores(path, true)) continue;
+       safe(st, st.isDirectory() ? "directory" : "file"); found.set(path, st);
       if (st.isDirectory()) {
         const child = root.parent(path);
         try { const next = openSync(`/proc/self/fd/${child.fd}/${child.leaf}`, dirFlags);
@@ -223,9 +228,20 @@ async function stage(root: Root, plan: Plan, remote: HttpRemote, master: Uint8Ar
   }
 }
 
-function planApply(root: Root, local: ClientLocal, manifest: ManifestV1, sequence: number, evict: ReadonlySet<string>): Plan {
+function planApply(root: Root, local: ClientLocal, manifest: ManifestV1, sequence: number, evict: ReadonlySet<string>, ignore: IgnoreRules): Plan {
   const paths = manifestPaths(manifest), oldEntries = local.entries(), identities = new Map(local.identities().map(i => [i.entryId, i]));
-  const old: Old[] = oldEntries.filter(e => e.kind !== "tombstone" && e.hydration === "downloaded").map(entry => {
+  const ignored = oldEntries.filter(e => e.path && ignore.ignores(e.path, e.kind === "directory"));
+  const ignoredIds = new Set(ignored.map(e => e.id));
+  const remoteById = new Map([...paths].map(([path, entry]) => [entry.id, { path, entry }]));
+  local.markIgnored(ignored.map(e => e.id));
+  for (const entry of ignored) {
+    const destination = remoteById.get(entry.id);
+    if (destination && destination.entry.kind !== "tombstone" &&
+        !ignore.ignores(destination.path, destination.entry.kind === "directory"))
+      throw new Error(`ignored entry moved to included path; manual reconciliation required: ${entry.path}`);
+  }
+  const old: Old[] = oldEntries.filter(e => e.kind !== "tombstone" && e.hydration === "downloaded" &&
+    (e.path === "" || !ignore.ignores(e.path, e.kind === "directory"))).map(entry => {
     const ident = identities.get(entry.id); if (!ident) throw new Error(`missing local identity: ${entry.path}`);
     return { entry, device: ident.device, inode: ident.inode };
   });
@@ -235,8 +251,12 @@ function planApply(root: Root, local: ClientLocal, manifest: ManifestV1, sequenc
   const desired: Entry[] = [], stages: Record<string, string> = {};
   const operationId = randomUUID();
   const plan: Plan = { version: 1, rootDevice: String(root.stat.dev), rootInode: String(root.stat.ino),
-    manifest, old, desired, stages, created: {}, operationId };
+    manifest, old, desired, stages, created: {}, operationId, ignoreSignature: ignore.signature,
+    ignoredIdentities: local.identities().filter(i => oldEntries.some(e => e.id === i.entryId && e.path &&
+      ignore.ignores(e.path, e.kind === "directory"))) };
   for (const [path, e] of paths) {
+    if (ignoredIds.has(e.id)) continue;
+    if (path && ignore.ignores(path, e.kind === "directory")) continue;
     const prior = byId.get(e.id);
     if (prior && prior.kind !== e.kind && !(e.kind === "tombstone" && prior.kind === e.deletedKind))
       throw new Error("manifest identity kind changed");
@@ -247,7 +267,8 @@ function planApply(root: Root, local: ClientLocal, manifest: ManifestV1, sequenc
       stages[e.id] = temp(plan, e.id, "new");
     desired.push({ id: e.id, path, kind: e.kind, fingerprint: e.sha256 ?? null, hydration, revision: manifest.revisionId });
   }
-  const snapshot = scan(root);
+  for (const entry of oldEntries) if (entry.path && ignore.ignores(entry.path, entry.kind === "directory")) desired.push(entry);
+  const snapshot = scan(root, ignore);
   for (const [path, st] of snapshot) {
     const prior = old.find(o => o.entry.path === path);
     if (!prior || String(st.dev) !== prior.device || String(st.ino) !== prior.inode) throw new Error(`unexpected local entry: ${path}`);
@@ -260,12 +281,12 @@ function planApply(root: Root, local: ClientLocal, manifest: ManifestV1, sequenc
   return plan;
 }
 
-function verifyBeforeMutation(root: Root, plan: Plan) {
+function verifyBeforeMutation(root: Root, plan: Plan, ignore: IgnoreRules) {
   const allowedStages = new Set([
     ...Object.values(plan.stages),
     ...Object.keys(plan.created).map(id => temp(plan, id, "new")),
   ]);
-  const inventory = scan(root);
+  const inventory = scan(root, ignore);
   for (const [path, stat] of inventory) {
     if (allowedStages.has(path)) continue;
     const prior = plan.old.find(item => item.entry.path === path);
@@ -301,7 +322,7 @@ function oldAt(root: Root, plan: Plan, item: Old): string | null {
   return null;
 }
 
-function verifyRecovery(root: Root, plan: Plan) {
+function verifyRecovery(root: Root, plan: Plan, ignore: IgnoreRules) {
   const paths = manifestPaths(plan.manifest), desired = new Map([...paths].filter(([path]) => path));
   const oldByLocation = new Map<string, Old>();
   for (const old of plan.old.filter(o => o.entry.path)) for (const location of oldLocations(root, plan, old)) {
@@ -310,7 +331,7 @@ function verifyRecovery(root: Root, plan: Plan) {
     oldByLocation.set(location, old);
   }
   const staged = new Map(Object.entries(plan.stages).map(([id, path]) => [path, plan.manifest.entries.find(e => e.id === id)!]));
-  for (const [path, st] of scan(root)) {
+  for (const [path, st] of scan(root, ignore)) {
     const prior = oldByLocation.get(path);
     if (prior && String(st.dev) === prior.device && String(st.ino) === prior.inode) {
       root.verify(path, prior); continue;
@@ -349,6 +370,8 @@ export async function applyNewFiles(rootInput: string, local: ClientLocal, remot
   if (plan && (plan.version !== 1 || plan.operationId !== pending[0]!.id ||
       !Buffer.from(encodeManifest(plan.manifest)).equals(Buffer.from(encodeManifest(manifest))))) throw new Error("corrupt apply intent");
   const root = new Root(resolve(rootInput), plan ?? undefined);
+  const ignore = new IgnoreRules(root.path);
+  if (plan && plan.ignoreSignature !== ignore.signature) { root.close(); throw new Error(".nanosyncignore changed during pending apply; restore prior rules to recover"); }
   let prepared = false;
   let active: Plan | null = null;
   try {
@@ -361,14 +384,15 @@ export async function applyNewFiles(rootInput: string, local: ClientLocal, remot
       const ids = [...new Set(manifest.entries.filter(e => evictions.includes(e.id)).flatMap(e => (e.chunks ?? []).map(c => c.objectId)))];
       if (ids.length && (await remote.presence("chunk", ids)).size) throw new Error("eviction requires remotely durable chunks");
     }
-    const work = plan ?? planApply(root, local, manifest, sequence, options.evictIds ?? new Set());
+    const work = plan ?? planApply(root, local, manifest, sequence, options.evictIds ?? new Set(), ignore);
     active = work;
-    if (plan) verifyRecovery(root, plan);
+    if (plan) verifyRecovery(root, plan, ignore);
     if (plan && options.evictIds && [...options.evictIds].some(id => work.desired.find(e => e.id === id)?.hydration !== "evicted"))
       throw new Error("eviction policy differs from persisted intent");
     // All files are downloaded and fsynced before the first destructive mutation.
     await stage(root, work, remote, master, refs);
-    for (const entry of work.manifest.entries.filter(e => e.kind === "directory" && e.parentId !== null && !work.old.some(o => o.entry.id === e.id))) {
+    for (const entry of work.manifest.entries.filter(e => e.kind === "directory" && e.parentId !== null &&
+      work.desired.some(d => d.id === e.id && d.revision === manifest.revisionId) && !work.old.some(o => o.entry.id === e.id))) {
       const name = temp(work, entry.id, "new"), target = manifestPaths(manifest);
       const path = [...target].find(([, e]) => e.id === entry.id)![0];
       let st = root.at(name) ?? root.at(path);
@@ -386,7 +410,8 @@ export async function applyNewFiles(rootInput: string, local: ClientLocal, remot
       work.created[entry.id] = identity;
     }
     if (!plan) {
-      verifyBeforeMutation(root, work);
+      verifyBeforeMutation(root, work, ignore);
+      if (new IgnoreRules(root.path).signature !== ignore.signature) throw new Error(".nanosyncignore changed during apply preparation");
       fsyncSync(root.fd); local.prepareApply(work.operationId, manifest.revisionId, sequence, JSON.stringify(work));
     }
     prepared = true;
@@ -417,7 +442,7 @@ export async function applyNewFiles(rootInput: string, local: ClientLocal, remot
       else if (!source && root.at(item.entry.path)) throw new Error(`unexpected directory during apply recovery: ${item.entry.path}`);
     }
     const paths = manifestPaths(manifest);
-    for (const [path, entry] of [...paths].filter(([p, e]) => p && e.kind === "directory").sort((a, b) => a[0].length - b[0].length)) {
+    for (const [path, entry] of [...paths].filter(([p, e]) => p && e.kind === "directory" && !ignore.ignores(p, true)).sort((a, b) => a[0].length - b[0].length)) {
       const existing = root.at(path), prior = oldById.get(entry.id), created = work.created[entry.id];
       if (existing) {
         const identity = prior ?? (created && { entry: { kind: "directory" } as Entry, device: created.device, inode: created.inode });
@@ -432,6 +457,7 @@ export async function applyNewFiles(rootInput: string, local: ClientLocal, remot
     }
     for (const [path, entry] of paths) {
       if (entry.kind !== "file") continue;
+      if (ignore.ignores(path)) continue;
       const desired = work.desired.find(e => e.id === entry.id)!;
       if (desired.hydration === "evicted") continue;
       const replacement = work.stages[entry.id], prior = oldById.get(entry.id);
@@ -472,13 +498,16 @@ export async function applyNewFiles(rootInput: string, local: ClientLocal, remot
     for (const name of Object.values(work.stages)) if (root.at(name)) root.withParent(name, (target, check, fd) => {
       check(); unlinkSync(target); fsyncSync(fd); check();
     });
+    if (new IgnoreRules(root.path).signature !== ignore.signature) throw new Error(".nanosyncignore changed during apply");
     root.check(); fsyncSync(root.fd);
-    const identities = work.desired.filter(e => e.kind !== "tombstone" && e.hydration === "downloaded").map(e => {
+    const identities = work.desired.filter(e => e.kind !== "tombstone" && e.hydration === "downloaded" &&
+      !(e.path && ignore.ignores(e.path, e.kind === "directory"))).map(e => {
       const st = e.path ? root.at(e.path) : root.stat;
       if (!st || !st.isDirectory() && (!st.isFile() || st.nlink !== 1)) throw new Error("applied entry missing");
       return { entryId: e.id, device: String(st.dev), inode: String(st.ino) };
     });
-    local.finishApply(work.operationId, { revisionId: manifest.revisionId, sequence }, work.desired, identities);
+    local.finishApply(work.operationId, { revisionId: manifest.revisionId, sequence }, work.desired,
+      [...identities, ...work.ignoredIdentities ?? []]);
   } finally {
     // Before an intent exists, orphan stages are private and can be removed safely.
     if (!prepared && !plan && active) for (const name of readdirSync(`/proc/self/fd/${root.fd}`)) if (name.startsWith(`.nanosync-${active.operationId}-`)) {

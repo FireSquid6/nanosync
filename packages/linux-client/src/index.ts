@@ -10,6 +10,8 @@ import {
   type EncryptedObject, type ManifestEntry, type ManifestV1,
 } from "@nanosync/sync-core";
 import { ClientLocal, type Entry } from "@nanosync/client-local";
+import { IgnoreRules } from "./ignore.ts";
+export { IgnoreRules } from "./ignore.ts";
 export { applyNewFiles, applyNewFiles as applyManifest } from "./apply.ts";
 export { hydrateFile } from "./hydration.ts";
 
@@ -53,7 +55,7 @@ function openChecked(path: string, kind: "file" | "directory", expected?: Stats)
 }
 
 /** Directory-relative /proc/self/fd paths anchor traversal to open, no-follow descriptors. Linux only. */
-function inventory(root: string): Found[] {
+function inventory(root: string, ignore: IgnoreRules): Found[] {
   const result: Found[] = [], active = new Set<string>();
   function descend(fd: number, path: string, stat: Stats) {
     const key = identity(stat); if (active.has(key)) throw new Error("directory cycle"); active.add(key);
@@ -61,14 +63,17 @@ function inventory(root: string): Found[] {
     const names = readdirSync(`/proc/self/fd/${fd}`).sort();
     const folded = new Set<string>();
     for (const name of names) {
-      validName(name);
       const relative = path ? `${path}/${name}` : name;
+      // Check exclusion before even lstat: ignored children may be links or special files.
+      if (ignore.ignores(relative)) continue;
+      validName(name);
       if (
         Buffer.byteLength(relative) > 4096 || folded.has(name.toLowerCase())
       ) throw new Error("ambiguous or overlong path");
       folded.add(name.toLowerCase());
       const target = `/proc/self/fd/${fd}/${name}`;
       const st = lstatSync(target);
+      if (st.isDirectory() && ignore.ignores(relative, true)) continue;
       if (st.isDirectory()) {
         const child = openChecked(target, "directory", st);
         try {
@@ -132,12 +137,16 @@ export class LinuxScanner {
     if (Object.values(this.options).some(v => !Number.isSafeInteger(v) || v < 0) || !this.options.maxBatch ||
         this.options.maxConcurrent < 1 || this.options.maxConcurrent > 8) throw new Error("invalid scanner options");
   }
-  snapshot() { checkedRoot(this.root); return inventory(this.root); }
+  rules() { checkedRoot(this.root); return new IgnoreRules(this.root); }
+  snapshot() { const rules = this.rules(); return inventory(this.root, rules); }
   async plan(priorInput: ManifestV1, revisionId: string, deviceId: string, master: Uint8Array, identityHints?: ManifestV1): Promise<ScanPlan> {
     const prior = parseManifest(priorInput), revision = parseRevisionId(revisionId), device = parseDeviceId(deviceId);
     parseVaultId(prior.vaultId);
     if (revision === prior.revisionId || !(master instanceof Uint8Array) || master.length !== 32) throw new Error("invalid scan context");
     const key = master.slice();
+    const rules = this.rules();
+    const localEntries = this.local.entries();
+    this.local.markIgnored(localEntries.filter(e => e.path && rules.ignores(e.path, e.kind === "directory")).map(e => e.id));
     const files = this.snapshot();
     const old = new Map(prior.entries.map(e => [e.id, e]));
     const priorPath = new Map<string, ManifestEntry>();
@@ -148,7 +157,20 @@ export class LinuxScanner {
     }
     for (const e of prior.entries) priorPath.set(index(e), e);
     const hints = identityHints ? manifestPaths(parseManifest(identityHints)) : new Map<string, ManifestEntry>();
-    const localEntries = this.local.entries(), localPath = new Map(localEntries.map(e => [e.path, e]));
+    const localPath = new Map(localEntries.map(e => [e.path, e]));
+    const visible = new Set(files.map(f => f.path));
+    for (const recorded of localEntries) if (recorded.path && this.local.wasIgnored(recorded.id) &&
+        !rules.ignores(recorded.path, recorded.kind === "directory") &&
+        (!visible.has(recorded.path) || priorPath.get(recorded.path)?.id !== recorded.id ||
+          priorPath.get(recorded.path)?.kind === "tombstone"))
+      throw new Error(`previously ignored local path requires manual reconciliation: ${recorded.path}`);
+    for (const file of files) {
+      const previous = priorPath.get(file.path), recorded = localPath.get(file.path);
+      if (recorded && this.local.wasIgnored(recorded.id) && (!previous || previous.kind === "tombstone" || previous.id !== recorded.id) ||
+          recorded && !old.has(recorded.id) || file.path && previous && previous.kind !== "tombstone" && (!recorded || recorded.id !== previous.id ||
+          previous.kind === "file" && recorded.fingerprint !== previous.sha256))
+        throw new Error(`previously ignored or divergent local path requires manual reconciliation: ${file.path}`);
+    }
     const idByIdentity = new Map<string, string[]>();
     for (const item of this.local.identities()) {
       const k = `${item.device}:${item.inode}`;
@@ -198,8 +220,13 @@ export class LinuxScanner {
       }
     }));
     const after = this.snapshot();
+    if (this.rules().signature !== rules.signature) throw new Error(".nanosyncignore changed during scan");
     if (after.length !== files.length || after.some((file, i) => file.path !== files[i]!.path || !same(file.stat, files[i]!.stat)))
       throw new Error("directory changed during scan");
+    for (const file of files) if (file.path && this.local.wasIgnored(assigned.get(file.path)!) &&
+      (file.kind === "file" && fileResults.get(file.path)?.sha256 !== priorPath.get(file.path)?.sha256 ||
+        !priorPath.has(file.path)))
+      throw new Error(`previously ignored local path requires manual reconciliation: ${file.path}`);
     for (const file of files) {
       const id = assigned.get(file.path)!;
       const parentPath = file.path.includes("/")
@@ -220,6 +247,14 @@ export class LinuxScanner {
     // Evicted objects are present in the manifest but deliberately absent on disk.
     for (const entry of prior.entries) if (!used.has(entry.id) && entry.kind !== "tombstone") {
       const path = index(entry), local = localPath.get(path);
+      if (rules.ignores(path, entry.kind === "directory")) {
+        entries.push(entry);
+        if (local?.id === entry.id) updates.push(local);
+        continue;
+      }
+      if (path && (!local || local.id !== entry.id || local.revision !== prior.revisionId))
+        throw new Error(`untracked or divergent remote path requires manual reconciliation: ${path}`);
+      if (this.local.wasIgnored(entry.id)) throw new Error(`previously ignored absence requires manual reconciliation: ${path}`);
       if (entry.parentId && !used.has(entry.parentId) && localPath.get(index(old.get(entry.parentId)!))?.hydration !== "evicted") continue;
       if (local?.id === entry.id && local.hydration === "evicted") {
         entries.push(entry); updates.push(local); continue;
@@ -270,8 +305,12 @@ export class LinuxScanner {
       const parent = nextById.get(entry.parentId)!;
       return [nextPath(parent), entry.name].filter(Boolean).join("/");
     }
-    for (const entry of entries.filter(e => e.kind === "tombstone"))
+    const ignoredLocalIds = new Set(localEntries.filter(local => local.path &&
+      rules.ignores(local.path, local.kind === "directory")).map(local => local.id));
+    for (const entry of entries.filter(e => e.kind === "tombstone" && !ignoredLocalIds.has(e.id)))
       updates.push({ id: entry.id, path: nextPath(entry), kind: "tombstone", fingerprint: null, hydration: "downloaded", revision });
+    const updatedIds = new Set(updates.map(update => update.id));
+    for (const local of localEntries) if (ignoredLocalIds.has(local.id) && !updatedIds.has(local.id)) updates.push(local);
     const manifest = parseManifest({
       version: 1,
       vaultId: prior.vaultId,
@@ -283,10 +322,12 @@ export class LinuxScanner {
     const scanner = this;
     return { manifest, suppressed, commit: () => {
       const current = scanner.snapshot();
+      if (scanner.rules().signature !== rules.signature) throw new Error(".nanosyncignore changed before scan commit");
       if (current.length !== files.length || current.some((file, i) => file.path !== files[i]!.path || !same(file.stat, files[i]!.stat)))
         throw new Error("local tree changed before scan commit");
       scanner.local.enqueueOperation(operationId, "scan");
       scanner.local.recordScan(updates, identities);
+      scanner.local.clearIgnored(files.filter(f => f.path).map(f => assigned.get(f.path)!));
       for (const path of suppressed) scanner.local.consumeSuppression(path, updates.find(e => e.path === path)!.fingerprint!);
       scanner.local.transition("operations", operationId, "running"); scanner.local.transition("operations", operationId, "done"); },
       async *chunks(knownObjectIds: ReadonlySet<string> = new Set()) {
@@ -342,7 +383,7 @@ export class LinuxWatcher {
   /** Returns false until debounce AND an identical full snapshot spans stabilityMs. */
   ready(now = Date.now()): boolean {
     if (!this.pending || now - this.last < (this.options.debounceMs ?? 250)) return false;
-    const signature = this.scanner.snapshot().map(f => `${f.path}:${stamp(f.stat)}`).join("\n");
+    const signature = this.scanner.rules().signature + "\n" + this.scanner.snapshot().map(f => `${f.path}:${stamp(f.stat)}`).join("\n");
     if (signature !== this.baseline) { this.baseline = signature; this.stableSince = now; return false; }
     if (now - this.stableSince < (this.options.stabilityMs ?? 500)) return false;
     this.pending = 0; this.overflow = false; return true;

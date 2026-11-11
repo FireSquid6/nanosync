@@ -33,7 +33,7 @@ The person operating the server process, storage, network exposure, TLS terminat
 - Individual files may be as large as 50 GB.
 - Typical vault size is approximately 2 GB and primarily contains notes.
 - Version 1 uses fixed-size chunks.
-- Deduplication is scoped to the single vault.
+- Deduplication is scoped to each vault, never across vaults.
 - Version 1 stores server objects on the local filesystem.
 - Storage access is defined through an abstract `Filesystem` interface.
 
@@ -65,7 +65,7 @@ Retention must never remove the current head, an unresolved conflict required by
 
 ### CLI
 
-Provide CLI commands for server initialization/runtime, client bootstrap/enrollment, device approval/revocation, administrator reports, a one-shot Linux sync and a foreground continuous Linux sync with debounced filesystem watching and periodic rescan. The user chooses how to run the continuous command at startup. Separate background services, local IPC, and local status/history/restore/conflict/eviction commands are out of scope; the portable libraries retain primitives for integrators.
+Provide CLI commands for owner-password initialization/runtime, server-wide enrollment and local approval, vault creation/list/rename, directory setup/repair, administrator reports, one-shot Linux sync and foreground `sync --watch` with periodic rescan. Legacy bootstrap remains for existing deployments. Users choose how to launch the watcher at startup. Separate background services, local IPC, and local status/history/restore/conflict/eviction commands are out of scope; portable libraries retain primitives for integrators.
 
 ## Security requirements
 

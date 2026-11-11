@@ -402,6 +402,10 @@ function applyMigration(
   database: Database,
   migration: MetadataMigration,
 ): void {
+  // Rebuilding v1 singleton tables while preserving existing ciphertext and
+  // revisions requires dropping referenced tables in a single transaction.
+  // SQLite cannot change foreign_keys inside that transaction.
+  if (migration.version === 5) database.run("PRAGMA foreign_keys = OFF");
   try {
     database.run("BEGIN IMMEDIATE");
     database.exec(migration.sql);
@@ -411,6 +415,8 @@ function applyMigration(
       [migration.version, migration.name, migration.checksum, Date.now()],
     );
     database.run(`PRAGMA user_version = ${migration.version}`);
+    if (migration.version === 5 && executeAll(database, "PRAGMA foreign_key_check", []).length)
+      throw new Error("multi-vault migration violates foreign keys");
     database.run("COMMIT");
   } catch (cause) {
     rollback(database);
@@ -419,6 +425,8 @@ function applyMigration(
       `Metadata migration ${migration.version} failed`,
       { cause },
     );
+  } finally {
+    if (migration.version === 5) database.run("PRAGMA foreign_keys = ON");
   }
 }
 
@@ -533,6 +541,12 @@ function verifyIntegrity(database: Database): void {
         "CORRUPT_SCHEMA",
         "Metadata schema is incomplete",
       );
+  }
+  if (pragmaNumber(database, "user_version") >= 5) {
+    const present = executeAll<{ name: string }>(database,
+      "SELECT name FROM sqlite_schema WHERE type IN ('index','trigger')", []).map(row => row.name);
+    if (["vault_name_unique", "device_name_unique", "vault_identity_immutable"].some(name => !present.includes(name)))
+      throw new MetadataError("CORRUPT_SCHEMA", "Multi-vault schema is incomplete");
   }
 }
 

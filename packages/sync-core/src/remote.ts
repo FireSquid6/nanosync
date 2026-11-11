@@ -42,6 +42,7 @@ export interface ChunkJournal {
 export interface RemoteOptions {
   baseUrl: string;
   token: string;
+  vaultId?: string;
   fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   journal?: ChunkJournal;
   retries?: number;
@@ -179,6 +180,7 @@ export class HttpRemote {
     const url = new URL(options.baseUrl);
     if (!/^https?:$/.test(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error("invalid remote URL");
     if (!TOKEN.test(options.token)) throw new Error("invalid bearer token");
+    if (options.vaultId) parseVaultId(options.vaultId);
     if (!Number.isSafeInteger(options.retries ?? 2) || (options.retries ?? 2) < 0 || (options.retries ?? 2) > 10) throw new Error("invalid retry count");
     this.base = url.href.replace(/\/$/, ""); this.retries = options.retries ?? 2;
   }
@@ -186,6 +188,7 @@ export class HttpRemote {
   private async request(path: string, init: RequestInit = {}, authenticated = true): Promise<Response> {
     const headers = new Headers(init.headers);
     if (authenticated) headers.set("authorization", `Bearer ${this.options.token}`);
+    if (authenticated && this.options.vaultId) headers.set("x-nanosync-vault-id", this.options.vaultId);
     return this.options.fetch(new Request(`${this.base}${path}`, { ...init, headers }));
   }
 

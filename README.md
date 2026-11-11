@@ -8,6 +8,13 @@ bun install
 
 To run the Linux CLI and server from source, see [packages/cli/README.md](packages/cli/README.md).
 
+Before importing a documents folder, put a local `.nanosyncignore` at its root to
+exclude virtual environments (for example `.venv/`), caches, and other data that
+cannot safely be synced. Excluded paths are never followed, uploaded, downloaded,
+or treated as deletions; rules are device-local, not `.gitignore` rules. See the
+[ignore file guide](packages/cli/README.md#local-ignore-file) for syntax, limits,
+and how to handle already-tracked entries.
+
 To produce the distributable Linux x86-64 single-file executable (including the CLI,
 server, workspace packages, and Bun runtime):
 

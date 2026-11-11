@@ -9,14 +9,15 @@ import type {
   PrincipalId,
 } from "@nanosync/protocol";
 
-export const METADATA_SCHEMA_VERSION = 4 as const;
+export const METADATA_SCHEMA_VERSION = 5 as const;
 export const MAX_SQLITE_TIMESTAMP_MS = 9_007_199_254_740_991;
 
 export type IntegrityStatus = "unchecked" | "verified" | "corrupt" | "missing";
 export type UploadState = "active" | "completed" | "aborted";
 
 export interface ServerStateRow {
-  singleton: 1;
+  singleton: 1 | null;
+  name: string | null;
   vault_id: VaultId;
   current_head_revision_id: RevisionId | null;
   current_sequence: number;

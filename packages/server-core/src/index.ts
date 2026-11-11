@@ -3,7 +3,7 @@ import {
   MAX_PRESENCE_QUERY, MAX_REFERENCES_PER_REVISION, OBJECT_FORMAT_VERSION, OBJECT_TYPES,
   PROTOCOL_VERSION, REVISION_FORMAT_VERSION, parseDeviceId, parsePrincipalId, parseVaultId,
 } from "@nanosync/protocol";
-import { BootstrapRepository, ObjectCatalogRepository, RevisionRepository } from "@nanosync/server-metadata";
+import { BootstrapRepository, ObjectCatalogRepository, RevisionRepository, VaultRepository } from "@nanosync/server-metadata";
 import type { Filesystem } from "@nanosync/server-object-storage";
 import { createServerConfig, type ServerConfig } from "./config.ts";
 import { ApiError, errorResponse, json } from "./http.ts";
@@ -18,6 +18,7 @@ import { AuthenticationService } from "./auth-service.ts";
 import { handleAuthRoute } from "./auth-routes.ts";
 import { adminMaintenanceRoutes } from "./admin-maintenance-routes.ts";
 import type { ServerMaintenance } from "./maintenance.ts";
+import { handleVaultRoute } from "./vault-routes.ts";
 
 export * from "./config.ts";
 export * from "./http.ts";
@@ -39,6 +40,7 @@ export interface ServerDependencies {
   authentication?: AuthenticationService;
   maintenance?: ServerMaintenance;
   bootstrap?: BootstrapRepository;
+  vaults?: VaultRepository;
   authorizeBootstrap?: AuthorizeBootstrap;
   passwordHasher?: PasswordHasher;
   config?: ServerConfig;
@@ -72,6 +74,10 @@ export function createServerHandler(dependencies: ServerDependencies): (request:
         try { dependencies.catalog.ping(); await dependencies.filesystem.existsBatch([]); }
         catch { throw new ApiError(503, "UNAVAILABLE", "Service is not ready"); }
         return json({ protocolVersion: PROTOCOL_VERSION, status: "ok" });
+      }
+      if (pathname === "/v1/vaults" || /^\/v1\/vaults\/[^/]+\/rename$/.test(pathname)) {
+        if (!dependencies.authentication || !dependencies.vaults) throw new ApiError(503, "UNAVAILABLE", "Vault service is unavailable");
+        return handleVaultRoute(request, pathname, dependencies.authentication, dependencies.vaults, dependencies.filesystem, dependencies.clock ?? Date.now);
       }
       if (pathname === "/v1/bootstrap/status") {
         if (request.method !== "GET") throw new ApiError(405, "MALFORMED_REQUEST", "Method is not supported for this route", { allow: "GET" });
@@ -121,7 +127,13 @@ export function createServerHandler(dependencies: ServerDependencies): (request:
 async function authorizeRequest(dependencies: ServerDependencies, request: Request): Promise<AuthorizationContext> {
   if (dependencies.authentication) {
     const identity = dependencies.authentication.authorize(request);
-    return { principalId: identity.principalId, deviceId: identity.deviceId, vaultId: identity.vaultId };
+    let vaultId;
+    try { vaultId = parseVaultId(request.headers.get("x-nanosync-vault-id") ?? identity.vaultId); }
+    catch { throw new ApiError(400, "MALFORMED_REQUEST", "An explicit vault ID is required"); }
+    if (!dependencies.revisions) throw new ApiError(503, "UNAVAILABLE", "Vault service is unavailable");
+    try { dependencies.revisions.requireVault(vaultId); }
+    catch { throw new ApiError(403, "FORBIDDEN", "Vault is unavailable"); }
+    return { principalId: identity.principalId, deviceId: identity.deviceId, vaultId };
   }
   return authorize(dependencies.authorize, request);
 }

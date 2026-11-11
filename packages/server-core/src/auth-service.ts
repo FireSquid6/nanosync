@@ -1,6 +1,6 @@
 import { createHmac, randomBytes } from "node:crypto";
 import {
-  AUTH_TOKEN_BYTES, PROTOCOL_VERSION, decodeCanonicalBase64Url, parseAuthToken,
+   AUTH_TOKEN_BYTES, PROTOCOL_VERSION, decodeCanonicalBase64Url, parseAuthToken, parseVaultId,
   type EnrollmentCreateRequest, type DeviceId,
 } from "@nanosync/protocol";
 import {
@@ -70,7 +70,13 @@ export class AuthenticationService {
   devices(request: Request): Response { this.requireAdmin(request); return json({ protocolVersion: PROTOCOL_VERSION, devices: this.repository.listDevices() }); }
   approve(request: Request, target: DeviceId): Response { const actor = this.requireAdmin(request); const status = this.repository.approve(actor.deviceId, target, this.now()); return json({ protocolVersion: PROTOCOL_VERSION, status, deviceId: target }); }
   revoke(request: Request, target: DeviceId): Response { const actor = this.requireAdmin(request); this.repository.revoke(actor.deviceId, target, this.now()); return json({ protocolVersion: PROTOCOL_VERSION, status: "revoked", deviceId: target }); }
-  recovery(request: Request): Response { this.authorize(request); return json({ protocolVersion: PROTOCOL_VERSION, recoveryWrap: this.repository.recoveryWrap() }, 200, { "cache-control": "no-store" }); }
+  recovery(request: Request): Response {
+    const identity = this.authorize(request);
+    let vaultId;
+    try { vaultId = parseVaultId(request.headers.get("x-nanosync-vault-id") ?? identity.vaultId); }
+    catch { throw new ApiError(400, "MALFORMED_REQUEST", "An explicit vault ID is required"); }
+    return json({ protocolVersion: PROTOCOL_VERSION, recoveryWrap: this.repository.recoveryWrap(vaultId) }, 200, { "cache-control": "no-store" });
+  }
 
   private now(): number { const value = this.clock(); if (!Number.isSafeInteger(value) || value < 0) throw new Error("Invalid clock"); return value; }
   private digest(bytes: Uint8Array): Uint8Array { return Uint8Array.from(createHmac("sha256", this.pepper).update(TOKEN_HMAC_LABEL).update(bytes).digest()); }

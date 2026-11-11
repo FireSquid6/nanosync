@@ -11,16 +11,44 @@ import { objectKey } from "../src/object-service.ts";
 const vault = "12345678-1234-1234-9234-123456789abc";
 const DAY = 86_400_000;
 const now = Date.parse("2026-09-29T00:00:00.000Z");
-function frame(id: string): Uint8Array {
+function frame(id: string, vaultId = vault): Uint8Array {
   const bytes = new Uint8Array(97);
   bytes.set(new TextEncoder().encode("NSOBJ001"), 0);
   const view = new DataView(bytes.buffer);
   view.setUint16(8, 1); view.setUint16(10, 1); view.setUint8(12, 1);
-  bytes.set(Buffer.from(vault.replaceAll("-", ""), "hex"), 16);
+   bytes.set(Buffer.from(vaultId.replaceAll("-", ""), "hex"), 16);
   bytes.set(Buffer.from(id, "hex"), 32);
   view.setBigUint64(64, 1n); view.setBigUint64(72, 1n);
   return bytes;
 }
+
+test("catalog pagination, integrity, and offline GC isolate vaults with the same object ID", async () => {
+  const root = await mkdtemp(join(tmpdir(), "nanosync-multi-maintenance-"));
+  const db = new ServerMetadataDatabase(":memory:");
+  const second = "22345678-1234-1234-9234-123456789abc", id = "a".repeat(64);
+  try {
+    const storage = new LocalFilesystem(join(root, "objects"));
+    const repo = new MaintenanceRepository(db), service = new ServerMaintenance(repo, storage);
+    db.writeTransaction(tx => {
+      tx.run("INSERT INTO server_state(singleton,vault_id,current_head_revision_id,current_sequence) VALUES(1,?,NULL,0)", [vault]);
+      tx.run("INSERT INTO server_state(singleton,vault_id,name,current_head_revision_id,current_sequence) VALUES(NULL,?,'other',NULL,0)", [second]);
+    });
+    for (const vaultId of [vault, second]) {
+      const bytes = frame(id, vaultId), checksum = createHash("sha256").update(bytes).digest("hex");
+      await storage.putIfAbsent(objectKey("chunk", id, vaultId === vault ? undefined : vaultId), new Blob([bytes]).stream(), checksum);
+      db.writeTransaction(tx => tx.run("INSERT INTO object_catalog(vault_id,object_id,object_type,ciphertext_checksum,ciphertext_length,object_format_version,durable_created_at_ms) VALUES(?,?,'chunk',?,97,1,0)", [vaultId,id,checksum]));
+    }
+    const first = repo.catalog("", 1)[0]!;
+    expect(repo.catalog(`${first.vault_id}:${first.object_id}`, 1)[0]?.vault_id).not.toBe(first.vault_id);
+    expect(await service.scan(now)).toEqual({verified: 2, missing: 0, corrupt: 0});
+    db.writeTransaction(tx => tx.run("INSERT INTO upload_sessions(vault_id,session_id,principal_id,device_id,object_id,object_type,state,created_at_ms,updated_at_ms,expires_at_ms) VALUES(?,?,?,?,?,'chunk','active',1,1,?)", [second, second, second, second, id, now]));
+    expect(repo.markCandidates(now)).toBe(1);
+    const deleted = await service.collectOffline({assertExclusiveOffline() {}}, now + DAY);
+    expect(deleted.deleted).toBe(1);
+    expect(await storage.existsBatch([objectKey("chunk",id),objectKey("chunk",id,second)])).toEqual([false,true]);
+    expect(repo.catalog().map(row => String(row.vault_id))).toEqual([second]);
+  } finally { db.close(); await rm(root,{recursive:true,force:true}); }
+});
 
 test("UTC retention boundaries, daily and monthly newest by server time", () => {
   const row = (n: number, time: number) => ({ revision_id: String(n), accepted_sequence: n, server_created_at_ms: time });
@@ -214,7 +242,7 @@ test("offline staged backup restores private metadata and verifies copied cipher
     const restored = new ServerMetadataDatabase(join(stage, "metadata.sqlite"));
     try {
       const maintenance = new ServerMaintenance(new MaintenanceRepository(restored), stagedStorage);
-      expect(restored.pragmas().userVersion).toBe(4);
+      expect(restored.pragmas().userVersion).toBe(5);
       expect(await maintenance.scan(now)).toEqual({ verified: 1, missing: 0, corrupt: 0 });
       await stagedStorage.delete(objectKey("chunk", id));
       expect((await maintenance.scan(now)).missing).toBe(1);

@@ -40,7 +40,7 @@ export class ServerMaintenance {
     for (const row of rows) {
       if (signal?.aborted) throw signal.reason ?? new Error("Integrity scan cancelled");
       let status: keyof ScanCounts;
-      try { status = await verifyObject(this.storage, row, signal); }
+       try { status = await verifyObject(this.storage, row, this.metadata.legacyVault(row.vault_id), signal); }
       catch (error) {
         if (signal?.aborted) throw signal.reason ?? error;
         if (error instanceof ObjectStorageError && error.code === "NOT_FOUND") status = "missing";
@@ -50,7 +50,8 @@ export class ServerMaintenance {
       if (signal?.aborted) throw signal.reason ?? new Error("Integrity scan cancelled");
       if (this.metadata.setIntegrity(row, status, nowMs)) counts[status]++;
     }
-    return { cursor: rows.at(-1)?.object_id ?? cursor, done: rows.length < limit, counts };
+    const last = rows.at(-1);
+    return { cursor: last ? `${last.vault_id}:${last.object_id}` : cursor, done: rows.length < limit, counts };
   }
 
   gcDryRun(nowMs: number): { potential: number; eligible: number; pending: number; graceMs: number } {
@@ -78,7 +79,7 @@ export class ServerMaintenance {
       const row = this.metadata.eligible(candidate.vault_id, candidate.object_id, nowMs);
       if (!row) continue;
       try {
-        await this.storage.delete(objectKey(row.object_type, row.object_id));
+         await this.storage.delete(objectKey(row.object_type, row.object_id, this.metadata.legacyVault(row.vault_id) ? undefined : row.vault_id));
         this.metadata.finish(row);
         deleted++;
       } catch { failed++; /* Persist candidate for safe re-evaluation on next offline run. */ }
@@ -151,8 +152,8 @@ export class PeriodicIntegrityScanner {
   }
 }
 
-async function verifyObject(storage: Filesystem, row: ObjectCatalogRow, signal?: AbortSignal): Promise<"verified" | "corrupt"> {
-  const opened = await storage.open(objectKey(row.object_type, row.object_id));
+async function verifyObject(storage: Filesystem, row: ObjectCatalogRow, legacy: boolean, signal?: AbortSignal): Promise<"verified" | "corrupt"> {
+   const opened = await storage.open(objectKey(row.object_type, row.object_id, legacy ? undefined : row.vault_id));
   const reader = opened.stream.getReader();
   const cancel = () => { void reader.cancel().catch(() => undefined); };
   signal?.addEventListener("abort", cancel, { once: true });

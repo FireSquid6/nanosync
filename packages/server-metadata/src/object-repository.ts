@@ -50,6 +50,7 @@ export interface UploadResultRecord {
 }
 
 const OPERATION = "put-object-v1";
+const operation = (vaultId: VaultId) => `${OPERATION}.${vaultId}`;
 const QUERY_CHUNK = 400;
 
 export class ObjectCatalogRepository {
@@ -58,17 +59,21 @@ export class ObjectCatalogRepository {
   ping(): void {
     this.database.get("SELECT 1 AS ok");
   }
+  legacyVault(vaultId: VaultId): boolean {
+    return !!this.database.get("SELECT 1 FROM server_state WHERE vault_id=? AND singleton=1", [vaultId]);
+  }
 
   requireVault(vaultId: VaultId): void {
     const state = this.database.get<{ vault_id: string }>(
-      "SELECT vault_id FROM server_state WHERE singleton = 1",
+      "SELECT vault_id FROM server_state WHERE vault_id = ?",
+      [vaultId],
     );
-    if (!state)
+    if (!state && !this.database.get("SELECT 1 FROM server_state LIMIT 1"))
       throw new ObjectRepositoryError(
         "SERVER_UNINITIALIZED",
         "Server vault is not initialized",
       );
-    if (state.vault_id !== vaultId)
+    if (state?.vault_id !== vaultId)
       throw new ObjectRepositoryError(
         "VAULT_CONFLICT",
         "Authenticated vault does not match server vault",
@@ -138,7 +143,7 @@ export class ObjectCatalogRepository {
       [
         identity.principalId,
         identity.deviceId,
-        OPERATION,
+         this.legacyVault(identity.vaultId) ? OPERATION : operation(identity.vaultId),
         identity.idempotencyKey,
       ],
     );
@@ -164,7 +169,7 @@ export class ObjectCatalogRepository {
         [
           identity.principalId,
           identity.deviceId,
-          OPERATION,
+           tx.get("SELECT 1 FROM server_state WHERE singleton=1 AND vault_id=?", [identity.vaultId]) ? OPERATION : operation(identity.vaultId),
           identity.idempotencyKey,
         ],
       );
@@ -218,7 +223,7 @@ export class ObjectCatalogRepository {
         [
           identity.principalId,
           identity.deviceId,
-          OPERATION,
+           tx.get("SELECT 1 FROM server_state WHERE singleton=1 AND vault_id=?", [identity.vaultId]) ? OPERATION : operation(identity.vaultId),
           identity.idempotencyKey,
           identity.requestDigest,
           resultJson,
@@ -233,9 +238,10 @@ export class ObjectCatalogRepository {
 
 function requireVault(tx: MetadataTransaction, vaultId: VaultId): void {
   const state = tx.get<{ vault_id: string }>(
-    "SELECT vault_id FROM server_state WHERE singleton = 1",
+    "SELECT vault_id FROM server_state WHERE vault_id = ?",
+    [vaultId],
   );
-  if (!state)
+  if (!state && !tx.get("SELECT 1 FROM server_state LIMIT 1"))
     throw new ObjectRepositoryError(
       "SERVER_UNINITIALIZED",
       "Server vault is not initialized",

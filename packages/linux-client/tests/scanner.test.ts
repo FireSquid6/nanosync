@@ -21,6 +21,15 @@ function setup() {
   return { root, folder, local, prior, scanner };
 }
 function entry(plan: Awaited<ReturnType<LinuxScanner["plan"]>>, name: string) { return plan.manifest.entries.find(e => e.name === name)!; }
+test("root connection marker is never scanned or published", async () => {
+  const { folder, local, prior, scanner } = setup();
+  try {
+    writeFileSync(join(folder, ".nanosync"), JSON.stringify({ version: 1, connectionId: randomUUID() }), { mode: 0o600 });
+    expect(scanner.snapshot().map(item => item.path)).toEqual([""]);
+    const plan = await scanner.plan(prior, randomUUID(), device, key);
+    expect(plan.manifest.entries).toHaveLength(1);
+  } finally { local.close(); }
+});
 test("rename and atomic temp replacement keep stable IDs; changed content is streamed in natural order", async () => {
   const { folder, local, prior, scanner } = setup();
   try {

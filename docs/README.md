@@ -1,6 +1,6 @@
 # Nanosync
 
-Nanosync is a self-hosted, client-encrypted file synchronization system with portable client libraries and a Bun CLI for server administration and Linux synchronization. It is designed first for one user, one vault, and one server while preserving boundaries that can support additional storage backends and platforms later.
+Nanosync is a self-hosted, client-encrypted file synchronization system with portable client libraries and a Bun CLI for server administration and Linux synchronization. One owner can operate multiple independent vaults and local replicas on a server.
 
 ## Design goals
 
@@ -14,7 +14,7 @@ Nanosync is a self-hosted, client-encrypted file synchronization system with por
 
 ## Version 1 scope
 
-- One user and one vault per server.
+- One owner and multiple encrypted vaults per server; server-wide device enrollment, per-vault recovery keys.
 - Portable sync core and Linux filesystem/local-state libraries, with foreground one-shot and continuous CLI sync commands. Users choose how to launch continuous sync at startup; no background service or local IPC is shipped.
 - Android and iOS sync-client integration remains future platform work; a local-only Android system-files prototype is under `apps/android`.
 - Local server storage behind an abstract `Filesystem` interface.

@@ -50,18 +50,26 @@ test("Commander help and validation preserve structured errors across repeated m
       expect(await main(args)).toBe(2);
       expect(JSON.parse(String(stderr.mock.lastCall?.[0]))).toMatchObject({ state: "unknown", exitCode: 2 });
     }
-    expect(await main(["--server-dir", directory(), "server", "init", "--json"])).toBe(0);
-    expect(await main(["server", "--server-dir", directory(), "init"])).toBe(0);
+    const prior = process.env.NANOSYNC_PASSWORD;
+    process.env.NANOSYNC_PASSWORD = "owner-password-for-tests";
+    try {
+      expect(await main(["--server-dir", directory(), "server", "init", "--env", "--json"])).toBe(0);
+      expect(await main(["server", "--server-dir", directory(), "init", "--env"])).toBe(0);
+    } finally { if (prior === undefined) delete process.env.NANOSYNC_PASSWORD; else process.env.NANOSYNC_PASSWORD = prior; }
     expect(await main(["--bogus", "devices"])).toBe(2);
   } finally { stdout.mockRestore(); stderr.mockRestore(); }
 });
 
 test("server init provisions owner-only secrets and refuses overwrite", async () => {
   const root = directory(); chmodSync(root, 0o700);
-  expect(await main(["server", "init", "--server-dir", root])).toBe(0);
+  const prior = process.env.NANOSYNC_PASSWORD;
+  process.env.NANOSYNC_PASSWORD = "owner-password-for-tests";
+  try {
+  expect(await main(["server", "init", "--server-dir", root, "--env"])).toBe(0);
   expect(secureRead(join(root, "pepper.hex"))).toHaveLength(64);
   expect(secureRead(join(root, "bootstrap.hex"))).toHaveLength(64);
-  expect(await main(["server", "init", "--server-dir", root])).toBe(2);
+  expect(await main(["server", "init", "--server-dir", root, "--env"])).toBe(2);
+  } finally { if (prior === undefined) delete process.env.NANOSYNC_PASSWORD; else process.env.NANOSYNC_PASSWORD = prior; }
 });
 
 test("credential installation is no-replace, including a preexisting destination", () => {
