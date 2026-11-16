@@ -1,3 +1,4 @@
+import { randomUUID } from "./compatibility.ts";
 import { encryptFileChunks, IgnoreMatcher, manifestPaths, parseManifest, type ManifestEntry, type ManifestV1, type ScanPlan, type SyncScanner, type EncryptedObject } from "../../../packages/sync-core/src/index.ts";
 import { Bridge, fromBase64 } from "./bridge.ts";
 import { Journal, type Metadata } from "./journal.ts";
@@ -104,7 +105,7 @@ export class Scanner implements SyncScanner {
         }
       }
       const hinted = hintsPaths.get(meta.path);
-      const id = match?.id ?? (hinted?.kind === kind && !used.has(hinted.id) ? hinted.id : crypto.randomUUID());
+      const id = match?.id ?? (hinted?.kind === kind && !used.has(hinted.id) ? hinted.id : randomUUID());
       used.add(id); paths.set(meta.path, id);
       const parentPath = meta.path.includes("/") ? meta.path.slice(0, meta.path.lastIndexOf("/")) : "";
       const entry: ManifestEntry = { id, parentId: meta.path ? paths.get(parentPath)! : null, name: meta.path.split("/").pop()!, kind };

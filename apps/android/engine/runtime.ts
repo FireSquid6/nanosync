@@ -1,3 +1,4 @@
+import { missingRuntimeFeatures, nativeConveniences, randomUUID } from "./compatibility.ts";
 import { decodeRecoverySecret, unwrapMasterKey, HttpRemote, SyncEngine } from "../../../packages/sync-core/src/index.ts";
 import { Bridge, nativeFetch, type NativeHost } from "./bridge.ts";
 import { Journal } from "./journal.ts";
@@ -9,7 +10,8 @@ export interface RunContext {
   allowHttp?: boolean; mobileOverride?: boolean;
 }
 function featureCheck() {
-  if (!globalThis.crypto?.subtle || typeof crypto.randomUUID !== "function" || typeof ReadableStream !== "function" || typeof Request !== "function" || typeof Response !== "function" || typeof Headers !== "function" || typeof TextEncoder !== "function" || typeof TextDecoder !== "function") throw new Error("WebView lacks required WebCrypto, Streams, or text encoders");
+  const missing = missingRuntimeFeatures();
+  if (missing.length) throw new Error(`WebView missing required APIs: ${missing.join(", ")}`);
 }
 function hex(bytes: Uint8Array) { return Array.from(bytes, b => b.toString(16).padStart(2, "0")).join(""); }
 /** Native owns generation cancellation, scoped filesystem/server access and root lock. */
@@ -21,6 +23,7 @@ export function install(host: NativeHost, target: { Nanosync?: unknown; Nanosync
     running = true; let key: Uint8Array | undefined, secret: Uint8Array | undefined;
     try {
       featureCheck();
+      host.event(JSON.stringify({ type: "runtimeCapabilities", nativeConveniences }));
       const url = new URL(context.server.baseUrl);
       if (url.protocol !== "https:" && !(url.protocol === "http:" && context.allowHttp)) throw new Error("insecure server requires explicit HTTP permission");
       if (context.vault.effectiveMobileAllowed === false && !context.mobileOverride) throw new Error("mobile network not allowed");
@@ -44,7 +47,7 @@ export function install(host: NativeHost, target: { Nanosync?: unknown; Nanosync
       const remote = new HttpRemote({ baseUrl: context.server.baseUrl, token: context.server.token, vaultId: context.vault.vaultId, fetch: transport, journal });
       const applier = new Applier(bridge, journal, scanner, remote);
       const engine = new SyncEngine({ vaultId: context.vault.vaultId, deviceId: context.server.deviceId, masterKey: key, local: journal, scanner, remote,
-        randomUUID: () => crypto.randomUUID(), now: () => new Date().toISOString(),
+        randomUUID, now: () => new Date().toISOString(),
         apply: (manifest, sequence, borrowedKey) => applier.apply(manifest, sequence, borrowedKey),
         hydrate: async () => { throw new Error("Android hydration intents unsupported"); },
       });

@@ -1,3 +1,4 @@
+import { randomUUID } from "./compatibility.ts";
 import { manifestPaths, type Head, type ManifestV1, type SyncJournal, type ChunkJournal } from "../../../packages/sync-core/src/index.ts";
 import type { AdvanceHeadRequest, VisibleObjectReference } from "@nanosync/protocol";
 import { Bridge, fromBase64, toBase64 } from "./bridge.ts";
@@ -79,7 +80,7 @@ export class Journal implements SyncJournal, ChunkJournal {
   }
   async put(vault: string, ref: VisibleObjectReference, bytes: Uint8Array) {
     await this.prepareStorage();
-    const key = this.cacheKey(vault, ref), id = crypto.randomUUID();
+    const key = this.cacheKey(vault, ref), id = randomUUID();
     // Reserve cleanup ownership BEFORE native writes, including partial failures.
     this.state.garbage.push(id); this.save();
     await this.bridge.call("stageWrite", { id, offset: 0, dataBase64: toBase64(bytes) });

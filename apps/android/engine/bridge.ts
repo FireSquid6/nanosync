@@ -1,3 +1,4 @@
+import { randomUUID } from "./compatibility.ts";
 export interface NativeHost {
   sync(method: string, json: string): string;
   request(method: string, json: string, id: string): void;
@@ -16,7 +17,7 @@ export class Bridge {
   sync<T>(method: string, args: unknown = {}): T { return unwrap(JSON.parse(this.host.sync(method, JSON.stringify(args)))) as T; }
   call<T>(method: string, args: unknown = {}): Promise<T> {
     if (this.pending.size >= 16) return Promise.reject(new Error("too many native requests"));
-    const id = crypto.randomUUID();
+    const id = randomUUID();
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`native ${method} timed out`)); }, this.timeout);
       this.pending.set(id, { resolve: value => resolve(value as T), reject, timer });

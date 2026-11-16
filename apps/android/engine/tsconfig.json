@@ -6,5 +6,5 @@
     "baseUrl": "../../..",
     "paths": { "@nanosync/protocol": ["packages/protocol/src/index.ts"] }
   },
-  "include": ["index.ts", "runtime.ts", "bridge.ts", "journal.ts", "scanner.ts", "apply.ts"]
+  "include": ["index.ts", "runtime.ts", "bridge.ts", "journal.ts", "scanner.ts", "apply.ts", "compatibility.ts", "polyfills.d.ts"]
 }

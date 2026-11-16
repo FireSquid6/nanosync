@@ -1,3 +1,4 @@
+import { randomUUID } from "./compatibility.ts";
 import { encryptChunk, manifestPaths, type HttpRemote, type ManifestV1 } from "../../../packages/sync-core/src/index.ts";
 import { Bridge, fromBase64, toBase64 } from "./bridge.ts";
 import { Journal, type ApplyIntent, type Metadata, type SavedEntry } from "./journal.ts";
@@ -26,7 +27,7 @@ export class Applier {
     let intent = this.journal.state.applies.find(i => i.revision === manifest.revisionId);
     if (this.journal.state.applies.length && !intent) throw new Error("different apply already pending");
     if (!intent) {
-      intent = { id: crypto.randomUUID(), revision: manifest.revisionId, sequence, state: "applying", files: {}, baseline: structuredClone(this.journal.state.entries) };
+      intent = { id: randomUUID(), revision: manifest.revisionId, sequence, state: "applying", files: {}, baseline: structuredClone(this.journal.state.entries) };
       this.journal.state.applies.push(intent); this.journal.save();
     }
     try { await this.execute(manifest, sequence, key, intent); }
@@ -93,7 +94,7 @@ export class Applier {
       }
       if (!file) {
         const current = await this.guard(path, baseline.get(path));
-        file = { id: crypto.randomUUID(), path, offset: 0, expected: current ? { size: current.size, modified: current.modified, ...(current.fileKey ? { fileKey: current.fileKey } : {}) } : { missing: true } };
+        file = { id: randomUUID(), path, offset: 0, expected: current ? { size: current.size, modified: current.modified, ...(current.fileKey ? { fileKey: current.fileKey } : {}) } : { missing: true } };
         intent.files[entry.id] = file; this.journal.save();
       } else {
         // A recorded topology removal intentionally leaves the old destination absent.
