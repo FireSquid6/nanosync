@@ -171,3 +171,59 @@ Changed paths:
 - `packages/server-core/tests/maintenance.test.ts`
 - `packages/sync-core/tests/remote.test.ts`
 - `docs/implementation-progress.md`
+
+## Opt-in browser authentication and owner API (completed)
+
+### Public contracts / integration
+
+- `ServerConfigInput` / CLI runtime support `webUi` (`--web-ui`), `externalOrigin` (`--external-origin`), and exact-IP `trustedProxyAddresses` (CLI `--trusted-proxy` accepts one address). Browser endpoints and assets return 404 without opt-in. `runServer` wires one shared `OwnerOperations` instance to the same storage instance used by sync and cleanup.
+- `ServerDependencies.owner` is required alongside concrete `authentication` when enabled. Optional `adminAssets: AdminAssets` is an explicit pathname → `{body: string | Uint8Array, contentType: string}` map; no implicit filesystem serving, fallback route, or frontend bundle is supplied. Frontend work must inject `/admin` and each asset. Assets receive no-store, nosniff and a restrictive same-origin CSP.
+- `BrowserAdministration` handles only `/admin/api`: POST/GET/DELETE `session`, GET `devices` (devices plus pending enrollments/codes), POST `devices/:uuid/approve|deny|revoke` with `{}`, GET/POST `vaults`, POST `vaults/:uuid/rename` with `{name}`, POST `vaults/:uuid/delete` with `{confirmName,password}`, and GET `activity?limit=1..100`. All owner changes use `OwnerOperations` and trusted browser provenance, never client-supplied actors. Encrypted creation keeps the existing strict encrypted owner request/replay contract. Deletion confirms the current exact name after password verification and acknowledges the durable tombstone, not physical cleanup completion.
+- Session cookies are `nanosync_admin`, HttpOnly, SameSite=Strict, Path=/admin, Secure for HTTPS; login has no Max-Age/Expires. Tokens and CSRF secrets are random 256-bit values in handler-local memory only. Exact 30-minute idle / 12-hour absolute expiry uses `ServerDependencies.clock`. Logout clears the session and expires its cookie; a fresh handler/restart rejects all old cookies. At most 1,000 sessions are retained; expired sessions are purged on requests.
+- Login accepts exactly `{password}` and requires an exact allowed Origin plus a nonempty `X-Nanosync-CSRF` custom header. This is the login-CSRF/preflight defense; no CORS permission is granted. Login/GET session return `csrfToken`, required in that header on authenticated mutations. Foreign/null origins fail; browser routes reject Authorization headers entirely. Browser cookies mint no metadata password/enrollment/device session and cannot authorize any sync/recovery/device endpoint.
+- Browser password checks reserve at most five attempts per rolling minute **before** asynchronous verification, shared across login and deletion, including successful attempts. Failures additionally enter the existing persistent account lockout. `AuthenticationService.verifyOwnerPassword` verifies without minting a bearer and rechecks lockout after verification. HTTP 429 includes Retry-After.
+- Browser nonloopback HTTP fails regardless of insecure-sync acknowledgement. Trusted proxy addresses require a configured HTTPS external origin; only the actual Bun socket peer (`requestIP`) matches the allowlist. The configured origin is authoritative for trusted peers; no Forwarded/X-Forwarded-* headers are consumed. Proxies must enforce the configured public HTTPS origin and prevent untrusted access via the trusted backend peer. Direct browser requests must use HTTPS or loopback HTTP on a loopback listener and match the configured origin, if any.
+- Capabilities require `webAdministration: {enabled:boolean,url?:string}`. URL is emitted only from a validated configured external origin, never request Host or forwarding headers. Enabled without an explicit origin advertises no URL. Protocol parsing strictly rejects unsafe URLs and disabled-with-URL advertisements.
+- Removed device-authorized POST `/v1/vaults` and rename mutations (404 after device authentication); GET vault list and recovery-wrap remain device-authorized. Existing device-admin routes retain independent authority/safeguards. The subsequent CLI redesign must remove the now-unusable legacy client create/rename commands; tests now provision through owner browser APIs instead.
+
+### Evidence
+
+- Initial red at `createServerHandler`: enabled browser login returned 404 rather than enforcing login origin/CSRF; implemented the adapter and verified green.
+- Focused handler tests cover disabled routes/assets for every method, login CSRF including null/foreign origins, cookie scope/lifetime, logout, restart invalidation, exact idle/absolute expiry, authority separation in both directions, approve/deny/revoke, activity bounds/provenance, spoofed forwarding/Host, explicit proxy peer matching, secure cookies, and password/deletion throttling.
+- Five paused asynchronous verifier jobs plus a sixth HTTP login demonstrate pre-verification reservation: sixth returns 429 without entering the verifier. Persistent failure lockout survives a new handler and elapsed memory rate window.
+- Real-server CLI integration now creates encrypted owner genesis via `/admin/api`, replays identical ciphertext safely, recovers client keys through retained approved-device recovery access, renames/deletes via owner authority, refuses wrong deletion names/passwords, observes terminal 410 immediately, preserves unrelated vaults, and synchronizes two real replicas. Submitted creation JSON contains neither the plaintext key nor displayed recovery secret.
+- `bun test packages/server-core packages/server-metadata packages/protocol`: **121 passed, 0 failed** before final additional parallel/password and capability validation assertions; final checks recorded below.
+- `bun run typecheck`: **all eight packages passed**.
+- `bun test`: **260 passed, 0 failed** before the final parallel-password regression; final checks recorded below.
+
+### Review handoff
+
+Key functions/types: `BrowserAdministration`, `AdminAssets`, `AuthenticationService.verifyOwnerPassword`, `createServerConfig`, `createServerHandler`, `startServer`, `parseCapabilityResponse`, `runServer`, `handleVaultRoute`.
+
+Changed paths:
+- `packages/server-core/src/browser-admin.ts`
+- `packages/server-core/src/auth-service.ts`
+- `packages/server-core/src/config.ts`
+- `packages/server-core/src/index.ts`
+- `packages/server-core/src/vault-routes.ts`
+- `packages/server-core/tests/browser.test.ts`
+- `packages/protocol/src/envelopes.ts`
+- `packages/protocol/tests/protocol.test.ts`
+- `packages/cli/src/server.ts`
+- `packages/cli/src/main.ts`
+- `packages/cli/tests/multi-vault.test.ts`
+- `docs/architecture.md`
+- `docs/security.md`
+- `docs/sync-protocol.md`
+- `docs/clients-and-operations.md`
+- `docs/implementation-progress.md`
+
+Frontend/Paper UI integration, browser recovery-delivery acknowledgement UI,
+and the full client/server CLI redesign remain subsequent steps. No default UI
+or Playwright UI coverage is claimed by this backend slice.
+
+Final verification for this step:
+- `bun test packages/server-core packages/server-metadata packages/protocol`: **122 passed, 0 failed**.
+- `bun run typecheck`: **all eight packages passed**.
+- `bun test`: **261 passed, 0 failed**, no unhandled errors.
+- `git diff --check`: passed.

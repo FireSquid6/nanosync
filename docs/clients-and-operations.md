@@ -226,3 +226,18 @@ Metrics labels must avoid unbounded identifiers such as chunk IDs, revision IDs,
 - Rate-limit authentication and expensive presence queries.
 - Enforce configured limits before accepting large request bodies.
 - Use temporary files and atomic publication for local object writes.
+
+### Browser API runtime options
+
+Browser administration is disabled by default. Enable with
+`nanosync server run --server-dir <dir> --web-ui`. For an existing HTTPS proxy,
+add `--external-origin https://sync.example --trusted-proxy <exact-peer-IP>`.
+The insecure-sync exposure acknowledgement never permits public browser HTTP.
+No forwarded headers establish trust. See [security.md](security.md) before
+exposing the backend listener. The runtime accepts `webUi`, `externalOrigin`,
+`trustedProxyAddresses`, and an explicit `adminAssets` map; this backend step
+provides no default frontend bundle yet. A UI integrator supplies `/admin` and
+each asset explicitly as `{body,contentType}` entries on the existing listener.
+Client provisioning mutations have been removed; the legacy client CLI create/
+rename commands now fail until the subsequent command-tree redesign removes
+them. Use the shared owner operations/API for provisioning.

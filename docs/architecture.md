@@ -212,3 +212,17 @@ Migration 4 adds durable offline GC candidate marks; migrations 1–3 and their 
 ### Shared owner administration foundation
 
 `OwnerOperations` in server-core composes the existing transactional authentication and vault repositories for server-local and browser callers. Owner actors are explicitly `{ origin: 'server-local' | 'browser', actorId: string | null }`, separate from device authorization. Metadata migration 6 adds action provenance, complete encrypted-creation replay digests, and permanent vault-deletion identifiers with pending/complete cleanup state. Tombstones gate vault admission and transactional publication/upload commits; physical restart-safe cleanup and its writer coordination are a separate integration step, not implemented by marking a vault deleted. See [implementation-progress.md](implementation-progress.md) for integration contracts and remaining work.
+
+### Browser owner adapter
+
+`BrowserAdministration` adapts `/admin/api` to the same `OwnerOperations` used
+by local administration. It owns only ephemeral session authentication,
+transport/origin/CSRF checks, input limits, password throttling and destructive
+confirmation. Browser sessions do not enter metadata password/device session
+tables. `createServerHandler` creates this adapter only with `webUi: true` and
+requires concrete authentication plus shared owner operations. `startServer`
+supplies the actual Bun socket peer for exact trusted-proxy matching; no
+forwarding-header parsing is involved. UI assets are an explicit injectable
+map until the frontend step, served on the existing listener with restrictive
+CSP, nosniff and no-store headers. Device vault provisioning mutations are
+removed, while list/recovery and ordinary sync keep their bearer boundary.

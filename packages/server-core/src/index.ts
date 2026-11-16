@@ -1,3 +1,5 @@
+import { BrowserAdministration, type AdminAssets } from "./browser-admin.ts";
+import type { OwnerOperations } from "./owner-operations.ts";
 import {
   CHUNK_SIZE, MAX_IDEMPOTENCY_KEY_LENGTH, MAX_JSON_METADATA_BYTES, MAX_PAGE_SIZE, MAX_PARENTS,
   MAX_PRESENCE_QUERY, MAX_REFERENCES_PER_REVISION, OBJECT_FORMAT_VERSION, OBJECT_TYPES,
@@ -33,6 +35,10 @@ export interface RawAuthorizationContext { principalId: unknown; deviceId: unkno
 export type Authorize = (request: Request) => Promise<RawAuthorizationContext>;
 export type AuthorizeBootstrap = (request: Request) => Promise<boolean>;
 export interface ServerDependencies {
+  owner?: OwnerOperations;
+  adminAssets?: AdminAssets;
+  /** Runtime peer address only, never a forwarding header. */
+  peerAddress?: (request: Request) => string | null;
   filesystem: Filesystem;
   catalog: ObjectCatalogRepository;
   revisions: RevisionRepository;
@@ -50,6 +56,8 @@ export interface ServerDependencies {
 export function createServerHandler(dependencies: ServerDependencies): (request: Request) => Promise<Response> {
   if (dependencies.authentication && dependencies.authorize) throw new TypeError("Configure concrete authentication or an injected test authorizer, not both");
   const config = dependencies.config ?? createServerConfig();
+  if (config.webUi && (!dependencies.authentication || !dependencies.owner)) throw new TypeError("webUi requires authentication and owner operations");
+  const browser = config.webUi ? new BrowserAdministration(config, dependencies.authentication!, dependencies.owner!, dependencies.clock ?? Date.now, dependencies.adminAssets) : null;
   const service = new ObjectService({ filesystem: dependencies.filesystem, catalog: dependencies.catalog, maximumObjectSize: config.maximumObjectSize, clock: dependencies.clock });
   const revisionService = new RevisionService({ filesystem: dependencies.filesystem, revisions: dependencies.revisions, clock: dependencies.clock });
   const bootstrapService = dependencies.bootstrap ? new BootstrapService(dependencies.bootstrap, dependencies.filesystem, dependencies.passwordHasher ?? new Argon2idPasswordHasher(), dependencies.clock) : null;
@@ -58,9 +66,20 @@ export function createServerHandler(dependencies: ServerDependencies): (request:
   return async (request: Request): Promise<Response> => {
     try {
       const url = new URL(request.url); const pathname = url.pathname;
+      const trustedProxy = config.trustedProxyAddresses.includes(dependencies.peerAddress?.(request) ?? "");
+      if (pathname === "/admin" || pathname.startsWith("/admin/")) {
+        if (!browser) throw new ApiError(404, "NOT_FOUND", "Route not found");
+        return await browser.handle(request, trustedProxy);
+      }
       if (pathname === "/v1/capabilities") {
         if (request.method !== "GET") throw new ApiError(405, "MALFORMED_REQUEST", "Method is not supported for this route", { allow: "GET" });
         return json({
+          webAdministration: (() => {
+            if (!browser) return { enabled: false };
+            // Never derive a published link from Host or forwarding headers.
+            const origin = config.externalOrigin;
+            return origin ? { enabled: true, url: `${origin}/admin` } : { enabled: true };
+          })(),
           protocolVersions: [PROTOCOL_VERSION], revisionFormatVersions: [REVISION_FORMAT_VERSION], objectFormatVersions: [OBJECT_FORMAT_VERSION], objectTypes: [...OBJECT_TYPES],
           limits: {
             maximumObjectCiphertextBytes: config.maximumObjectSize, maximumReferencesPerRevision: MAX_REFERENCES_PER_REVISION,
@@ -77,7 +96,7 @@ export function createServerHandler(dependencies: ServerDependencies): (request:
       }
       if (pathname === "/v1/vaults" || /^\/v1\/vaults\/[^/]+\/rename$/.test(pathname)) {
         if (!dependencies.authentication || !dependencies.vaults) throw new ApiError(503, "UNAVAILABLE", "Vault service is unavailable");
-        return handleVaultRoute(request, pathname, dependencies.authentication, dependencies.vaults, dependencies.filesystem, dependencies.clock ?? Date.now);
+        return await handleVaultRoute(request, pathname, dependencies.authentication, dependencies.vaults);
       }
       if (pathname === "/v1/bootstrap/status") {
         if (request.method !== "GET") throw new ApiError(405, "MALFORMED_REQUEST", "Method is not supported for this route", { allow: "GET" });
@@ -120,7 +139,11 @@ export function createServerHandler(dependencies: ServerDependencies): (request:
         return await handleRevisionRoute(request, pathname, context, revisionService);
       }
       throw new ApiError(404, "NOT_FOUND", "Route not found");
-    } catch (error) { return errorResponse(error); }
+    } catch (error) {
+      const response = errorResponse(error);
+      if (new URL(request.url).pathname.startsWith('/admin')) response.headers.set('cache-control', 'no-store');
+      return response;
+    }
   };
 }
 
@@ -161,6 +184,11 @@ async function authorize(authorizer: Authorize | undefined, request: Request): P
 
 export function startServer(dependencies: ServerDependencies): ReturnType<typeof Bun.serve> {
   const config = dependencies.config ?? createServerConfig();
-  return Bun.serve({ hostname: config.hostname, port: config.port, fetch: createServerHandler({ ...dependencies, config }) });
+  let server: ReturnType<typeof Bun.serve>;
+  const handler = createServerHandler({ ...dependencies, config, peerAddress: request => server.requestIP(request)?.address ?? null });
+  server = Bun.serve({ hostname: config.hostname, port: config.port, fetch: handler });
+  return server;
 }
 export * from "./owner-operations.ts";
+
+export * from "./browser-admin.ts";

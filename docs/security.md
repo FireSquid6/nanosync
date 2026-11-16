@@ -224,3 +224,39 @@ Before implementation is considered production-ready, review:
 The owner-administration redesign intentionally permits server-local provisioning to handle plaintext vault keys and new recovery material transiently on the operator machine. It must not persist those plaintext secrets. Browser provisioning instead submits only existing-format encrypted frames, a recovery wrap, and a MAC-authenticated genesis envelope. Owner-created genesis uses reserved author UUID `00000000-0000-4000-8000-000000000001` in both manifest and envelope: this is an author label, never an enrolled device or credential. Encryption and MAC formats are unchanged. A malicious server can deliver malicious browser code; browser provisioning does not defend against that threat.
 
 Shared owner operations require an already authenticated owner boundary; their actor object records provenance, not proof of authentication. Browser session authentication, CSRF, transport policy, and deletion confirmations belong to the invoking surface. Verification codes are public comparisons of immutable enrollment identity/fingerprint, never authenticators.
+
+### Opt-in browser administration
+
+`server run --web-ui` enables the separate `/admin/api` owner boundary. Without
+that flag all `/admin` assets and endpoints return 404. Browser sessions are
+256-bit random, runtime-memory-only capabilities, never enrollment/device
+credentials. Their cookies are HttpOnly, SameSite=Strict, Path=/admin, Secure
+under HTTPS, with no persistence lifetime. Logout removes the session; restart
+invalidates all sessions. Exact 30-minute idle and 12-hour absolute limits use
+the injected server clock. At most 1,000 concurrent sessions are retained.
+
+Every mutation, **including login**, requires an exact allowed `Origin` and a
+nonempty `X-Nanosync-CSRF` header; authenticated mutations must additionally
+match the random token returned by session login/inspection. The login header
+is a custom-header/preflight defense, not a previously issued secret. No CORS
+permission is granted. Foreign/null origins are rejected. Browser routes reject
+Authorization headers rather than falling back to device or enrollment tokens.
+Cookies never authorize device, recovery, revision or object routes.
+
+Browser password verification (login and deletion combined) reserves at most
+five attempts per rolling minute per runtime before asynchronous Argon2 work,
+including successful attempts. Failed passwords also use the persistent shared
+account lockout. Success mints no device token. Deletion requires the current
+exact vault name and password, then uses shared owner tombstoning/cleanup.
+
+Nonloopback browser HTTP is forbidden even with `--acknowledge-exposure`.
+For TLS termination configure `--external-origin https://sync.example` and
+`--trusted-proxy <exact-IP>`. The programmatic `trustedProxyAddresses` option
+accepts multiple exact IPs. Only Bun's observed socket peer establishes proxy
+trust; forwarding headers are ignored entirely. The configured external origin
+is authoritative for trusted peers (proxies must restrict public host/origin
+routing accordingly). Without proxy trust, the actual request URL must be HTTPS
+or loopback HTTP on a loopback listener and must match any configured origin.
+Do not expose a trusted proxy's backend listener to untrusted users on that
+same peer address. Capability links use only the validated configured origin,
+never Host/Forwarded headers; without it the enabled capability omits its URL.

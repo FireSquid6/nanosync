@@ -1,11 +1,11 @@
 import { timingSafeEqual, randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { createServerConfig, startServer, AuthenticationService, PeriodicIntegrityScanner, ServerMaintenance, Argon2idPasswordHasher } from "@nanosync/server-core";
+import { OwnerOperations, type AdminAssets, createServerConfig, startServer, AuthenticationService, PeriodicIntegrityScanner, ServerMaintenance, Argon2idPasswordHasher } from "@nanosync/server-core";
 import { AuthenticationRepository, BootstrapRepository, MaintenanceRepository, ObjectCatalogRepository, RevisionRepository, ServerMetadataDatabase, VaultRepository } from "@nanosync/server-metadata";
 import { LocalFilesystem } from "@nanosync/server-object-storage";
 import { privateDirectory, provisionSecret, secureRead } from "./security.ts";
 
-export interface RunServerOptions { directory: string; host?: string; port?: number; acknowledgeExposure?: boolean; scanIntervalMs?: number }
+export interface RunServerOptions { webUi?: boolean; externalOrigin?: string; trustedProxyAddresses?: string[]; adminAssets?: AdminAssets; directory: string; host?: string; port?: number; acknowledgeExposure?: boolean; scanIntervalMs?: number }
 export async function initializeServerOwner(directory: string, password: string): Promise<void> {
   if (!password || Buffer.byteLength(password) > 1024) throw new Error("password must be 1..1024 bytes");
   const root = privateDirectory(directory), bytes = new TextEncoder().encode(password);
@@ -54,6 +54,9 @@ export async function localAdminReport(directory: string, name: string): Promise
 export async function runServer(options: RunServerOptions): Promise<{ stop(): Promise<void>; url: string }> {
   const directory = privateDirectory(options.directory);
   const config = createServerConfig({
+    webUi: options.webUi,
+    externalOrigin: options.externalOrigin,
+    trustedProxyAddresses: options.trustedProxyAddresses,
     hostname: options.host,
     port: options.port,
     acknowledgeInsecureNonLoopback: options.acknowledgeExposure,
@@ -88,6 +91,8 @@ export async function runServer(options: RunServerOptions): Promise<{ stop(): Pr
       onError: () => console.error("integrity scan failed; investigate storage"),
     });
     const server = startServer({
+      owner: new OwnerOperations(database, filesystem),
+      adminAssets: options.adminAssets,
       filesystem,
       catalog: new ObjectCatalogRepository(database),
       revisions: new RevisionRepository(database),

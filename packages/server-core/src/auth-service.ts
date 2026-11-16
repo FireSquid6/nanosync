@@ -50,6 +50,28 @@ export class AuthenticationService {
     } finally { bytes.fill(0); }
   }
 
+  /** Owner-password verification without minting enrollment/device authority. */
+  async verifyOwnerPassword(password: string): Promise<void> {
+    const now = this.now();
+    const locked = this.repository.lockoutRemaining(now);
+    if (locked > 0) throw rateLimit(locked);
+    const bytes = new TextEncoder().encode(password);
+    try {
+      let accepted = false;
+      try {
+        const verifier = this.repository.passwordVerifier();
+        accepted = !!verifier && await this.password.verify!(bytes, verifier);
+      } catch { /* Match the device password endpoint's generic authentication failure. */ }
+      if (!accepted) {
+        const remaining = this.repository.loginFailed(now);
+        if (remaining > 0) throw rateLimit(remaining);
+        throw unauthorized();
+      }
+      const remaining = this.repository.lockoutRemaining(this.now());
+      if (remaining > 0) throw rateLimit(remaining);
+    } finally { bytes.fill(0); }
+  }
+
   isDesignatedInitialDevice(deviceId: DeviceId): boolean { return this.repository.isDesignatedInitialDevice(deviceId); }
   initialAuthorizationRequired(token: string, deviceId: DeviceId): boolean { return this.repository.initialAuthorizationRequired(this.tokenDigest(token), deviceId, this.now()); }
   createEnrollment(token: string, input: EnrollmentCreateRequest, initialAuthorizationVerified = false): Response {

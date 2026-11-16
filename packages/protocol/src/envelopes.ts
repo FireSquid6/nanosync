@@ -33,6 +33,7 @@ export interface RevisionEnvelope {
   referenceSetMac: ReferenceSetMac;
 }
 export interface CapabilityResponse {
+  webAdministration: { enabled: boolean; url?: string };
   protocolVersions: number[];
   revisionFormatVersions: number[];
   objectFormatVersions: number[];
@@ -170,7 +171,17 @@ function parseRevisionEnvelopeParents(value: unknown, path: string, minimumParen
 
 const LIMIT_FIELDS = ["maximumObjectCiphertextBytes", "maximumReferencesPerRevision", "maximumParents", "maximumPresenceQuery", "maximumPageSize", "maximumJsonMetadataBytes", "maximumIdempotencyKeyLength", "chunkSizeBytes"];
 export function parseCapabilityResponse(value: unknown, path = "capabilities"): CapabilityResponse {
-  const v = object(value, path, ["protocolVersions", "revisionFormatVersions", "objectFormatVersions", "objectTypes", "limits"]);
+  const v = object(value, path, ["protocolVersions", "revisionFormatVersions", "objectFormatVersions", "objectTypes", "limits", "webAdministration"]);
+  const web = object(v.webAdministration, `${path}.webAdministration`, typeof v.webAdministration === 'object' && v.webAdministration !== null && Object.hasOwn(v.webAdministration, 'url') ? ['enabled', 'url'] : ['enabled']);
+  if (typeof web.enabled !== 'boolean') throw new ProtocolValidationError('INVALID_TYPE', `${path}.webAdministration.enabled`, 'boolean required');
+  let webAdministration: CapabilityResponse['webAdministration'] = { enabled: web.enabled };
+  if (web.url !== undefined) {
+    let url: URL;
+    try { if (typeof web.url !== 'string') throw new Error(); url = new URL(web.url); } catch { throw new ProtocolValidationError('INVALID_VALUE', `${path}.webAdministration.url`, 'invalid administration URL'); }
+    const loopback = url.hostname === 'localhost' || url.hostname === '[::1]' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(url.hostname);
+    if (!web.enabled || url.username || url.password || url.pathname !== '/admin' || url.search || url.hash || (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback))) throw new ProtocolValidationError('INVALID_VALUE', `${path}.webAdministration.url`, 'unsafe administration URL');
+    webAdministration = { enabled: true, url: web.url as string };
+  }
   const versions = (input: unknown, child: string, supported: number): number[] => {
     const result = array(input, child).map((item, i) => version(item, `${child}[${i}]`, supported));
     if (result.length !== 1) throw new ProtocolValidationError("INVALID_VALUE", child, "v1 requires exactly one advertised version");
@@ -190,7 +201,7 @@ export function parseCapabilityResponse(value: unknown, path = "capabilities"): 
     maximumIdempotencyKeyLength: integer(limits.maximumIdempotencyKeyLength, `${path}.limits.maximumIdempotencyKeyLength`, 1, MAX_IDEMPOTENCY_KEY_LENGTH),
     chunkSizeBytes: integer(limits.chunkSizeBytes, `${path}.limits.chunkSizeBytes`, CHUNK_SIZE, CHUNK_SIZE),
   };
-  return { protocolVersions: versions(v.protocolVersions, `${path}.protocolVersions`, 1), revisionFormatVersions: versions(v.revisionFormatVersions, `${path}.revisionFormatVersions`, 1), objectFormatVersions: versions(v.objectFormatVersions, `${path}.objectFormatVersions`, 1), objectTypes: types, limits: parsedLimits };
+  return { webAdministration, protocolVersions: versions(v.protocolVersions, `${path}.protocolVersions`, 1), revisionFormatVersions: versions(v.revisionFormatVersions, `${path}.revisionFormatVersions`, 1), objectFormatVersions: versions(v.objectFormatVersions, `${path}.objectFormatVersions`, 1), objectTypes: types, limits: parsedLimits };
 }
 
 export function parseAdvanceHeadRequest(value: unknown, path = "request"): AdvanceHeadRequest {

@@ -14,6 +14,7 @@ import { createConnection, discoverConnection, repairConnection } from "./connec
 import { createVault, enrollServer, key, prompt, secretPrompt, server as selectServer, servers, unlockVault } from "./vault-client.ts";
 
 type CliOptions = { clientDir?: string; syncDir?: string; continuous?: boolean; serverDir?: string; url?: string; proofFile?: string;
+  webUi?: boolean; externalOrigin?: string; trustedProxy?: string;
   deviceId?: string; recoveryFile?: string; host?: string; port?: string; acknowledgeExposure?: boolean;
   json?: boolean; env?: boolean; name?: string; server?: string; vault?: string; path?: string; watch?: boolean;
   confirmNonempty?: boolean; repair?: string; recoveryOutput?: string; waitMs?: string };
@@ -80,7 +81,7 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
       });
     flags(
       server.command("run").description("Run server until SIGINT or SIGTERM"),
-      "--server-dir <dir>", "--host <host>", "--port <port>", "--acknowledge-exposure", ...common,
+      "--server-dir <dir>", "--host <host>", "--port <port>", "--acknowledge-exposure", "--web-ui", "--external-origin <origin>", "--trusted-proxy <ip>", ...common,
     )
       .action(async (_options: CliOptions, command: Command) => {
         const config = opts(command);
@@ -89,6 +90,9 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
           host: config.host,
           port: config.port === undefined ? undefined : Number(config.port),
           acknowledgeExposure: config.acknowledgeExposure === true,
+          webUi: config.webUi === true,
+          externalOrigin: config.externalOrigin,
+          trustedProxyAddresses: config.trustedProxy ? [config.trustedProxy] : undefined,
         });
         console.error(`Server listening at ${running.url}`);
         await new Promise<void>(resolveStop => {
