@@ -111,9 +111,14 @@ export class Scanner implements SyncScanner {
       const entry: ManifestEntry = { id, parentId: meta.path ? paths.get(parentPath)! : null, name: meta.path.split("/").pop()!, kind };
       if (match?.conflict) entry.conflict = match.conflict;
       if (!meta.directory) {
-        const chunks: { objectId: string; length: number }[] = [];
-        for await (const object of encryptFileChunks(this.source(meta), key, prior.vaultId)) chunks.push({ objectId: object.reference.objectId, length: Math.min(4194304, meta.size - chunks.length * 4194304) });
-        if (await this.digest(meta) !== sha) throw new Error("file content changed while chunking");
+        const unchanged = match?.kind === "file" && match.size === meta.size && match.sha256 === sha;
+        // The prior tree is authenticated. A fresh native SHA/size match permits
+        // reusing its canonical chunk IDs, even after a rename/inode replacement.
+        const chunks: { objectId: string; length: number }[] = unchanged && match ? match.chunks!.map(chunk => ({ ...chunk })) : [];
+        if (!unchanged) {
+          for await (const object of encryptFileChunks(this.source(meta), key, prior.vaultId)) chunks.push({ objectId: object.reference.objectId, length: Math.min(4194304, meta.size - chunks.length * 4194304) });
+          if (await this.digest(meta) !== sha) throw new Error("file content changed while chunking");
+        }
         Object.assign(entry, { size: meta.size, sha256: sha, executable: match?.executable ?? false, chunks }); sources.set(id, { meta, sha: sha! });
       }
       entries.push(entry);
@@ -164,6 +169,10 @@ export class Scanner implements SyncScanner {
         const yielded = new Set<string>();
         for (const entry of manifest.entries) {
           const source = sources.get(entry.id); if (!source) continue;
+          // Known refs already have authenticated remote bytes. Commit still
+          // rechecks every local source; missing-ref repair takes the full guarded
+          // reopen/encrypt path below and verifies all generated chunk IDs.
+          if (entry.chunks!.every(chunk => known.has(chunk.objectId))) continue;
           if (await scanner.digest(source.meta) !== source.sha) throw new Error("source changed before publication");
           let index = 0;
           for await (const object of encryptFileChunks(scanner.source(source.meta), key, prior.vaultId)) {
