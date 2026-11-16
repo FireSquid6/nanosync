@@ -26,7 +26,8 @@ export function install(host: NativeHost, target: { Nanosync?: unknown; Nanosync
       host.event(JSON.stringify({ type: "runtimeCapabilities", nativeConveniences }));
       const url = new URL(context.server.baseUrl);
       if (url.protocol !== "https:" && !(url.protocol === "http:" && context.allowHttp)) throw new Error("insecure server requires explicit HTTP permission");
-      if (context.vault.effectiveMobileAllowed === false && !context.mobileOverride) throw new Error("mobile network not allowed");
+      // This flag is a policy, not the current transport. Wi-Fi-only runs are
+      // valid on Wi-Fi; native HTTP checks actual routing before every request.
       const transport = nativeFetch(bridge, context.server.baseUrl);
       if (context.vault.recoveryKey) {
         const recoveryText = context.vault.recoveryKey; delete context.vault.recoveryKey;

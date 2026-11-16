@@ -8,6 +8,21 @@ bun install
 
 To run the Linux CLI and server from source, see [packages/cli/README.md](packages/cli/README.md).
 
+## Android
+
+The native Android 12+ dashboard connects existing vaults to shared local folders,
+with manual and opt-in background synchronization. See
+[apps/android/README.md](apps/android/README.md) for the pinned Nix toolchain,
+APK builds, enrollment, permissions, and emulator/device verification.
+
+```sh
+nix develop .#android-build
+bun install --frozen-lockfile
+bun run build:android
+```
+
+## Linux
+
 Before importing a documents folder, put a local `.nanosyncignore` at its root to
 exclude virtual environments (for example `.venv/`), caches, and other data that
 cannot safely be synced. Excluded paths are never followed, uploaded, downloaded,

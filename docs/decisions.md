@@ -7,7 +7,7 @@
 | Initial audience | One household or small trusted team, initially one user |
 | Server tenancy | One owner/password and multiple independent vaults per server (including zero vaults) |
 | Topology | Central authoritative server |
-| Initial clients | Portable sync core and Linux adapters with foreground CLI sync; Android integration remains platform work |
+| Initial clients | Portable sync core with Linux foreground CLI adapters and native Android shared-folder dashboard/adapters |
 | Encryption | Client-side encryption; server does not have the vault master key |
 | Recovery | User-held recovery key; no server-side plaintext recovery |
 | Device enrollment | Password authentication, admin approval, then recovery-key entry |
@@ -22,9 +22,12 @@
 | Server storage | Local filesystem through an abstract `Filesystem` interface |
 | Linux local model | Ordinary folder; evicted entries available through local-state adapters to integrator-provided interfaces |
 | Linux local encryption | Plaintext files; rely on device disk encryption |
-| Android local model | Complete offline vault |
+| Android local model | Complete verified non-ignored offline vault in one supported user-selected shared folder; Android-managed app access |
 | Android capacity failure | Fail visibly if the vault does not fit |
-| Mobile filesystem integration | Android DocumentsProvider and iOS File Provider expose writable vault locations in system file browsers; external saves queue local changes for sync |
+| Android filesystem integration | Native shared-folder adapter with explicit Android All files access; no app-private authoritative mirror or app allowlist; replaces the DocumentsProvider-only prototype |
+| Android product | Native Android 12+ sync dashboard; multiple servers/vaults, existing-vault connections only |
+| Android execution | Explicit per-vault background enable/pause, one-shot manual reconciliation, best-effort foreground execution and reboot/unlock recovery with honest restricted status |
+| Android network policy | Global mobile-data default plus per-vault inherit/allow/Wi-Fi-only; global HTTP developer opt-in without disabling HTTPS certificate validation |
 | iOS local model | Complete offline vault in app-owned durable storage |
 | History trigger | Debounced completed filesystem changes |
 | Retention | All for 3 days, daily through 30 days, monthly through one year, then current state |
@@ -39,7 +42,7 @@ These choices are part of persistent format `1` and protocol `1`. Details and li
 
 | Area | Version 1 decision |
 |---|---|
-| Runtime | Bun/TypeScript for server, Linux adapters, and server/account CLI; shared core uses portable Web Crypto and WHATWG interfaces. Android integration is later platform work. |
+| Runtime | Bun/TypeScript for server, Linux adapters, and server/account CLI; shared core uses portable Web Crypto and WHATWG interfaces. Android uses native Java UI/platform adapters and a restricted bundled WebView computation worker. |
 | Chunking | Fixed 4 MiB, recorded per file/format; only the final chunk may be smaller; all 50 GB paths stream. |
 | Crypto | SHA-256 ciphertext checksums, HMAC-SHA-256 vault chunk IDs, HKDF-SHA-256 domain derivation, and AES-256-GCM as specified in `security.md`; independent review is required. |
 | Authentication | Argon2id password verifier and independent random 256-bit per-device bearer credentials; no v1 credential expiry, rotation on re-enrollment. |
@@ -98,7 +101,6 @@ Determine:
 
 These should not constrain version 1 unless a chosen data format would make them impossible later:
 
-- Multiple vaults.
 - Multiple users and folder sharing.
 - S3-compatible object storage.
 - Windows and macOS clients.

@@ -20,7 +20,7 @@ import static org.junit.Assert.*;
 public final class EngineRuntimeTest {
     @Test public void insecureOriginFailsOnMainLooperNeverFinishes() throws Exception {
         Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
-        File journal = new File(context.getFilesDir(), "runtime-test-" + UUID.randomUUID());
+        File journal = new File(context.getNoBackupFilesDir(), "runtime-test-" + UUID.randomUUID());
         CountDownLatch done = new CountDownLatch(1);
         AtomicBoolean onMain = new AtomicBoolean();
         AtomicInteger errors = new AtomicInteger(), successes = new AtomicInteger();
@@ -46,7 +46,7 @@ public final class EngineRuntimeTest {
 
     @Test public void cancellationPreservesJournalAndCannotRestart() throws Exception {
         Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
-        File journal = new File(context.getFilesDir(), "runtime-test-" + UUID.randomUUID());
+        File journal = new File(context.getNoBackupFilesDir(), "runtime-test-" + UUID.randomUUID());
         assertTrue(journal.mkdir());
         File checkpoint = new File(journal, "state.json");
         byte[] bytes = "{\"checkpoint\":7}".getBytes(java.nio.charset.StandardCharsets.UTF_8);

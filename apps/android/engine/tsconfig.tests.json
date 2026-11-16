@@ -1,5 +1,5 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": { "types": ["bun"] },
-  "include": ["*.ts"]
+  "include": ["*.ts", "../../../build/test-android.ts", "../../../build/android-engine.ts"]
 }

@@ -68,12 +68,21 @@ public final class FolderAccess {
     }
 
     public static File validateJournalDirectory(Context context, File directory) throws IOException {
-        File files = context.getFilesDir().getCanonicalFile();
+        File files = context.getNoBackupFilesDir().getCanonicalFile();
         File absolute = directory.getAbsoluteFile();
         File canonical = directory.getCanonicalFile();
-        if (!absolute.toPath().normalize().equals(canonical.toPath())
-                || !canonical.toPath().startsWith(files.toPath()) || canonical.equals(files))
-            throw new IOException("Journal must be a dedicated non-linked private files directory");
+        Path provided = absolute.toPath().normalize();
+        Path platformRoot = context.getNoBackupFilesDir().getAbsoluteFile().toPath().normalize();
+        Path anchor = provided.startsWith(platformRoot) ? platformRoot : files.toPath();
+        if (!provided.startsWith(anchor) || !canonical.toPath().startsWith(files.toPath()) || canonical.equals(files))
+            throw new IOException("Journal must be a dedicated non-linked private no-backup directory");
+        // Android may provide a platform-owned /data/user alias for its private
+        // root. Permit that alias, but never a link within our journal subtree.
+        Path cursor = anchor;
+        for (Path part : anchor.relativize(provided)) {
+            cursor = cursor.resolve(part);
+            if (Files.isSymbolicLink(cursor)) throw new IOException("Journal contains a symbolic link");
+        }
         if (!canonical.isDirectory() && !canonical.mkdirs()) throw new IOException("Cannot create journal");
         return canonical;
     }
@@ -89,8 +98,8 @@ public final class FolderAccess {
         for (String part : path.split("/", -1)) {
             String lower = part.toLowerCase(Locale.ROOT);
             if (part.isEmpty() || part.equals(".") || part.equals("..") || part.endsWith(".") || part.endsWith(" ")
-                    || part.length() > 255 || lower.startsWith(".nanosync")
-                        && !(read && path.equals(".nanosyncignore")))
+                    || part.length() > 255 || (lower.equals(".nanosync") || lower.equals(".nanosyncignore")
+                        || lower.startsWith(TEMP_PREFIX)) && !(read && path.equals(".nanosyncignore")))
                 throw new IllegalArgumentException("Unsafe or reserved path");
             for (int i = 0; i < part.length(); i++)
                 if (Character.isISOControl(part.charAt(i)) || ":*?\"<>|".indexOf(part.charAt(i)) >= 0)

@@ -40,6 +40,7 @@ public final class MainActivity extends Activity {
     private static final int PICK_FOLDER = 41;
     private static final int NOTIFICATIONS = 42;
     private String pendingBackground;
+    private boolean pendingBackgroundGranted;
     private final ExecutorService storage = Executors.newSingleThreadExecutor();
     private final Set<String> expanded = new HashSet<>();
     private AppStore store;
@@ -53,12 +54,24 @@ public final class MainActivity extends Activity {
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                    android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, this::navigateBack);
+        }
         if (state != null) {
             detailId = state.getString("detailId");
+            pendingBackground = state.getString("pendingBackground");
+            pendingBackgroundGranted = state.getBoolean("pendingBackgroundGranted");
             String[] open = state.getStringArray("expanded");
             if (open != null) java.util.Collections.addAll(expanded, open);
         }
         scroll = new ScrollView(this);
+        scroll.setOnApplyWindowInsetsListener((view, insets) -> {
+            android.graphics.Insets bars = insets.getInsets(
+                    android.view.WindowInsets.Type.systemBars() | android.view.WindowInsets.Type.displayCutout());
+            view.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+            return insets;
+        });
         content = column();
         scroll.addView(content);
         setContentView(scroll);
@@ -70,6 +83,12 @@ public final class MainActivity extends Activity {
                     if (isDestroyed()) return;
                     store = loaded;
                     actions = new SyncCoordinator(this, store, this::refresh);
+                    if (pendingBackgroundGranted && pendingBackground != null) {
+                        String id = pendingBackground;
+                        pendingBackground = null;
+                        pendingBackgroundGranted = false;
+                        enableBackground(id);
+                    }
                     refresh();
                     command(() -> actions.settingsChanged());
                     onboarding();
@@ -97,6 +116,8 @@ public final class MainActivity extends Activity {
     @Override protected void onSaveInstanceState(Bundle out) {
         super.onSaveInstanceState(out);
         out.putString("detailId", detailId);
+        out.putString("pendingBackground", pendingBackground);
+        out.putBoolean("pendingBackgroundGranted", pendingBackgroundGranted);
         out.putStringArray("expanded", expanded.toArray(new String[0]));
     }
 
@@ -106,9 +127,13 @@ public final class MainActivity extends Activity {
         super.onDestroy();
     }
 
-    @Override public void onBackPressed() {
+    // Android 12 fallback; Android 13+ back gestures use the registered platform callback.
+    @android.annotation.SuppressLint("GestureBackNavigation")
+    @Override public void onBackPressed() { navigateBack(); }
+
+    private void navigateBack() {
         if (detailId != null) { detailId = null; refresh(); }
-        else super.onBackPressed();
+        else finish();
     }
 
     /** Safe for coordinator callbacks from any thread. Does not recreate open dialogs. */
@@ -218,7 +243,7 @@ public final class MainActivity extends Activity {
         boolean allowed = policy.equals("allow") || (policy.equals("default") && config.optBoolean("defaultMobile"));
         ConnectivityManager connectivity = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
         NetworkCapabilities capabilities = connectivity.getNetworkCapabilities(connectivity.getActiveNetwork());
-        boolean wifi = capabilities != null && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI);
+        boolean wifi = NetworkPolicy.isWifi(capabilities);
         if (!allowed && !wifi) {
             confirm("Use mobile data once?", "This vault is set to Wi-Fi only. Allow this one sync on the current network? Saved preferences will not change.", () -> command(() -> actions.syncNow(id, true)));
         } else command(() -> actions.syncNow(id, false));
@@ -288,13 +313,14 @@ public final class MainActivity extends Activity {
             String scheme = uri.getScheme();
             if (!"https".equalsIgnoreCase(scheme) && !"http".equalsIgnoreCase(scheme)) throw new Exception();
             if (uri.getHost() == null || uri.getUserInfo() != null || uri.getFragment() != null || uri.getQuery() != null
-                    || uri.getPort() > 65535 || uri.getPort() == 0) throw new Exception();
+                    || uri.getPort() > 65535 || uri.getPort() == 0
+                    || (uri.getRawPath() != null && !uri.getRawPath().isEmpty() && !uri.getRawPath().equals("/"))) throw new Exception();
             if ("http".equalsIgnoreCase(scheme) && !allowHttp) {
                 throw new IllegalArgumentException("HTTP is disabled. Use HTTPS, or explicitly enable Allow HTTP in Settings.");
             }
             return uri.toString();
         } catch (IllegalArgumentException e) { throw e; }
-        catch (Exception e) { throw new IllegalArgumentException("Enter a complete HTTP(S) server URL without credentials, query or fragment."); }
+        catch (Exception e) { throw new IllegalArgumentException("Enter an HTTP(S) server origin without a path prefix, credentials, query or fragment."); }
     }
 
     private void listVaults(String serverId) {
@@ -379,12 +405,11 @@ public final class MainActivity extends Activity {
         folderResult = null;
         if (result != RESULT_OK || data == null || callback == null) return;
         Uri uri = data.getData();
-        int flags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
         storage.execute(() -> {
             try {
                 String path = resolvePrimaryTree(uri);
-                try { getContentResolver().takePersistableUriPermission(uri, flags); }
-                catch (SecurityException ignored) { /* Broad filesystem permission is checked by runtime. */ }
+                // Only the selected path is retained. Native access uses the explicit
+                // All files access grant, not an unnecessarily persisted SAF grant.
                 runOnUiThread(() -> { if (!isDestroyed()) callback.accept(path); });
             } catch (Exception e) {
                 runOnUiThread(() -> { if (!isDestroyed()) message("Unsupported folder", "Choose a folder under Internal storage in the system Files picker. Cloud providers, Downloads, SD cards and non-primary volumes are not supported. Shared-storage access must also be granted before sync."); });
@@ -401,7 +426,7 @@ public final class MainActivity extends Activity {
         String relative = id.substring("primary:".length());
         if (relative.startsWith("/") || relative.indexOf('\0') >= 0) throw new IllegalArgumentException();
         for (String segment : relative.split("/")) if (segment.equals("..") || segment.equals(".")) throw new IllegalArgumentException();
-        File root = new File("/storage/emulated/0").getCanonicalFile();
+        File root = android.os.Environment.getExternalStorageDirectory().getCanonicalFile();
         File target = new File(root, relative).getCanonicalFile();
         if (!target.equals(root) && !target.toPath().startsWith(root.toPath())) throw new IllegalArgumentException();
         return target.getPath();
@@ -449,7 +474,10 @@ public final class MainActivity extends Activity {
         pendingBackground = null;
         if (id == null) return;
         if (grants.length > 0 && grants[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            enableBackground(id);
+            if (store == null) {
+                pendingBackground = id;
+                pendingBackgroundGranted = true;
+            } else enableBackground(id);
         } else {
             new AlertDialog.Builder(this).setTitle("Background sync not enabled")
                     .setMessage("Allow Nanosync notifications in Android Settings, then enable background sync here again. Foreground Sync now is still available.")

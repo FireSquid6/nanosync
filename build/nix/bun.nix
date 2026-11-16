@@ -25,6 +25,7 @@
     url = "https://registry.npmjs.org/@emnapi/wasi-threads/-/wasi-threads-1.2.3.tgz";
     hash = "sha512-ELEBe8PsLvvJ6QMr0zLt8ffvOHW/dc1m3CEzNMg7aJUv3bMaoDtw2TXyDAwkYBuroxxuHEwhRTLJSe5sya547g==";
   };
+  "@nanosync/android-engine" = copyPathToStore ../../apps/android/engine;
   "@nanosync/cli" = copyPathToStore ../../packages/cli;
   "@nanosync/client-local" = copyPathToStore ../../packages/client-local;
   "@nanosync/linux-client" = copyPathToStore ../../packages/linux-client;
@@ -117,6 +118,10 @@
     url = "https://registry.npmjs.org/commander/-/commander-14.0.3.tgz";
     hash = "sha512-H+y0Jo/T1RZ9qPP4Eh1pkcQcLRglraJaSLoyOtHxu6AapkjWVCy2Sit1QQ4x3Dng8qDlSsZEet7g5Pq06MvTgw==";
   };
+  "core-js-pure@3.51.0" = fetchurl {
+    url = "https://registry.npmjs.org/core-js-pure/-/core-js-pure-3.51.0.tgz";
+    hash = "sha512-NE4SFDJ+qzQeqHG2vVSNwopzS6zZNPYJ5kinIqs+OofTqGzOmICgT89E/yvS9XY7rwb3eU1utWXTJ9nVFqv74A==";
+  };
   "tslib@2.8.1" = fetchurl {
     url = "https://registry.npmjs.org/tslib/-/tslib-2.8.1.tgz";
     hash = "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==";
@@ -128,5 +133,9 @@
   "undici-types@8.3.0" = fetchurl {
     url = "https://registry.npmjs.org/undici-types/-/undici-types-8.3.0.tgz";
     hash = "sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ==";
+  };
+  "uuid@13.0.2" = fetchurl {
+    url = "https://registry.npmjs.org/uuid/-/uuid-13.0.2.tgz";
+    hash = "sha512-vzi9uRZ926x4XV73S/4qQaTwPXM2JBj6/6lI/byHH1jOpCzb0zDbfytgA9LcN/hzb2l7WQSQnxITOVx5un/wGw==";
   };
 }

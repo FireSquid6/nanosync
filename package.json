@@ -2,11 +2,15 @@
   "name": "nanosync-monorepo",
   "private": true,
   "bin": { "nanosync": "./packages/cli/src/main.ts" },
-  "workspaces": ["packages/*"],
+  "workspaces": ["packages/*", "apps/android/engine"],
   "scripts": {
     "test": "bun test",
     "typecheck": "bun run --filter '*' typecheck",
     "build:binary": "bash build/binary.sh",
+    "build:android": "gradle -p apps/android :app:assembleDebug :app:assembleDebugAndroidTest",
+    "typecheck:android": "tsc -p apps/android/engine/tsconfig.json --noEmit && tsc -p apps/android/engine/tsconfig.tests.json --noEmit",
+    "test:android": "gradle -p apps/android :app:connectedDebugAndroidTest",
+    "test:android:e2e": "bun run build/test-android.ts",
     "nanosync": "bun packages/cli/src/main.ts"
   },
   "devDependencies": {

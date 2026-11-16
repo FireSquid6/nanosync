@@ -31,7 +31,7 @@ export interface ScanPlan {
   /** Reopen/verify sources on every call, including frozen-publication repair. */
   chunks(knownObjectIds?: ReadonlySet<string>): AsyncGenerator<EncryptedObject>;
   /** Commit only after acceptance or before applying a verified merge. */
-  commit(): void;
+  commit(): void | Promise<void>;
   suppressed: string[];
 }
 export interface SyncScanner {
@@ -189,7 +189,7 @@ export class SyncEngine {
   private async finishLocal(plan: ScanPlan, verified: Verified) {
     const head = this.local.head("accepted");
     if (head.revisionId !== verified.manifest.revisionId || head.sequence !== verified.sequence) throw new Error("local revision was not accepted");
-    plan.commit();
+    await plan.commit();
     this.local.recordHead("applied", head);
     if (this.local.proposal()?.state === "accepted") this.local.clearProposal();
   }
@@ -337,7 +337,7 @@ export class SyncEngine {
           for (const candidate of parents) {
             if (candidate.manifest.vaultId !== this.vault) throw new Error("foreign merge parent");
             const candidateScan = await this.scanner.plan(base.manifest, candidate.manifest.revisionId, this.device, this.key, candidate.manifest);
-            if (sameTree(candidateScan.manifest, candidate.manifest)) { candidateScan.commit(); matched = true; break; }
+            if (sameTree(candidateScan.manifest, candidate.manifest)) { await candidateScan.commit(); matched = true; break; }
             if (candidate.sequence === null && candidate.manifest.creatingDeviceId === this.device) branch = candidate;
           }
         }
@@ -352,7 +352,7 @@ export class SyncEngine {
       if (!base) throw new Error("cannot merge without applied base");
       const scan = await this.scanner.plan(base.manifest, proposed.manifest.revisionId, this.device, this.key, proposed.manifest);
       if (!sameTree(scan.manifest, proposed.manifest)) throw new Error("local edits changed after frozen proposal");
-      scan.commit();
+      await scan.commit();
       proposed = await this.reconcile(base, proposed, stale);
       await this.options.apply(proposed.manifest, proposed.sequence!, this.key);
       this.local.clearProposal();
@@ -400,7 +400,7 @@ export class SyncEngine {
     }
     let next = await this.publish(scan, prior);
     if (!next.stale && next.local) { await this.finishLocal(scan, next.local); return; }
-    scan.commit();
+    await scan.commit();
     if (!next.stale || !next.local) throw new Error("missing stale merge inputs");
     const resolved = await this.reconcile(prior, next.local, next.stale);
     await this.options.apply(resolved.manifest, resolved.sequence!, this.key);

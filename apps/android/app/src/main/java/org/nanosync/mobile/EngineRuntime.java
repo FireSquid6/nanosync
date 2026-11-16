@@ -240,7 +240,14 @@ public final class EngineRuntime {
         return JSONObject.quote(value).replace("\u2028", "\\u2028").replace("\u2029", "\\u2029");
     }
     private static String safeError(Exception e) {
-        // Do not return URLs, tokens, file bodies or exception traces across the bridge.
+        // Authored filesystem/policy failures must remain actionable. Native HTTP
+        // credentials are headers, never URL components. Do not return URLs,
+        // multiline payloads or exception traces across the bridge.
+        String message = e.getMessage();
+        if (e instanceof IOException && message != null && message.length() <= 240
+                && !message.contains("://") && !message.contains("\n") && !message.contains("\r")) {
+            return message;
+        }
         return e instanceof org.json.JSONException ? "Invalid bridge JSON" :
             e instanceof SecurityException ? "Platform permission denied" :
             e instanceof IOException ? "I/O operation failed: " + e.getClass().getSimpleName() :
@@ -375,11 +382,10 @@ public final class EngineRuntime {
         ConnectivityManager manager = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
         Network active = manager.getActiveNetwork();
         NetworkCapabilities caps = active == null ? null : manager.getNetworkCapabilities(active);
-        if (caps == null || !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                || !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) throw new IOException("Network unavailable");
+        // A reachable LAN server does not require Google's Internet validation.
+        if (caps == null) throw new IOException("Network unavailable");
         boolean mobileAllowed = mobileOverride || vault.optBoolean("effectiveMobileAllowed", false);
-        if (!mobileAllowed && (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-                || caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) || caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)))
+        if (!mobileAllowed && !NetworkPolicy.isWifi(caps))
             throw new IOException("Wi-Fi connection required");
         return active;
     }

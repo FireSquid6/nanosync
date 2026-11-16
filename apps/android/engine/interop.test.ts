@@ -25,7 +25,7 @@ async function fixture() {
   expect(await main(["approve", androidId, "--client-dir", cliDir])).toBe(0);
   await joinVault(enrollment, server.url, androidId, undefined, recovery);
   const creds = credentials(enrollment);
-  const context: RunContext = { server: { baseUrl: server.url, token: creds.token, deviceId: creds.deviceId }, vault: { id: crypto.randomUUID(), vaultId: creds.vaultId, rootPath: androidFiles, masterKeyHex: creds.masterKey }, allowHttp: true };
+  const context: RunContext = { server: { baseUrl: server.url, token: creds.token, deviceId: creds.deviceId }, vault: { id: crypto.randomUUID(), vaultId: creds.vaultId, rootPath: androidFiles, masterKeyHex: creds.masterKey, effectiveMobileAllowed: false }, allowHttp: true };
   const host = new TestHost(androidFiles, androidPrivate, fetch, server.url);
   const cli = async () => { expect(await main(["sync", "--client-dir", cliDir, "--sync-dir", cliFiles])).toBe(0); };
   const remote = new HttpRemote({ baseUrl: server.url, token: creds.token, vaultId: creds.vaultId, fetch });

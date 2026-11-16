@@ -2,7 +2,7 @@
 
 ## Shared client engine
 
-Linux and future Android clients can share a synchronization core where practical. The shipped CLI orchestrates foreground Linux synchronization in addition to server, enrollment, and administration. Integrators of other clients provide their own storage, event observation, background execution, secure credentials, and user interaction.
+Linux and Android share portable one-shot orchestration, protocol, cryptography and merge logic through platform adapters. The shipped CLI orchestrates foreground Linux synchronization in addition to server, enrollment, and administration. Integrators of other clients provide their own storage, event observation, background execution, secure credentials, and user interaction.
 
 The shared libraries provide primitives and interfaces for (with scheduling and lifecycle orchestration supplied by the integrator):
 
@@ -89,7 +89,7 @@ Background synchronization is best-effort and must be supplemented by:
 
 ### External file access
 
-Opening or editing through another application may require temporary copies or platform-mediated document access. The Android client must detect the resulting edited content and clearly communicate when an external copy is no longer managed by Nanosync.
+The native Android client synchronizes a supported ordinary shared folder, with Android-managed application access and explicit All files access for its native path adapter. Other applications edit that same folder; Nanosync does not create an authoritative private mirror or enforce an application allowlist. Arbitrary external exports/copies are outside its synchronization scope. See [mobile architecture](mobile.md) and the [Android build/operation guide](../apps/android/README.md).
 
 ## CLI and foreground sync
 

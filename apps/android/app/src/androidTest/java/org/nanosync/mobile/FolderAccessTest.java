@@ -59,7 +59,7 @@ public final class FolderAccessTest {
             assumeTrue(Build.VERSION.SDK_INT >= 30 ? Environment.isExternalStorageManager()
                 : context().checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED);
             root = new File(Environment.getExternalStorageDirectory(), "Nanosync-test-" + UUID.randomUUID());
-            journal = new File(context().getFilesDir(), "test-journal-" + UUID.randomUUID());
+            journal = new File(context().getNoBackupFilesDir(), "test-journal-" + UUID.randomUUID());
             assertTrue(root.mkdir());
             access = new FolderAccess(context(), root, journal);
         }

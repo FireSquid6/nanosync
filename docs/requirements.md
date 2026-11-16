@@ -8,7 +8,7 @@ The single user who owns the server account, vault, recovery key, and synchroniz
 
 ### Approved device
 
-An approved Linux CLI client, integrator-provided client, or future Android client authorized to authenticate, obtain encrypted vault objects, and publish revisions. The CLI provisions credentials, manages enrollment, and can synchronize a Linux directory in the foreground.
+An approved Linux CLI client, native Android client, or integrator-provided client authorized to authenticate, obtain encrypted vault objects, and publish revisions. The CLI provisions credentials, manages enrollment, and can synchronize a Linux directory in the foreground.
 
 ### Server operator
 
@@ -58,10 +58,20 @@ Retention must never remove the current head, an unresolved conflict required by
 
 ### Android
 
-- Keep the entire vault available offline.
-- Store data in application-managed storage.
-- Fail synchronization visibly if the vault cannot fit on the device.
-- Never report complete synchronization while files are missing.
+- Native Android 12+ dashboard; the real-device acceptance target is Pixel 9 on Android 17.
+- Connect existing vaults from multiple independent servers; no mobile vault creation or server administration.
+- Keep every current non-ignored vault file available offline in one user-selected supported shared folder per connection.
+- Android manages external applications' access; Nanosync does not enforce an application allowlist.
+- Keep credentials, vault keys, journals and synchronization metadata in private application storage, with Android Keystore-backed encryption for stored credentials and keys.
+- Reject overlapping synchronization roots; safely reconcile populated folders and preserve conflicting versions.
+- Follow device-local `.nanosyncignore` rules without editor-specific exclusions.
+- Fail synchronization visibly if the vault cannot fit or the selected folder becomes inaccessible. Never interpret failed access/enumeration as deletion.
+- Never report complete synchronization while required non-ignored files are missing or unverified.
+- Provide explicit per-vault background enablement and pause, plus one-shot Sync now that leaves persistent preferences unchanged.
+- Background execution uses Android-supported foreground work with an ongoing notification and best-effort reboot/unlock recovery. Expose restrictions and stopped execution honestly; uninterrupted execution is not guaranteed.
+- Use a global mobile-data default chosen during onboarding, with clearly scoped per-vault inherit/allow/Wi-Fi-only overrides and prompted one-time manual exceptions.
+- Require HTTPS by default, with an easily discoverable global Allow HTTP connections developer setting. HTTPS certificate validation remains enforced.
+- A blocked connection must not prevent unrelated vaults progressing. Disconnecting leaves shared files untouched and removes unneeded private state and credentials.
 
 ### CLI
 
@@ -92,7 +102,7 @@ Provide CLI commands for owner-password initialization/runtime, server-wide enro
 ## Non-goals for version 1
 
 - A separately packaged client service, its local IPC, or built-in startup integration.
-- Multiple users or vaults on one server.
+- Multiple users on one server (multiple independent vaults for one owner are supported).
 - Shared folders or access-control lists.
 - Peer-to-peer synchronization.
 - macOS, Windows, or iOS clients.
