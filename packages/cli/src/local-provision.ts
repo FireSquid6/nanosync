@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path';
 import { OWNER_GENESIS_AUTHOR_ID, parseEncryptedVaultCreateRequest, parsePersistedRevisionEnvelope } from '@nanosync/protocol';
 import { encryptManifest, generateRecoverySecret, generateVaultMasterKey, displayRecoverySecret, wrapMasterKey, referenceSetMac } from '@nanosync/sync-core';
 import { privateDirectory, secureCreate, secureRead, secureReplace } from './security.ts';
-import { acquireSyncLock } from './sync-lock.ts';
+import { acquireServerStorage } from './server-ownership.ts';
 import { localOwner, withLocalOwner } from './server.ts';
 
 type EncryptedVaultCreateRequest = ReturnType<typeof parseEncryptedVaultCreateRequest>;
@@ -14,7 +14,8 @@ const digest = (value: string) => createHash('sha256').update(value).digest('hex
 /** Durable encrypted receipts precede protected output. No provisioning secret is persisted here. */
 export async function provisionLocalVault(directory: string, name: string, deliver: (secret: string) => Promise<void>, recoveryOutput?: string) {
   const root = privateDirectory(directory);
-  const release = acquireSyncLock(privateDirectory(join(root, 'owner-creation-lock')));
+  // Acquire before receipt/recovery delivery as well as every possible storage write.
+  const release = acquireServerStorage(root);
   try {
     const output = recoveryOutput ? resolve(recoveryOutput) : null;
     const path = output ? join(privateDirectory(join(root, 'owner-creations')), `${digest(output)}.json`) : join(root, 'owner-creation.json');

@@ -598,3 +598,70 @@ Exact changed paths:
 Final rerun after staging the new acceptance files: offline Nix build passed with
 this checkout included; full Bun suite remained **283/0** and all typechecks passed.
 `git diff --check` and `bash -n build/test-standalone.sh` passed.
+
+## Final integration P2: enforced runtime/local-provisioning storage exclusion (completed)
+
+### Contract and implementation
+
+- Confirmed the cross-instance gap: `withLocalOwner` constructs a different
+  `LocalFilesystem` from the runtime, so the per-instance `withVaultStorage`
+  queue cannot prevent local creation replay from writing after runtime deletion
+  cleanup. An offline-only documentation rule was insufficient.
+- `acquireServerStorage` reuses the existing atomic, fsynced, Linux
+  PID/starttime-identity sync ownership primitive at the private server root
+  (`.sync-owner`). Initialization, all local provisioning (including receipt
+  replay and recovery delivery), and `runServer` now share this gate. Runtime
+  ownership spans startup through awaited HTTP/scanner/cleanup shutdown. A second
+  runtime is excluded too. Initialization provisions pepper inside the gate.
+- Contention returns actionable stop-runtime/wait/retry guidance, with no bypass
+  flags. Failed acquisition does not touch prior encrypted receipts or recovery
+  output. Startup/config/listener failures, provisioning errors, initialization
+  errors, and completed shutdown release ownership; concurrent/repeated stop is
+  idempotent. Existing primitive recovers definitively dead process owners.
+- Metadata-only device view/approve/deny/revoke and vault view/rename/delete do
+  not acquire this gate and remain usable while serving. Browser creation uses
+  the runtime's storage/queue as before. This gate is not a distributed lease or
+  a wrapper around the programmatic offline GC API/external writers.
+
+### Red/green and verification evidence
+
+- New public runtime/CLI regression was red: a real separate CLI process replayed
+  local creation successfully while serving (expected refusal, received exit 0).
+  It now verifies actionable refusal, duplicate-runtime exclusion, initialization
+  exclusion, unchanged receipt/recovery bytes, live metadata rename/delete/view,
+  completed ciphertext reclamation, and no late ciphertext after forbidden replay.
+- Provisioning holds ownership before its recovery-delivery callback: both a
+  distinct runtime instance and a separate CLI runtime process are excluded, as
+  is initialization. Interrupted delivery releases ownership and retry publishes
+  using unchanged protected recovery output. Invalid configuration, occupied
+  listener and failed reinitialization release ownership; concurrent stop releases
+  exactly once. Existing command-tree workflows continue to approve real pending
+  clients while serving, then stop/restart only around local creation/replay.
+- Every shell command used hard `timeout --kill-after` and tool deadlines.
+- `timeout --kill-after=5s 120s bun test`: **285 passed, 0 failed**, 2067
+  assertions, 31 files (19.94s), no unhandled errors.
+- `timeout --kill-after=5s 120s bun run typecheck`: all nine workspaces plus
+  browser/build tooling passed.
+- `timeout --kill-after=5s 180s bun run test:browser`: **5 passed**, real
+  source runtime/Chromium, including the two-device cross-surface journey.
+- `timeout --kill-after=5s 120s bun run build:binary`: passed.
+- `timeout --kill-after=5s 180s env NANOSYNC_TEST_BINARY="$PWD/dist/nanosync" bun run test:browser`:
+  **5 passed**, rebuilt standalone runtime/Chromium.
+- `git diff --check`: passed. No push or PR performed.
+
+### Review handoff
+
+Key functions: `acquireServerStorage`, `initializeServerOwner`, `runServer` /
+`startOwnedServer`, `provisionLocalVault`; CLI init adapter and runtime/CLI ownership
+regressions. Exact changed paths:
+- `packages/cli/src/server-ownership.ts`
+- `packages/cli/src/server.ts`
+- `packages/cli/src/local-provision.ts`
+- `packages/cli/src/main.ts`
+- `packages/cli/tests/server-ownership.test.ts`
+- `packages/cli/tests/command-tree.test.ts`
+- `packages/cli/README.md`
+- `docs/architecture.md`
+- `docs/security.md`
+- `docs/clients-and-operations.md`
+- `docs/implementation-progress.md`

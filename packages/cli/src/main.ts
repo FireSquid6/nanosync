@@ -6,7 +6,7 @@ import { Command, CommanderError, Option } from 'commander';
 import { parseDeviceId, parseVaultId } from '@nanosync/protocol';
 import { RemoteError } from '@nanosync/sync-core';
 import { api, baseUrl } from './client.ts';
-import { privateDirectory, provisionSecret, secureCreate, secureRead } from './security.ts';
+import { privateDirectory, secureCreate, secureRead } from './security.ts';
 import { runServer, initializeServerOwner, localAdminReport, withLocalOwner, localOwner } from './server.ts';
 import { SyncRunner } from './sync-runner.ts';
 import { connectRegisteredVault, discoverConnection, records, disconnectConnections, removeServerConnection, withConnectionRegistry } from './connections.ts';
@@ -54,7 +54,6 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
       const dir = privateDirectory(await serverRoot(command));
       const password = await secret(command, 'NANOSYNC_PASSWORD', 'passwordFile', 'Owner password');
       if (!opts(command).passwordFile && !process.env.NANOSYNC_PASSWORD && password !== await hidden('Confirm owner password', canPrompt(command))) throw new CliError('INVALID_INPUT', 'password confirmation mismatch');
-      provisionSecret(join(dir, 'pepper.hex'));
       await initializeServerOwner(dir, password);
       result = { initialized: true, serverDirectory: dir };
     });

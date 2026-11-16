@@ -6,16 +6,21 @@ import { OwnerOperations, type AdminAssets, createServerConfig, startServer, Aut
 import { AuthenticationRepository, BootstrapRepository, MaintenanceRepository, ObjectCatalogRepository, RevisionRepository, ServerMetadataDatabase, VaultRepository } from "@nanosync/server-metadata";
 import { LocalFilesystem } from "@nanosync/server-object-storage";
 import { privateDirectory, provisionSecret, secureRead } from "./security.ts";
+import { acquireServerStorage } from './server-ownership.ts';
 
 export interface RunServerOptions { webUi?: boolean; externalOrigin?: string; trustedProxyAddresses?: string[]; adminAssets?: AdminAssets; directory: string; host?: string; port?: number; acknowledgeExposure?: boolean; scanIntervalMs?: number }
 export async function initializeServerOwner(directory: string, password: string): Promise<void> {
   if (!password || Buffer.byteLength(password) > 1024) throw new Error("password must be 1..1024 bytes");
-  const root = privateDirectory(directory), bytes = new TextEncoder().encode(password);
-  const database = new ServerMetadataDatabase(join(root, "metadata.sqlite"));
+  const root = privateDirectory(directory), release = acquireServerStorage(root);
+  const bytes = new TextEncoder().encode(password);
   try {
-    const verifier = await new Argon2idPasswordHasher().hash(bytes);
-    new BootstrapRepository(database).initializeOwner(randomUUID(), verifier, Date.now());
-  } finally { bytes.fill(0); database.close(); }
+    provisionSecret(join(root, 'pepper.hex'));
+    const database = new ServerMetadataDatabase(join(root, "metadata.sqlite"));
+    try {
+      const verifier = await new Argon2idPasswordHasher().hash(bytes);
+      new BootstrapRepository(database).initializeOwner(randomUUID(), verifier, Date.now());
+    } finally { database.close(); }
+  } finally { bytes.fill(0); release(); }
 }
 /** The server's private metadata directory is the administrative authority. */
 export function approveLocalDevice(directory: string, deviceId: string): string {
@@ -42,6 +47,20 @@ export async function localAdminReport(directory: string, name: string): Promise
 }
 export async function runServer(options: RunServerOptions): Promise<{ stop(): Promise<void>; url: string }> {
   const directory = privateDirectory(options.directory);
+  const release = acquireServerStorage(directory);
+  try {
+    const running = await startOwnedServer(options, directory);
+    let stopping: Promise<void> | undefined;
+    return {
+      url: running.url,
+      stop: () => stopping ??= (async () => {
+        try { await running.stop(); } finally { release(); }
+      })(),
+    };
+  } catch (error) { release(); throw error; }
+}
+
+async function startOwnedServer(options: RunServerOptions, directory: string): Promise<{ stop(): Promise<void>; url: string }> {
   const config = createServerConfig({
     webUi: options.webUi,
     externalOrigin: options.externalOrigin,
@@ -106,10 +125,11 @@ export async function runServer(options: RunServerOptions): Promise<{ stop(): Pr
       url: server.url.href,
       stop: async () => {
         clearInterval(cleanupTimer);
-        server.stop(true);
-        await cleanupFlight;
-        await scanner.stop();
-        database.close();
+        try {
+          await server.stop(true);
+          await cleanupFlight;
+          await scanner.stop();
+        } finally { database.close(); }
       },
     };
   } catch (error) {

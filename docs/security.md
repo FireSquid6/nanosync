@@ -273,7 +273,13 @@ artifact, not a server key store: deliver/back it up offline, then remove the
 operator copy. Secret files and their private parents require owner-only permissions;
 symlinks/hardlinks and unsafe files fail visibly. Browser storage contains only
 an encrypted request receipt; refresh requires secret proof before publication.
-Acknowledgement/durable file delivery happens before owner mutation. Clearing byte
+Acknowledgement/durable file delivery happens before owner mutation. Server-local
+provisioning takes the same server-root process-identity ownership gate as
+initialization and the full serving runtime lifetime, before touching recovery
+output/receipts. This prevents separate storage instances from late-writing
+ciphertext after runtime tombstone cleanup. Contention fails with stop-and-retry
+guidance and leaves prior delivery/receipts intact; metadata-only owner commands
+remain available while serving. There is no lock bypass flag. Clearing byte
 arrays and UI fields reduces exposure but is not a guarantee of erasure from a
 JavaScript runtime, swap, crash dump or compromised host.
 

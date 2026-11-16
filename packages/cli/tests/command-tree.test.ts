@@ -55,6 +55,9 @@ test('scripted CLI enrollment resumes lost submission, keeps aliases separate an
     expect(await invoke(['client','connections','view','--client-dir',clientDir])).toBe(0);
     expect(result().data.pending).toHaveLength(0);
     expect(JSON.stringify(result())).not.toContain('token');
+    // Local provisioning requires exclusive offline storage ownership; device
+    // approval above remains available while the runtime is active.
+    await running.stop(); running = undefined;
     const recovery = join(base,'recovery.txt');
     expect(await invoke(['server','vaults','create','--server-dir',serverDir,'--name','notes','--recovery-output',recovery])).toBe(0);
     const vault = result().data.vaultId;
@@ -63,6 +66,7 @@ test('scripted CLI enrollment resumes lost submission, keeps aliases separate an
     expect(result().data.vaultId).toBe(vault);
     expect(existsSync(recovery)).toBe(true);
     expect(out.mock.calls.flat().join('\n')).not.toContain(readFileSync(recovery,'utf8').trim());
+    running = await runServer({directory:serverDir, port:7559});
     expect(await invoke(['client','vaults','connect','--client-dir',clientDir,'--server','home','--vault',vault,'--path',files,'--recovery-file',recovery])).toBe(0);
     const replica = join(base,'replica'); mkdirSync(replica,{mode:0o700});
     expect(await invoke(['client','vaults','connect','--client-dir',clientDir,'--server','home','--vault',vault,'--path',replica])).toBe(0);

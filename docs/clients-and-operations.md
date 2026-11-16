@@ -144,8 +144,16 @@ first, or archive the old root and import a separate plaintext copy.
 
 Local owner operations require possession of the private server directory; browser
 operations require the owner password. Use the browser for live provisioning. Stop
-the runtime before local storage provisioning or offline maintenance: separate
-processes must not concurrently own storage. Multiple approved devices and multiple
+the runtime before local storage provisioning or offline maintenance. Initialization,
+local creation/replay (including recovery delivery), and `server run` enforce this
+with the same process-identity `.sync-owner` gate in the private server root.
+The runtime holds ownership through completed shutdown; another runtime or local
+provisioning attempt fails before mutation. Stop the runtime and retry the same
+name/output path: contention preserves encrypted receipts and recovery output.
+Failures release ownership; definitively dead owners are recovered automatically,
+not by manually deleting a live lock. Device view/approve/deny/revoke and vault
+view/rename/delete are metadata-only and remain usable while serving.
+Multiple approved devices and multiple
 nonoverlapping directory replicas are supported; each replica has its own lock/journal.
 
 Remove/disconnect changes local configuration and preserves files; revoke removes
@@ -177,7 +185,7 @@ On the server, run `nanosync server admin storage`, `nanosync server admin reten
 
 The production server entrypoint starts `PeriodicIntegrityScanner` with `ServerMaintenance` and awaits its stop on shutdown. It uses a positive interval and a batch size of at most 1,000 (one bounded catalog page per tick), reporting scan failures to stderr. Only one batch runs at once, errors do not crash the scheduler, and shutdown aborts an in-flight scan. A concurrent reupload that resets integrity state prevents an older scan result from overwriting it when the previous status/check time differs; the catalog has no generation counter for indistinguishable same-state writes.
 
-`ServerMaintenance.gcDryRun` reports already marked candidates and their grace eligibility without changing state. The only executable GC is `collectOffline(control, nowMs)`, not an HTTP route, scheduler or live admin command. Stop every API instance and writer first; take operator-exclusive control of **both** the database and object-store paths (including other hosts and backup/restore jobs), hold that control through the entire run, and implement `assertExclusiveOffline` to fail if exclusivity is lost. SQLite transaction locks alone do not serialize physical deletion against uploads. No shipped server-wide lease exists: **never run this against a live server**. A first offline pass transactionally marks verified unreferenced catalog objects older than 24 hours; a later pass after an additional full 24-hour marking grace rechecks catalog identity, integrity, revision references (including prepared), head and active uploads before physical deletion. A failed deletion leaves a durable candidate for re-evaluation. Uncataloged files and uncertain/corrupt objects are deliberately not collected; investigate manually. GC is useful for cataloged abandoned uploads only, not retention-based historical reclamation. Review dry-run results and secure a verified backup before any offline collection.
+`ServerMaintenance.gcDryRun` reports already marked candidates and their grace eligibility without changing state. The only executable GC is `collectOffline(control, nowMs)`, not an HTTP route, scheduler or live admin command. Stop every API instance and writer first; take operator-exclusive control of **both** the database and object-store paths (including other hosts and backup/restore jobs), hold that control through the entire run, and implement `assertExclusiveOffline` to fail if exclusivity is lost. SQLite transaction locks alone do not serialize physical deletion against uploads. The shipped CLI runtime/provisioning ownership gate does not wrap this programmatic GC API or coordinate other hosts/external writers: **never run this against a live server**. A first offline pass transactionally marks verified unreferenced catalog objects older than 24 hours; a later pass after an additional full 24-hour marking grace rechecks catalog identity, integrity, revision references (including prepared), head and active uploads before physical deletion. A failed deletion leaves a durable candidate for re-evaluation. Uncataloged files and uncertain/corrupt objects are deliberately not collected; investigate manually. GC is useful for cataloged abandoned uploads only, not retention-based historical reclamation. Review dry-run results and secure a verified backup before any offline collection.
 
 ### Backup and restore checklist
 
