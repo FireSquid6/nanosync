@@ -40,16 +40,18 @@ public final class ResumeReceiver extends BroadcastReceiver {
             }
             try {
                 SyncCoordinator coordinator = SyncCoordinator.forService(this);
-                if (!coordinator.hasBackground()) return false;
-                coordinator.serviceStopped("Device restarted. Open Nanosync to resume background sync; Android does not allow automatic dataSync startup at boot.");
-                NotificationManager manager = getSystemService(NotificationManager.class);
-                manager.createNotificationChannel(new NotificationChannel("sync-resume", "Resume sync", NotificationManager.IMPORTANCE_DEFAULT));
-                Intent launch = getPackageManager().getLaunchIntentForPackage(getPackageName());
-                if (launch != null) manager.notify(62, new Notification.Builder(this, "sync-resume")
-                        .setSmallIcon(android.R.drawable.stat_notify_sync).setContentTitle("Resume Nanosync")
-                        .setContentText("Open Nanosync to resume your enabled background folders.")
-                        .setAutoCancel(true).setContentIntent(PendingIntent.getActivity(this, 62, launch,
-                                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE)).build());
+                coordinator.resumeAfterReboot(() -> {
+                    try {
+                        NotificationManager manager = getSystemService(NotificationManager.class);
+                        manager.createNotificationChannel(new NotificationChannel("sync-resume", "Resume sync", NotificationManager.IMPORTANCE_DEFAULT));
+                        Intent launch = getPackageManager().getLaunchIntentForPackage(getPackageName());
+                        if (launch != null) manager.notify(62, new Notification.Builder(this, "sync-resume")
+                                .setSmallIcon(android.R.drawable.stat_notify_sync).setContentTitle("Resume Nanosync")
+                                .setContentText("Open Nanosync to resume your enabled background folders.")
+                                .setAutoCancel(true).setContentIntent(PendingIntent.getActivity(this, 62, launch,
+                                        PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE)).build());
+                    } catch (SecurityException ignored) { /* State remains visible in UI. */ }
+                });
             } catch (SecurityException ignored) { /* Notification opt-in is requested only by visible UI. */ }
             return false;
         }

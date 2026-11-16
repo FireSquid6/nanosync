@@ -10,7 +10,7 @@ import org.json.JSONObject;
 @RunWith(AndroidJUnit4.class)
 public final class SyncCoordinatorTest {
     @Test public void serverUrlsRejectCredentialsAndInsecureTransportByDefault() {
-        for (String url : new String[]{"http://example.com", "https://user:secret@example.com", "https://example.com/?secret=x", "https://example.com/#fragment", "file:///tmp/server"}) {
+        for (String url : new String[]{"http://example.com", "https://user:secret@example.com", "https://example.com/?secret=x", "https://example.com/#fragment", "file:///tmp/server", "https://example.com/prefix", "https://example.com/a/../prefix", "https://example.com/%2f"}) {
             try { SyncCoordinator.canonicalServerUrl(url, false); fail("Accepted unsafe URL"); }
             catch (IllegalArgumentException expected) { }
         }

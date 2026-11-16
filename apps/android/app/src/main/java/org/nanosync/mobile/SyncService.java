@@ -42,17 +42,18 @@ public final class SyncService extends Service {
         try {
             if (Build.VERSION.SDK_INT >= 29) startForeground(61, notification.build(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
             else startForeground(61, notification.build());
-            coordinator.serviceStarted();
+            coordinator.serviceStarted(this);
             main.post(scan);
         } catch (RuntimeException e) {
             stopped = true;
             stopReason = "Android restricted background sync. Open Nanosync to retry and check background permissions.";
-            coordinator.serviceStopped(stopReason);
+            coordinator.serviceStopped(this, stopReason);
             stopSelf();
         }
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
+        if (!stopped && coordinator != null) coordinator.serviceStarted(this);
         // No automatic foreground-service restart from a background process after a kill.
         return START_NOT_STICKY;
     }
@@ -62,7 +63,7 @@ public final class SyncService extends Service {
         stopped = true;
         main.removeCallbacks(scan);
         stopReason = "Android's background sync time limit was reached. Open Nanosync to resume.";
-        coordinator.serviceStopped(stopReason);
+        coordinator.serviceStopped(this, stopReason);
         stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf();
     }
@@ -70,7 +71,7 @@ public final class SyncService extends Service {
     @Override public void onDestroy() {
         stopped = true;
         main.removeCallbacks(scan);
-        coordinator.serviceStopped(stopReason);
+        coordinator.serviceStopped(this, stopReason);
         super.onDestroy();
     }
     @Override public IBinder onBind(Intent intent) { return null; }
