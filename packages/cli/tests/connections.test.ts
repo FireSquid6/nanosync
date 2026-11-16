@@ -1,9 +1,13 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, cpSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, cpSync, renameSync, rmSync, writeFileSync, existsSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { createConnection, discoverConnection, repairConnection } from "../src/connections.ts";
+import { createConnection, discoverConnection, repairConnection, records, disconnectConnections, removeServerConnection } from "../src/connections.ts";
+
+import { privateDirectory, secureCreate } from "../src/security.ts";
+import { acquireSyncLock } from "../src/sync-lock.ts";
+import { main } from "../src/main.ts";
 
 const created: string[] = [];
 function fixture() {
@@ -15,6 +19,37 @@ function fixture() {
 }
 afterEach(() => { for (const path of created.splice(0)) rmSync(path, { recursive: true, force: true }); });
 
+test("forced disconnect and server removal discard missing roots without bypassing locks", async () => {
+  const e = fixture(), serverId = randomUUID();
+  const credential = join(privateDirectory(join(e.global, "servers")), `${serverId}.json`);
+  secureCreate(credential, JSON.stringify({ version: 1, serverId, baseUrl: "http://localhost", deviceId: e.device, name: "home", token: "a".repeat(43) }));
+  const a = createConnection(e.global, e.first, serverId, e.vault, e.device);
+  const b = createConnection(e.global, e.second, serverId, e.vault, e.device);
+  rmSync(e.first, { recursive: true }); rmSync(e.second, { recursive: true });
+  expect(() => disconnectConnections(e.global, [a])).toThrow(/missing/);
+  expect(await main(["client", "vaults", "disconnect", "--client-dir", e.global, "--path", e.first, "--force"])).toBe(0);
+  expect(records(e.global).map(item => item.connectionId)).toEqual([b.connectionId]);
+  const replica = privateDirectory(join(privateDirectory(join(e.global, "replicas")), b.connectionId));
+  const release = acquireSyncLock(replica);
+  try { expect(() => removeServerConnection(e.global, serverId, true)).toThrow(/live process/); }
+  finally { release(); }
+  expect(existsSync(credential)).toBe(true);
+  expect(records(e.global)).toHaveLength(1);
+  removeServerConnection(e.global, serverId, true);
+  expect(records(e.global)).toEqual([]);
+  expect(existsSync(credential)).toBe(false);
+});
+
+test("force does not accept a replaced root or touch its marker", () => {
+  const e = fixture();
+  const a = createConnection(e.global, e.first, "server", e.vault, e.device);
+  rmSync(e.first, { recursive: true });
+  symlinkSync(e.second, e.first);
+  expect(() => disconnectConnections(e.global, [a], true)).toThrow(/symlink/);
+  expect(records(e.global)).toHaveLength(1);
+  expect(existsSync(e.first)).toBe(true);
+});
+
 test("nearest marker, independent replicas, and overlapping-root rejection", () => {
   const e = fixture();
   const a = createConnection(e.global, e.first, "registered-server", e.vault, e.device);
@@ -23,7 +58,7 @@ test("nearest marker, independent replicas, and overlapping-root rejection", () 
   expect(() => createConnection(e.global, join(e.first, "sub"), "registered-server", e.vault, e.device)).toThrow(/nested|overlap/);
   const b = createConnection(e.global, e.second, "registered-server", e.vault, e.device);
   expect(b.connectionId).not.toBe(a.connectionId);
-  expect(() => discoverConnection(e.global, e.base)).toThrow(/setup/);
+  expect(() => discoverConnection(e.global, e.base)).toThrow(/client vaults connect/);
 });
 
 test("nonempty confirmation, copied marker refusal and explicit independent copy", () => {
@@ -44,7 +79,7 @@ test("moved root retains its journal identity, unknown state fails closed", () =
   const e = fixture();
   const a = createConnection(e.global, e.first, "server", e.vault, e.device);
   rmSync(e.second, { recursive: true }); renameSync(e.first, e.second);
-  expect(() => discoverConnection(e.global, e.second)).toThrow(/repair/);
+  expect(() => discoverConnection(e.global, e.second)).toThrow(/copied or moved/);
   const moved = repairConnection(e.global, e.second, "move");
   expect(moved.connectionId).toBe(a.connectionId);
   expect(discoverConnection(e.global, e.second)).toEqual(moved);

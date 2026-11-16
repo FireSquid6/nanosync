@@ -1,4 +1,5 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, test, spyOn } from "bun:test";
+import * as fs from "node:fs";
 import { mkdtempSync, mkdirSync, writeFileSync, renameSync, linkSync, symlinkSync, rmSync, rmdirSync, unlinkSync, truncateSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -107,7 +108,7 @@ test("50 GB sparse file is accepted at the boundary without reading it; larger f
   try {
     const path = join(folder, "sparse"); writeFileSync(path, "");
     truncateSync(path, 50_000_000_000);
-    expect(scanner.snapshot().find(e => e.path === "sparse")?.stat.size).toBe(50_000_000_000);
+    expect(scanner.snapshot().find(e => e.path === "sparse")?.stat.size).toBe(50_000_000_000n);
     truncateSync(path, 50_000_000_001);
     expect(() => scanner.snapshot()).toThrow(/unsafe/);
   } finally { local.close(); }
@@ -187,5 +188,107 @@ test("archival name truncates at 255 bytes and retries occupied deterministic su
     expect(Buffer.byteLength(tombstone.name)).toBeLessThanOrEqual(255);
     plan.commit();
     expect(local.entry(tombstone.id)?.path).toBe(tombstone.name);
+  } finally { local.close(); }
+});
+
+test("idle plans reuse content without file reads or crypto, including known publication", async () => {
+  const { folder, local, prior, scanner } = setup();
+  const reads = spyOn(fs, "readSync"), encrypts = spyOn(crypto.subtle, "encrypt"), digests = spyOn(crypto.subtle, "digest");
+  try {
+    writeFileSync(join(folder, "a"), "cached content");
+    const first = await scanner.plan(prior, randomUUID(), device, key); first.commit();
+    expect(reads.mock.calls.length).toBeGreaterThan(0);
+    expect(encrypts.mock.calls.length).toBeGreaterThan(0);
+    reads.mockClear(); encrypts.mockClear(); digests.mockClear();
+    const idle = await scanner.plan(first.manifest, randomUUID(), device, key);
+    expect(entry(idle, "a").sha256).toBe(entry(first, "a").sha256);
+    const known = new Set(entry(first, "a").chunks!.map(c => c.objectId));
+    for await (const _ of idle.chunks(known)) { throw new Error("known chunk emitted"); }
+    expect(reads).toHaveBeenCalledTimes(0);
+    expect(encrypts).toHaveBeenCalledTimes(0);
+    expect(digests).toHaveBeenCalledTimes(0);
+    const repaired = []; for await (const frame of idle.chunks()) repaired.push(frame);
+    expect(repaired).toHaveLength(1);
+    expect(reads.mock.calls.length).toBeGreaterThan(0);
+    expect(encrypts).toHaveBeenCalledTimes(1);
+  } finally { reads.mockRestore(); encrypts.mockRestore(); digests.mockRestore(); local.close(); }
+});
+
+test("a small edit publishes only unknown chunks without reencrypting known chunks", async () => {
+  const { folder, local, prior, scanner } = setup();
+  const encrypts = spyOn(crypto.subtle, "encrypt");
+  try {
+    const bytes = Buffer.alloc(4 * 1024 * 1024 + 1, 7);
+    writeFileSync(join(folder, "large"), bytes);
+    writeFileSync(join(folder, "unchanged"), "untouched");
+    const first = await scanner.plan(prior, randomUUID(), device, key); first.commit();
+    const known = new Set(first.manifest.entries.flatMap(e => e.chunks?.map(c => c.objectId) ?? []));
+    bytes[bytes.length - 1] = 8; writeFileSync(join(folder, "large"), bytes);
+    const edited = await scanner.plan(first.manifest, randomUUID(), device, key);
+    encrypts.mockClear();
+    const frames = []; for await (const frame of edited.chunks(known)) frames.push(frame);
+    expect(frames).toHaveLength(1);
+    expect(String(frames[0]!.reference.objectId)).toBe(entry(edited, "large").chunks![1]!.objectId);
+    expect(encrypts).toHaveBeenCalledTimes(1);
+  } finally { encrypts.mockRestore(); local.close(); }
+});
+
+test("known-chunk shortcuts still reject edits, replacements and symlinks after planning", async () => {
+  const { folder, local, prior, scanner } = setup();
+  try {
+    writeFileSync(join(folder, "a"), "one");
+    const first = await scanner.plan(prior, randomUUID(), device, key); first.commit();
+    const known = new Set(entry(first, "a").chunks!.map(c => c.objectId));
+    const idle = await scanner.plan(first.manifest, randomUUID(), device, key);
+    writeFileSync(join(folder, "a"), "two");
+    await expect(async () => { for await (const _ of idle.chunks(known)) {} }).toThrow();
+    expect(() => idle.commit()).toThrow();
+    writeFileSync(join(folder, "replacement"), "one"); renameSync(join(folder, "replacement"), join(folder, "a"));
+    await expect(async () => { for await (const _ of idle.chunks(known)) {} }).toThrow();
+    unlinkSync(join(folder, "a")); symlinkSync("/etc/passwd", join(folder, "a"));
+    await expect(async () => { for await (const _ of idle.chunks(known)) {} }).toThrow();
+  } finally { local.close(); }
+});
+
+test("cached chunk identities are isolated by master bytes, vault and scanner instance", async () => {
+  const { folder, local, prior, scanner } = setup();
+  const reads = spyOn(fs, "readSync");
+  try {
+    writeFileSync(join(folder, "a"), "isolated");
+    const first = await scanner.plan(prior, randomUUID(), device, key); first.commit();
+    reads.mockClear();
+    await scanner.plan(first.manifest, randomUUID(), device, key.slice());
+    expect(reads).toHaveBeenCalledTimes(0);
+    const otherKey = key.slice(); otherKey[0] = 1;
+    const rekeyed = await scanner.plan(first.manifest, randomUUID(), device, otherKey);
+    expect(reads.mock.calls.length).toBeGreaterThan(0);
+    expect(entry(rekeyed, "a").chunks![0]!.objectId).not.toBe(entry(first, "a").chunks![0]!.objectId);
+    reads.mockClear();
+    const moved = await scanner.plan({ ...first.manifest, vaultId: randomUUID() }, randomUUID(), device, otherKey);
+    expect(reads.mock.calls.length).toBeGreaterThan(0);
+    expect(entry(moved, "a").chunks![0]!.objectId).not.toBe(entry(rekeyed, "a").chunks![0]!.objectId);
+    reads.mockClear();
+    await new LinuxScanner(folder, local).plan(first.manifest, randomUUID(), device, key);
+    expect(reads.mock.calls.length).toBeGreaterThan(0);
+  } finally { reads.mockRestore(); local.close(); }
+});
+
+test("cache stamps do not round away nanosecond-only timestamp changes", async () => {
+  const { folder, local, prior, scanner } = setup();
+  try {
+    writeFileSync(join(folder, "a"), "precision");
+    const first = await scanner.plan(prior, randomUUID(), device, key); first.commit();
+    const snapshot = scanner.snapshot.bind(scanner);
+    for (const field of ["mtimeNs", "ctimeNs"] as const) {
+      // Simulate a one-nanosecond inventory change while millisecond fields stay identical.
+      const snapshots = spyOn(scanner, "snapshot").mockImplementation(() => {
+        const found = snapshot();
+        for (const file of found) if (file.kind === "file") file.stat[field] += 1n;
+        return found;
+      });
+      try {
+        await expect(scanner.plan(first.manifest, randomUUID(), device, key)).rejects.toThrow(/file changed/);
+      } finally { snapshots.mockRestore(); }
+    }
   } finally { local.close(); }
 });

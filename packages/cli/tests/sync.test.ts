@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, test, spyOn } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:net";
 import { chmodSync, statSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
@@ -71,12 +71,30 @@ async function stop(runner: SyncRunner) {
   await runner.stop();
   runners.splice(runners.indexOf(runner), 1);
 }
-async function waitFor(check: () => boolean, timeoutMs = 8_000): Promise<void> {
-  const until = Date.now() + timeoutMs;
-  while (!check()) {
-    if (Date.now() >= until) throw new Error("timed out waiting for synchronization");
-    await Bun.sleep(50);
-  }
+function controlledWatch(runner: SyncRunner, onSuccess: Parameters<SyncRunner["watch"]>[1], onError: Parameters<SyncRunner["watch"]>[2]) {
+  const controller = new AbortController();
+  let now = 10_000, paused = Promise.withResolvers<void>(), wake = Promise.withResolvers<void>();
+  const watching = runner.watch(controller.signal, onSuccess, onError, {
+    now: () => now,
+    wait: async signal => {
+      wake = Promise.withResolvers<void>();
+      const abort = () => wake.reject(signal.reason);
+      signal.addEventListener("abort", abort, { once: true });
+      paused.resolve();
+      try { signal.throwIfAborted(); await wake.promise; }
+      finally { signal.removeEventListener("abort", abort); }
+    },
+  });
+  return {
+    ready: () => paused.promise,
+    advance: async () => {
+      await paused.promise;
+      paused = Promise.withResolvers<void>();
+      now += 10_000; wake.resolve();
+      await paused.promise;
+    },
+    stop: async () => { controller.abort(); await watching; },
+  };
 }
 
 test("one-shot CLI sync converges enrolled devices, keeps rename identity, and rejects overlap", async () => {
@@ -364,62 +382,67 @@ test("restarted one-shot sync retries only the incomplete chunk", async () => {
   expect(readFileSync(join(e.secondFiles, "large"))).toEqual(data);
 });
 
-test("foreground continuous sync debounces changes and shuts down without retaining the owner lock", async () => {
+test("foreground continuous sync polls changes and shuts down without retaining the owner lock", async () => {
   const e = await fixture();
   const runner = start({ ...e.a, pollMs: 10_000 });
-  const controller = new AbortController();
   const heads: { revisionId: string; sequence: number }[] = [];
   const errors: unknown[] = [];
-  const watching = runner.watch(controller.signal, head => heads.push(head), error => errors.push(error));
+  const watching = controlledWatch(runner, head => heads.push(head), error => errors.push(error));
   try {
-    await waitFor(() => heads.length > 0);
+    await watching.ready();
     const initial = heads[0]!.sequence;
     writeFileSync(join(e.firstFiles, "activity"), "one", { mode: 0o600 });
     writeFileSync(join(e.firstFiles, "activity"), "two");
-    await waitFor(() => heads.some(head => head.sequence > initial));
+    await watching.advance();
     expect(heads.at(-1)!.sequence).toBe(initial + 1);
-    await Bun.sleep(1_100);
+    await watching.advance();
     expect(heads.at(-1)!.sequence).toBe(initial + 1);
     expect(errors).toEqual([]);
-  } finally { controller.abort(); await watching; await stop(runner); }
+  } finally { await watching.stop(); await stop(runner); }
   expect(await main(["client", "sync", "--client-dir", e.firstDir, "--path", e.firstFiles])).toBe(0);
 });
 
 test("continuous sync reloads ignore rules and prunes new unsafe directories", async () => {
   const e = await fixture();
   const runner = start({ ...e.a, pollMs: 10_000 });
-  const controller = new AbortController();
   const heads: number[] = [], errors: unknown[] = [];
-  const watching = runner.watch(controller.signal, head => heads.push(head.sequence), error => errors.push(error));
+  const watching = controlledWatch(runner, head => heads.push(head.sequence), error => errors.push(error));
   try {
-    await waitFor(() => heads.length > 0);
+    await watching.ready();
     writeFileSync(join(e.firstFiles, ".nanosyncignore"), ".venv/\n", { mode: 0o600 });
     mkdirSync(join(e.firstFiles, ".venv"));
     symlinkSync("missing", join(e.firstFiles, ".venv", "link"));
     writeFileSync(join(e.firstFiles, "included"), "yes");
-    await waitFor(() => heads.some(sequence => sequence > 1));
+    await watching.advance();
+    expect(heads.some(sequence => sequence > 1)).toBe(true);
     expect(errors).toEqual([]);
     const remote = new HttpRemote({ baseUrl: e.url, token: e.a.token, fetch });
     const head = await remote.head();
     expect((await remote.manifest(head.revisionId!, e.a.masterKey)).manifest.entries.map(entry => entry.name))
       .toEqual(expect.arrayContaining(["included"]));
     expect((await remote.manifest(head.revisionId!, e.a.masterKey)).manifest.entries.some(entry => entry.name === ".venv")).toBe(false);
-  } finally { controller.abort(); await watching; await stop(runner); }
+  } finally { await watching.stop(); await stop(runner); }
 });
 
 test("continuous CLI command runs in the foreground and releases the lock on SIGTERM", async () => {
   const e = await fixture();
   const lock = join(e.a.clientDirectory, ".sync-owner");
+  const started = Promise.withResolvers<void>(), transport = globalThis.fetch;
+  const requests = spyOn(globalThis, "fetch").mockImplementation(Object.assign((input: RequestInfo | URL, init?: RequestInit) => {
+    started.resolve();
+    return transport(input, init);
+  }, { preconnect: transport.preconnect }));
   const running = main(["client", "sync", "--watch", "--client-dir", e.firstDir, "--path", e.firstFiles]);
   try {
-    await waitFor(() => existsSync(lock));
+    await started.promise;
+    expect(existsSync(lock)).toBe(true);
     expect(await main(["client", "sync", "--client-dir", e.firstDir, "--path", e.firstFiles])).toBe(2);
     expect(await main(["client", "vaults", "disconnect", "--client-dir", e.firstDir, "--path", e.firstFiles, "--force", "--yes"])).toBe(2);
     expect(await main(["client", "connections", "remove", "--client-dir", e.firstDir, "--server", "test", "--force", "--yes"])).toBe(2);
     expect(existsSync(join(e.firstFiles, ".nanosync"))).toBe(true);
   } finally {
     process.emit("SIGTERM");
-    expect(await running).toBe(0);
+    try { expect(await running).toBe(0); } finally { requests.mockRestore(); }
   }
   expect(existsSync(lock)).toBe(false);
 });
@@ -431,33 +454,35 @@ test("continuous sync reports an offline failure then retries until connected", 
     if (offline) return Promise.reject(new TypeError("temporarily offline"));
     return fetch(input, init);
   } });
-  const controller = new AbortController();
   const errors: unknown[] = [];
   const heads: string[] = [];
-  const watching = runner.watch(controller.signal, head => heads.push(head.revisionId), error => errors.push(error));
+  const watching = controlledWatch(runner, head => heads.push(head.revisionId), error => errors.push(error));
   try {
-    await waitFor(() => errors.length > 0);
+    await watching.ready();
+    expect(errors).toHaveLength(1);
     expect(errors[0]).toBeInstanceOf(TypeError);
     offline = false;
-    await waitFor(() => heads.length > 0);
+    await watching.advance();
     expect(heads[0]).toBeTruthy();
-  } finally { controller.abort(); await watching; await stop(runner); }
+  } finally { await watching.stop(); await stop(runner); }
 });
 
 
 test("deleted vault stops watch without changing plaintext or stored keys", async () => {
   const f = await fixture();
   writeFileSync(join(f.firstFiles, "precious.txt"), "offline unsynced work");
-  const { ServerMetadataDatabase, VaultRepository } = await import('@nanosync/server-metadata');
+  const { ServerMetadataDatabase, VaultRepository, MaintenanceRepository } = await import('@nanosync/server-metadata');
+  const cleaned = Promise.withResolvers<void>(), finishDeletion = MaintenanceRepository.prototype.finishDeletion;
+  const cleanup = spyOn(MaintenanceRepository.prototype, 'finishDeletion').mockImplementation(function(this: InstanceType<typeof MaintenanceRepository>, id) {
+    finishDeletion.call(this, id); cleaned.resolve();
+  });
   const db = new ServerMetadataDatabase(join(f.serverDir, 'metadata.sqlite'));
   try { new VaultRepository(db).markDeleted(f.first.vaultId, {origin:'server-local',actorId:null}, Date.now()); }
   finally { db.close(); }
   const runner = start(f.a), controller = new AbortController();
   const errors: unknown[] = [];
-  const outcome = await Promise.race([
-    runner.watch(controller.signal, () => { throw Error('deleted sync succeeded'); }, error => errors.push(error)).then(() => 'unexpected success', error => { expect(error).toMatchObject({code:'VAULT_DELETED'}); return 'stopped'; }),
-    Bun.sleep(1500).then(() => { controller.abort(); return 'retried'; }),
-  ]);
+  const outcome = await runner.watch(controller.signal, () => { throw Error('deleted sync succeeded'); }, error => errors.push(error))
+    .then(() => 'unexpected success', error => { expect(error).toMatchObject({code:'VAULT_DELETED'}); return 'stopped'; });
   expect(outcome).toBe('stopped');
   expect(errors).toHaveLength(1);
   expect(errors[0]).toMatchObject({code:'VAULT_DELETED',status:410});
@@ -466,8 +491,9 @@ test("deleted vault stops watch without changing plaintext or stored keys", asyn
   expect(Buffer.from(f.a.masterKey).toString('hex')).toBe(f.first.masterKey);
   const inspection = new ServerMetadataDatabase(join(f.serverDir, 'metadata.sqlite'));
   try {
-    await waitFor(() => new VaultRepository(inspection).deletions()[0]?.cleanupState === 'complete');
-  } finally { inspection.close(); }
+    await cleaned.promise;
+    expect(new VaultRepository(inspection).deletions()[0]?.cleanupState).toBe('complete');
+  } finally { inspection.close(); cleanup.mockRestore(); }
   const { LocalFilesystem } = await import('@nanosync/server-object-storage');
   expect((await new LocalFilesystem(join(f.serverDir, 'objects')).list()).keys).toEqual([]);
 });
@@ -553,6 +579,97 @@ for (const [before, after] of [[0o600, 0o700], [0o700, 0o600]]) {
     expect(statSync(path).mode & 0o777).toBe(after!);
   });
 }
+
+test("offline edits survive an interrupted merge across 65 remote revisions", async () => {
+  const e = await fixture();
+  const initial = start(e.b);
+  await initial.syncOnce(); await stop(initial);
+  const remote = new HttpRemote({ baseUrl: e.url, token: e.a.token, vaultId: e.a.vaultId, fetch });
+  let current = await remote.manifest((await remote.head()).revisionId!, e.a.masterKey);
+  const folder = randomUUID(), root = current.manifest.entries.find(entry => entry.parentId === null)!;
+  for (let i = 0; i < 65; i++) {
+    const manifest = { ...current.manifest, revisionId: randomUUID(), parents: [current.manifest.revisionId],
+      entries: [root, { id: folder, parentId: root.id, name: `remote-${i}`, kind: "directory" as const }] };
+    expect((await remote.publish(manifest, [], [], e.a.masterKey, current.manifest.revisionId, new Date().toISOString())).status).toBe("accepted");
+    current = await remote.manifest(manifest.revisionId, e.a.masterKey);
+  }
+  writeFileSync(join(e.secondFiles, "offline"), "local work", { mode: 0o600 });
+  let advances = 0;
+  const interrupted = start({ ...e.b, fetch: (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    if (new URL(request.url).pathname === "/v1/head/advance" && ++advances === 3)
+      return Promise.reject(new Error("interrupted reconciliation"));
+    return fetch(request);
+  } });
+  await expect(interrupted.syncOnce()).rejects.toThrow("interrupted reconciliation");
+  await stop(interrupted);
+  const pending = new ClientLocal(e.b.clientDirectory, e.b.vaultId, e.b.deviceId);
+  try { expect(pending.reconciliation()).not.toBeNull(); } finally { pending.close(); }
+  const resumed = start(e.b), head = await resumed.syncOnce();
+  expect(await resumed.syncOnce()).toEqual(head);
+  expect(readFileSync(join(e.secondFiles, "offline"), "utf8")).toBe("local work");
+  expect(statSync(join(e.secondFiles, "remote-64")).isDirectory()).toBe(true);
+  const finished = new ClientLocal(e.b.clientDirectory, e.b.vaultId, e.b.deviceId);
+  try { expect(finished.reconciliation()).toBeNull(); expect(finished.proposal()).toBeNull(); }
+  finally { finished.close(); }
+});
+
+test("merge recovery handles a lost acceptance followed by interrupted filesystem staging", async () => {
+  const e = await fixture(), a = start(e.a), initial = start(e.b);
+  await a.syncOnce(); await initial.syncOnce();
+  writeFileSync(join(e.firstFiles, "shared"), "base", { mode: 0o600 });
+  await a.syncOnce(); await initial.syncOnce(); await stop(initial);
+  writeFileSync(join(e.secondFiles, "shared"), "offline");
+  writeFileSync(join(e.firstFiles, "shared"), "online");
+  await a.syncOnce();
+  let lost = false, interrupted = false;
+  const transport: NonNullable<SyncOptions["fetch"]> = async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const pathname = new URL(request.url).pathname;
+    if (lost && !interrupted && pathname.startsWith("/v1/objects/chunk/")) {
+      interrupted = true; throw new Error("staging interrupted");
+    }
+    const response = await fetch(request);
+    if (!lost && pathname === "/v1/head/advance" && (await response.clone().json()).status === "accepted") {
+      lost = true; await response.arrayBuffer(); throw new Error("merge acceptance lost");
+    }
+    return response;
+  };
+  const first = start({ ...e.b, fetch: transport });
+  await expect(first.syncOnce()).rejects.toThrow("merge acceptance lost"); await stop(first);
+  const second = start({ ...e.b, fetch: transport });
+  await expect(second.syncOnce()).rejects.toThrow("staging interrupted"); await stop(second);
+  const pending = new ClientLocal(e.b.clientDirectory, e.b.vaultId, e.b.deviceId);
+  try { expect(pending.pendingApplies()).toHaveLength(1); expect(pending.reconciliation()).not.toBeNull(); }
+  finally { pending.close(); }
+  await start(e.b).syncOnce();
+  expect(readdirSync(e.secondFiles).filter(name => name !== ".nanosync").map(name => readFileSync(join(e.secondFiles, name), "utf8")).sort())
+    .toEqual(["offline", "online"]);
+  const finished = new ClientLocal(e.b.clientDirectory, e.b.vaultId, e.b.deviceId);
+  try { expect(finished.reconciliation()).toBeNull(); expect(finished.pendingApplies()).toEqual([]); expect(finished.proposal()).toBeNull(); }
+  finally { finished.close(); }
+});
+
+test("abort and stop cancel stalled sync requests and release ownership", async () => {
+  const e = await fixture();
+  for (const action of ["abort", "stop"] as const) {
+    const started = Promise.withResolvers<Request>();
+    const runner = start({ ...e.a, fetch: input => {
+      const request = input as Request; started.resolve(request);
+      return new Promise<Response>((_resolve, reject) => {
+        request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true });
+      });
+    } });
+    const controller = new AbortController(), errors: unknown[] = [];
+    const watching = runner.watch(controller.signal, () => { throw new Error("unexpected success"); }, error => errors.push(error));
+    const request = await started.promise;
+    if (action === "abort") controller.abort(); else await runner.stop();
+    await watching; await stop(runner);
+    expect(request.signal.aborted).toBe(true);
+    expect(errors).toEqual([]);
+    expect(existsSync(join(e.a.clientDirectory, ".sync-owner"))).toBe(false);
+  }
+});
 
 test('synchronized executable metadata permits clean disconnect for publisher and downloaded replica', async () => {
   const e = await fixture();

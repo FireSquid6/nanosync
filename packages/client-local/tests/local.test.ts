@@ -17,6 +17,24 @@ const dirs: string[] = [];
 function directory() { const dir = mkdtempSync(join(tmpdir(), "nanosync-client-")); chmodSync(dir, 0o700); dirs.push(dir); return dir; }
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
+test("apply checkpoints preserve identity and state even after acceptance advances", () => {
+  const dir = directory(); let local = new ClientLocal(dir, vault, device);
+  local.recordHead("accepted", { revisionId: rev, sequence: 1 });
+  local.prepareApply(other, rev, 1, '{"phase":"staging"}');
+  expect(() => local.updateApplyPlan(other, "")).toThrow(/invalid/);
+  expect(() => local.updateApplyPlan(other, "x".repeat(8_000_001))).toThrow(/invalid/);
+  expect(() => local.updateApplyPlan(rev, "{}")).toThrow(/missing/);
+  local.recordHead("accepted", { revisionId: other, sequence: 2 });
+  local.updateApplyPlan(other, '{"phase":"ready"}');
+  local.transition("operations", other, "running"); local.close();
+  local = new ClientLocal(dir, vault, device);
+  expect(local.applyPlan(other)).toBe('{"phase":"ready"}');
+  expect(local.pendingApplies()).toEqual([{ id: other, revision: rev, sequence: 1, state: "running" }]);
+  local.finishApply(other, { revisionId: rev, sequence: 1 }, [], []);
+  expect(() => local.updateApplyPlan(other, "{}")).toThrow(/missing/);
+  local.close();
+});
+
 test("apply intent survives restart and commits applied head, entries and suppression atomically", () => {
   const dir = directory(); let db = new ClientLocal(dir, vault, device);
   db.recordHead("accepted", { revisionId: rev, sequence: 1 });

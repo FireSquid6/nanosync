@@ -247,7 +247,7 @@ export class ClientLocal implements ChunkJournal {
       run(this.db, "DELETE FROM hydration WHERE id=?", intent.id);
     });
   }
-  /** Call only after a plan has been accepted/applied. Replaces identities atomically. */
+  /** Replace identities atomically after acceptance, or under a durable reconciliation intent. */
   recordScan(entries: Entry[], identities: { entryId: string; device: string; inode: string }[]) {
     for (const entry of entries) { uuid(entry.id); this.path(entry.path); if (entry.fingerprint !== null) hex(entry.fingerprint); if (entry.revision) uuid(entry.revision); }
     for (const identity of identities) { uuid(identity.entryId); if (!/^\d+$/.test(identity.device) || !/^\d+$/.test(identity.inode)) throw new Error("invalid filesystem identity"); }
@@ -300,6 +300,17 @@ export class ClientLocal implements ChunkJournal {
     if (!sequence || this.head("accepted").revisionId !== revision || this.head("accepted").sequence !== sequence)
       throw new Error("apply requires accepted head");
     this.work("operations", id, ["apply", null, "pending", JSON.stringify({ revision, sequence, ...(plan === undefined ? {} : { plan }) })]);
+  }
+  updateApplyPlan(id: string, plan: string): void {
+    uuid(id);
+    if (typeof plan !== "string" || !plan.length || Buffer.byteLength(plan) > 8_000_000) throw new Error("invalid apply plan");
+    this.write(() => {
+      const intent = row<{ detail: string }>(this.db, "SELECT detail FROM operations WHERE id=? AND kind='apply' AND state IN ('pending','running')", id);
+      if (!intent) throw new Error("missing pending apply intent");
+      const detail = JSON.parse(intent.detail) as { revision: string; sequence: number };
+      uuid(detail.revision); integer(detail.sequence);
+      run(this.db, "UPDATE operations SET detail=? WHERE id=?", JSON.stringify({ ...detail, plan }), id);
+    });
   }
   applyPlan(id: string): string | null {
     uuid(id);
@@ -465,6 +476,38 @@ export class ClientLocal implements ChunkJournal {
     });
   }
   clearProposal() { this.write(() => { const p = this.proposal(); if (p && p.state !== "accepted") throw new Error("unresolved proposal cannot be discarded"); run(this.db, "DELETE FROM proposals"); }); }
+  reconciliation(): { baseRevision: string; localRevision: string } | null {
+    const intents = all<{ detail: string }>(this.db, "SELECT detail FROM operations WHERE kind='merge' AND state<>'done'");
+    if (intents.length > 1) throw new Error("multiple reconciliation intents");
+    if (!intents.length) return null;
+    const value = JSON.parse(intents[0]!.detail) as { baseRevision: string; localRevision: string };
+    uuid(value.baseRevision); uuid(value.localRevision);
+    return { baseRevision: value.baseRevision, localRevision: value.localRevision };
+  }
+  /** Preserve the on-disk branch before discarding any stale proposal or changing the inventory. */
+  beginReconciliation(baseRevision: string, localRevision: string) {
+    uuid(baseRevision); uuid(localRevision);
+    this.write(() => {
+      const current = this.reconciliation();
+      if (current) {
+        if (current.baseRevision !== baseRevision || current.localRevision !== localRevision) throw new Error("reconciliation already pending");
+        return;
+      }
+      const proposal = this.proposal();
+      if (this.head("applied").revisionId !== baseRevision || proposal?.state !== "prepared" ||
+          proposal.request.proposedRevision.revisionId !== localRevision) throw new Error("reconciliation branch changed");
+      run(this.db, "INSERT INTO operations VALUES(?,'merge',NULL,'running',?)", localRevision, JSON.stringify({ baseRevision, localRevision }));
+    });
+  }
+  finishReconciliation() {
+    this.write(() => {
+      const intent = this.reconciliation(), proposal = this.proposal();
+      if (!intent || proposal?.state !== "accepted" || this.head("applied").revisionId !== proposal.request.proposedRevision.revisionId)
+        throw new Error("reconciliation not applied");
+      run(this.db, "UPDATE operations SET state='done',detail='{}' WHERE id=? AND kind='merge'", intent.localRevision);
+      run(this.db, "DELETE FROM proposals");
+    });
+  }
   /** Only a definitive stale-head response permits replacing a prepared request. */
   discardStaleProposal(revisionId: string) {
     uuid(revisionId);

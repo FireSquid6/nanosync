@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, test, spyOn } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -55,6 +55,33 @@ async function setup() {
   const manifest = (id = nextId) => ({ ...genesisManifest, revisionId: id, parents: [genesisId] });
   return { database, remote, transport, handle, calls, manifest, genesis, filesystem, revoke: () => { revoked = true; } };
 }
+
+test("request deadlines remain active while reading bodies and external cancellation reaches fetch", async () => {
+  for (const phase of ["fetch", "body"] as const) {
+    const timeout = new AbortController(), external = new AbortController(), started = Promise.withResolvers<Request>();
+    const deadline = spyOn(AbortSignal, "timeout").mockReturnValue(timeout.signal);
+    try {
+      const client = new HttpRemote({ baseUrl: "http://local", token, signal: external.signal, fetch: async input => {
+        const request = input as Request;
+        if (phase === "fetch") {
+          started.resolve(request);
+          return new Promise<Response>((_resolve, reject) => request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true }));
+        }
+        return new Response(new ReadableStream({ start(controller) {
+          request.signal.addEventListener("abort", () => controller.error(request.signal.reason), { once: true });
+          started.resolve(request);
+        } }), { headers: { "content-type": "application/json" } });
+      } });
+      const pending = client.capabilities();
+      void pending.catch(() => {});
+      const request = await started.promise;
+      expect(deadline).toHaveBeenCalledWith(30_000);
+      if (phase === "fetch") external.abort(new Error("cancelled request")); else timeout.abort(new Error("cancelled request"));
+      await expect(pending).rejects.toThrow("cancelled request");
+      expect(request.signal.aborted).toBe(true);
+    } finally { deadline.mockRestore(); }
+  }
+});
 
 test("negotiates, authenticates, publishes immutable frames, replays a lost acceptance and leaves stale head alone", async () => {
   const env = await setup(); const client = env.remote();

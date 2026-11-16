@@ -179,7 +179,7 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
         console.error('Connected; no files transferred. Next: nanosync client sync');
       });
     flags(bindings.command('disconnect'), ...clientFlags, ...common, '--path <directory>', '--force').action(async (_o, command) => {
-      const dir = root(command), binding = discoverConnection(dir, opts(command).path ?? process.cwd());
+      const dir = root(command), binding = discoverConnection(dir, opts(command).path ?? process.cwd(), !!opts(command).force);
       if (opts(command).force) console.error('Disconnect discards pending synchronization state. Local files and remote data are preserved.');
       disconnectConnections(dir, [binding], !!opts(command).force); result = {connectionId:binding.connectionId, disconnected:true, filesPreserved:true};
     });

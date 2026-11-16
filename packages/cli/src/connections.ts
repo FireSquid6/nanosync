@@ -24,7 +24,7 @@ function rootPath(path: string): string {
   let stat;
   try { stat = lstatSync(root); }
   catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error("sync directory is missing; run nanosync setup to repair");
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error("sync directory is missing; restore it or disconnect its saved binding with --force");
     throw error;
   }
   if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid!() || realpathSync(root) !== root)
@@ -38,14 +38,14 @@ function id(value: unknown): string {
 function marker(path: string): Marker {
   const file = join(path, MARKER);
   const value = JSON.parse(secureRead(file, 512).toString("utf8")) as Marker;
-  if (value?.version !== 1 || Object.keys(value).length !== 2) throw new Error("invalid .nanosync marker; run setup to repair");
+  if (value?.version !== 1 || Object.keys(value).length !== 2) throw new Error("invalid .nanosync marker; restore its original contents before disconnecting");
   return { version: 1, connectionId: id(value.connectionId) };
 }
 function record(global: string, connectionId: string): Connection {
   const value = JSON.parse(secureRead(join(global, "connections", `${id(connectionId)}.json`), 2048).toString("utf8")) as Connection;
   if (value?.version !== 1 || Object.keys(value).length !== 6 || value.connectionId !== connectionId ||
       typeof value.root !== "string" || resolve(value.root) !== value.root ||
-      typeof value.serverId !== "string") throw new Error("invalid connection record; run setup to repair");
+      typeof value.serverId !== "string") throw new Error("invalid connection record; restore private connection state from backup");
   parseVaultId(value.vaultId); parseDeviceId(value.deviceId);
   return value;
 }
@@ -57,6 +57,10 @@ export function records(global: string): Connection[] {
     if (!/^[0-9a-f-]{36}\.json$/.test(name)) throw new Error("unexpected connection state file");
     return record(global, name.slice(0, -5));
   });
+}
+function missingRoot(path: string): boolean {
+  try { lstatSync(path); return false; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return true; throw error; }
 }
 function overlaps(a: string, b: string): boolean { return a === b || a.startsWith(b + sep) || b.startsWith(a + sep); }
 function ancestorMarker(path: string): boolean {
@@ -70,19 +74,24 @@ function ancestorMarker(path: string): boolean {
 }
 
 /** The nearest marker wins. A copied marker is never allowed to share the source journal. */
-export function discoverConnection(globalDirectory: string, from: string): Connection {
+export function discoverConnection(globalDirectory: string, from: string, allowMissingRoot = false): Connection {
+  if (allowMissingRoot && missingRoot(resolve(from))) {
+    const saved = records(globalDirectory).find(connection => connection.root === resolve(from));
+    if (!saved) throw new Error("no saved binding for the missing directory");
+    return saved;
+  }
   let current = rootPath(from);
   while (true) {
     if (existsSync(join(current, MARKER))) {
       const found = marker(current);
       let connection: Connection;
       try { connection = record(globalDirectory, found.connectionId); }
-      catch { throw new Error("missing or invalid global connection state; run nanosync setup to repair"); }
-      if (connection.root !== current) throw new Error("connection marker was copied or moved; run nanosync setup to repair");
+      catch { throw new Error("missing or invalid global connection state; restore private connection state from backup"); }
+      if (connection.root !== current) throw new Error("connection marker was copied or moved; restore its original location or disconnect the original binding before reconnecting");
       return connection;
     }
     const parent = dirname(current);
-    if (parent === current) throw new Error("no .nanosync connection found; run nanosync setup");
+    if (parent === current) throw new Error("no .nanosync connection found; run nanosync client vaults connect");
     current = parent;
   }
 }
@@ -207,9 +216,13 @@ function disconnectLocked(globalDirectory: string, connections: Connection[], fo
   connections = [...connections].sort((a,b) => a.connectionId.localeCompare(b.connectionId));
   const releases: (() => void)[] = [];
   const replicaPaths: string[] = [];
+  const absent = new Set<string>();
   try {
     for (const connection of connections) {
-      if (discoverConnection(global, connection.root).connectionId !== connection.connectionId) throw new Error("binding identity changed");
+      const saved = record(global, connection.connectionId);
+      if (JSON.stringify(saved) !== JSON.stringify(connection)) throw new Error("binding identity changed");
+      if (force && missingRoot(connection.root)) absent.add(connection.connectionId);
+      else if (discoverConnection(global, connection.root).connectionId !== connection.connectionId) throw new Error("binding identity changed");
       const replica = privateDirectory(join(privateDirectory(join(global, "replicas")), connection.connectionId));
       releases.push(acquireSyncLock(replica));
       replicaPaths.push(replica);
@@ -219,7 +232,7 @@ function disconnectLocked(globalDirectory: string, connections: Connection[], fo
         throw new Error("possible unsynced work; use --force to explicitly discard pending synchronization state (files are preserved)");
     }
     for (const connection of connections) {
-      unlinkSync(join(connection.root, MARKER)); syncDirectory(connection.root);
+      if (!absent.has(connection.connectionId)) { unlinkSync(join(connection.root, MARKER)); syncDirectory(connection.root); }
       unlinkSync(join(global, "connections", `${connection.connectionId}.json`));
     }
     if (connections.length) syncDirectory(join(global, "connections"));

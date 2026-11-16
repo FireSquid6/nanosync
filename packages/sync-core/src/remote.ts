@@ -46,6 +46,7 @@ export interface RemoteOptions {
   fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   journal?: ChunkJournal;
   retries?: number;
+  signal?: AbortSignal;
 }
 
 function exact(value: unknown, fields: string[]): Record<string, unknown> {
@@ -189,7 +190,13 @@ export class HttpRemote {
     const headers = new Headers(init.headers);
     if (authenticated) headers.set("authorization", `Bearer ${this.options.token}`);
     if (authenticated && this.options.vaultId) headers.set("x-nanosync-vault-id", this.options.vaultId);
-    return this.options.fetch(new Request(`${this.base}${path}`, { ...init, headers }));
+    const signal = AbortSignal.any([
+      AbortSignal.timeout(30_000),
+      ...(this.options.signal ? [this.options.signal] : []),
+      ...(init.signal ? [init.signal] : []),
+    ]);
+    signal.throwIfAborted();
+    return this.options.fetch(new Request(`${this.base}${path}`, { ...init, headers, signal }));
   }
 
   private async body(response: Response, statuses: number[] = [200]): Promise<unknown> {
