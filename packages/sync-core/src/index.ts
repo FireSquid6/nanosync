@@ -232,3 +232,4 @@ export async function verifyReferenceSetMac(envelope: RevisionEnvelope, master: 
 }
 
 export { SyncEngine, type SyncEngineOptions, type SyncJournal, type SyncScanner, type SyncRemote, type ScanPlan, type Head, type HydrationIntent } from "./sync-engine.ts";
+export { IGNORE_FILE, IgnoreMatcher } from "./ignore.ts";
