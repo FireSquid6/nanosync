@@ -38,6 +38,7 @@ public final class SyncOwnershipTest {
         final List<String> ids = new ArrayList<>();
         final ConcurrentHashMap<String, FakeRun> runs = new ConcurrentHashMap<>();
         final SyncCoordinator coordinator;
+        final java.util.concurrent.atomic.AtomicInteger cleanupFailures = new java.util.concurrent.atomic.AtomicInteger();
         Fixture(int count, long budget) throws Exception {
             JSONArray vaults = new JSONArray();
             for (int i = 0; i < count; i++) {
@@ -50,6 +51,11 @@ public final class SyncOwnershipTest {
                     .put("token", "test-only").put("enrollmentStatus", "approved").put("vaults", vaults);
             store.update(new JSONObject().put("servers", new JSONArray().put(server)));
             coordinator = new SyncCoordinator(context, store, null, new SyncCoordinator.ExecutionEnvironment() {
+                @Override void startBackgroundService(Context ignored) { }
+                @Override void removeJournal(AppStore target, String id) {
+                    if (cleanupFailures.getAndUpdate(value -> Math.max(0, value - 1)) > 0) throw new IllegalStateException("Temporary cleanup failure");
+                    target.removeJournal(id);
+                }
                 @Override long budgetMillis(int previousYields) { return previousYields == 0 ? budget : 60_000; }
                 @Override boolean networkAllowed(Context ignored, boolean mobile) { return true; }
                 @Override File validateRoot(String path) { return new File(path); }
@@ -75,6 +81,50 @@ public final class SyncOwnershipTest {
             for (FakeRun run : runs.values()) run.drain();
             await(() -> { for (String id : ids) if (tombstone(id)) return false; return true; });
             store.update(original);
+        }
+    }
+
+    @Test public void queuedManualIsInvalidatedByPauseButNewManualWhilePausedIsAllowed() throws Exception {
+        try (Fixture f = new Fixture(5, 60_000)) {
+            for (String id : f.ids) f.coordinator.syncNow(id, false);
+            await(() -> f.runs.size() == 4 && "Queued".equals(f.vault(4).optString("status")));
+            f.store.mutate(config -> { try { config.getJSONArray("servers").getJSONObject(0).getJSONArray("vaults").getJSONObject(4).put("paused", true); }
+                catch (Exception e) { throw new AssertionError(e); } });
+            f.coordinator.settingsChanged();
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            f.runs.get(f.ids.get(0)).listener.onError("test finish");
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            assertFalse(f.runs.containsKey(f.ids.get(4)));
+            f.coordinator.syncNow(f.ids.get(4), false);
+            await(() -> f.runs.containsKey(f.ids.get(4)));
+            assertTrue(f.vault(4).optBoolean("paused"));
+        }
+    }
+
+    @Test public void recoveryTimeoutExplainsThatRecoveryKeyMustBeEnteredAgain() throws Exception {
+        try (Fixture f = new Fixture(0, 100)) {
+            String serverId = f.store.snapshot().getJSONArray("servers").getJSONObject(0).getString("id");
+            f.coordinator.connectVault(serverId, UUID.randomUUID().toString(), "Recovery", f.context.getCacheDir() + "/recovery", "transient-test-key");
+            await(() -> f.runs.size() == 1 && f.runs.values().iterator().next().cancelled);
+            String id = f.runs.keySet().iterator().next();
+            assertTrue(f.store.snapshot().optString("error").contains("enter the recovery key again"));
+            assertFalse(f.store.snapshot().toString().contains("transient-test-key"));
+            f.runs.get(id).drain();
+            await(() -> f.store.snapshot().optJSONArray("servers").optJSONObject(0).optJSONArray("vaults").length() == 0 && !f.tombstone(id));
+        }
+    }
+
+    @Test public void cleanupFailureCanRetryInSameProcessWithoutDuplicateWorker() throws Exception {
+        try (Fixture f = new Fixture(1, 60_000)) {
+            String id = f.ids.get(0); File journal = f.store.journalDirectory(id);
+            assertTrue(new File(journal, "retained-stage").createNewFile());
+            f.cleanupFailures.set(1);
+            f.coordinator.disconnectVault(id);
+            await(() -> f.store.snapshot().optString("error").contains("Private cleanup pending"));
+            assertTrue(journal.exists()); assertTrue(f.tombstone(id));
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            f.coordinator.settingsChanged(); f.coordinator.settingsChanged();
+            await(() -> !journal.exists() && !f.tombstone(id));
         }
     }
 

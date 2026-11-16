@@ -49,6 +49,7 @@ public final class SyncCoordinator implements UiActions {
             state = shared;
         }
         callback = onChanged;
+        state.main.post(state::retryCleanup);
         if (onChanged != null) state.main.post(() -> state.observers.add(new WeakReference<>(onChanged)));
     }
 
@@ -67,6 +68,8 @@ public final class SyncCoordinator implements UiActions {
                 public void cancel() { runtime.cancel(); }
             };
         }
+        void startBackgroundService(Context context) { context.startForegroundService(new Intent(context, SyncService.class)); }
+        void removeJournal(AppStore store, String id) { store.removeJournal(id); }
         long budgetMillis(int previousYields) {
             // Transfer/apply checkpoints survive each yield. Increase the CPU/scan window on
             // retries too, so a large initial inventory is not perpetually cut at two minutes.
@@ -76,9 +79,7 @@ public final class SyncCoordinator implements UiActions {
             ConnectivityManager manager = context.getSystemService(ConnectivityManager.class);
             Network network = manager.getActiveNetwork();
             NetworkCapabilities capabilities = network == null ? null : manager.getNetworkCapabilities(network);
-            return capabilities != null && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                    && (mobile || capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-                    && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED));
+            return capabilities != null && (mobile || NetworkPolicy.isWifi(capabilities));
         }
         File validateRoot(String path) throws IOException { return checkedRoot(path); }
     }
@@ -238,12 +239,14 @@ public final class SyncCoordinator implements UiActions {
 
     @Override public void syncNow(String id, boolean override) { state.main.post(() -> state.start(id, true, override, null)); }
     @Override public void settingsChanged() {
+        JSONObject settings = state.store.snapshot();
         state.main.post(() -> {
+            state.refreshPolicies(settings);
+            state.retryCleanup();
             state.reconcile();
             if (state.hasBackground()) {
                 try {
-                    Intent intent = new Intent(state.context, SyncService.class);
-                    state.context.startForegroundService(intent);
+                    state.environment.startBackgroundService(state.context);
                 } catch (RuntimeException e) { state.backgroundUnavailable("Background sync could not start. Open Nanosync and allow background operation."); }
             }
         });
@@ -290,11 +293,15 @@ public final class SyncCoordinator implements UiActions {
         String serverId, vaultId;
         long lastEvent;
         int previousYields;
+        long generation;
     }
     private static final class StartRequest {
         final boolean manual, override;
         final String recovery;
-        StartRequest(boolean manual, boolean override, String recovery) { this.manual = manual; this.override = override; this.recovery = recovery; }
+        final long generation;
+        StartRequest(boolean manual, boolean override, String recovery, long generation) {
+            this.manual = manual; this.override = override; this.recovery = recovery; this.generation = generation;
+        }
     }
     private static final class Shared {
         final Context context;
@@ -307,6 +314,9 @@ public final class SyncCoordinator implements UiActions {
         final java.util.LinkedHashMap<String, StartRequest> queued = new java.util.LinkedHashMap<>();
         final Map<String, Long> next = new HashMap<>();
         final Map<String, Integer> failures = new HashMap<>();
+        final Map<String, String> policyValues = new HashMap<>();
+        final Map<String, Long> generations = new HashMap<>();
+        final Set<String> cleanupWorkers = new HashSet<>();
         final Set<String> enrolling = new HashSet<>();
         final Set<HttpURLConnection> requests = java.util.concurrent.ConcurrentHashMap.newKeySet();
         final Set<String> notified = new HashSet<>();
@@ -329,22 +339,53 @@ public final class SyncCoordinator implements UiActions {
                     }
                 }
             });
-            // Durable tombstones survive death between removing config and draining/deleting IO.
+            retryCleanup();
+        }
+        void retryCleanup() {
             JSONArray cleanup = store.snapshot().optJSONArray("cleanupJournals");
             if (cleanup != null) for (int i = 0; i < cleanup.length(); i++) cleanupJournal(cleanup.optString(i));
         }
         void cleanupJournal(String id) {
-            io.execute(() -> {
-                try {
-                    if (findVault(store.snapshot(), id) != null) return;
-                    store.removeJournal(id); // AppStore validates canonical UUID and private, link-safe ownership.
-                    mutate(config -> {
-                        JSONArray pending = config.optJSONArray("cleanupJournals");
-                        if (pending != null) for (int i = pending.length() - 1; i >= 0; i--)
-                            if (id.equals(pending.optString(i))) pending.remove(i);
-                    });
-                } catch (RuntimeException e) { globalError("Private cleanup pending. Reopen Nanosync to retry. " + message(e)); }
+            main.post(() -> {
+                if (runs.containsKey(id) || findVault(store.snapshot(), id) != null || !cleanupWorkers.add(id)) return;
+                io.execute(() -> {
+                    try {
+                        environment.removeJournal(store, id);
+                        mutate(config -> {
+                            JSONArray pending = config.optJSONArray("cleanupJournals");
+                            if (pending != null) for (int i = pending.length() - 1; i >= 0; i--)
+                                if (id.equals(pending.optString(i))) pending.remove(i);
+                        });
+                    } catch (RuntimeException e) { globalError("Private cleanup pending. Reopen Nanosync or retry settings to retry. " + message(e)); }
+                    finally { main.post(() -> cleanupWorkers.remove(id)); }
+                });
             });
+        }
+        String policyStamp(JSONObject config, JSONObject vault) {
+            return config.optBoolean("allowHttp") + ":" + config.optBoolean("defaultMobile") + ":"
+                    + vault.optString("mobilePolicy", "default") + ":" + vault.optBoolean("paused") + ":" + vault.optBoolean("background");
+        }
+        void refreshPolicies(JSONObject config) {
+            JSONArray servers = config.optJSONArray("servers");
+            for (int i = 0; i < servers.length(); i++) {
+                JSONArray vaults = servers.optJSONObject(i).optJSONArray("vaults");
+                for (int j = 0; j < vaults.length(); j++) {
+                    JSONObject vault = vaults.optJSONObject(j); String id = vault.optString("id");
+                    String stamp = policyStamp(config, vault), old = policyValues.put(id, stamp);
+                    if (old != null && !old.equals(stamp)) generations.put(id, generations.getOrDefault(id, 0L) + 1);
+                }
+            }
+        }
+        boolean currentRequest(String id, StartRequest request) {
+            JSONObject config = store.snapshot(), vault = findVault(config, id);
+            return vault != null && request.generation == generations.getOrDefault(id, 0L)
+                    && policyStamp(config, vault).equals(policyValues.get(id));
+        }
+        void discardQueued(String id, StartRequest request) {
+            if (request.recovery != null) {
+                globalError("Connection cancelled by a settings change. Reconnect and enter the recovery key again.");
+                mutate(config -> removeConnection(config, id)); cleanupJournal(id);
+            } else vaultState(id, vault -> vault.put("running", false).put("status", vault.optBoolean("paused") ? "Paused" : "Queued sync cancelled by settings change"));
         }
         void mutate(Change change) {
             store.mutate(config -> {
@@ -393,12 +434,13 @@ public final class SyncCoordinator implements UiActions {
             if (vault == null || server == null) return;
             if (recovery == null && vault.optString("masterKeyHex").isEmpty()) return;
             if (!manual && (vault.optBoolean("paused") || !vault.optBoolean("background") || !serviceRunning)) return;
+            refreshPolicies(config);
             // Repeatedly slow passes may use three slots, never all four. The reserved
             // fresh-pass slot keeps healthy/new vaults responsive while large scans get
             // progressively longer windows without monopolizing every execution slot.
             long slowRuns = runs.values().stream().filter(run -> run.previousYields > 0).count();
             if (runs.size() >= 4 || vault.optInt("runTimeouts") > 0 && slowRuns >= 3 || !dispatching && !queued.isEmpty()) {
-                queued.put(id, new StartRequest(manual, override, recovery));
+                queued.put(id, new StartRequest(manual, override, recovery, generations.getOrDefault(id, 0L)));
                 vaultState(id, value -> value.put("running", false).put("status", "Queued"));
                 if (!dispatching) main.post(this::drainQueue);
                 return;
@@ -414,6 +456,7 @@ public final class SyncCoordinator implements UiActions {
                 }
                 Run run = new Run(); run.manual = manual; run.override = override; run.recovery = recovery;
                 run.previousYields = vault.optInt("runTimeouts");
+                run.generation = generations.getOrDefault(id, 0L);
                 run.policy = policy(config, vault, override);
                 run.root = new File(vault.getString("rootPath"));
                 run.serverId = server.getString("id"); run.vaultId = vault.getString("vaultId");
@@ -429,8 +472,12 @@ public final class SyncCoordinator implements UiActions {
                 run.deadline = () -> {
                     if (runs.get(id) != run || run.cancelled) return;
                     run.timedOut = true;
+                    if (run.recovery != null) {
+                        serverError(run.serverId, "Recovery timed out. Reconnect this vault and enter the recovery key again; the key was not saved.");
+                        globalError("Recovery timed out. Reconnect this vault and enter the recovery key again.");
+                    }
                     vaultState(id, value -> value.put("status", "Time budget reached; yielding")
-                            .put("error", "Sync is yielding to other folders. Saved transfers will resume on retry.")
+                            .put("error", run.recovery == null ? "Sync is yielding to other folders. Saved transfers will resume on retry." : "Recovery timed out. Reconnect and enter the recovery key again.")
                             .put("runTimeouts", value.optInt("runTimeouts") + 1));
                     cancel(id, run);
                 };
@@ -473,7 +520,8 @@ public final class SyncCoordinator implements UiActions {
             }
             if (run.cancelled && run.timedOut) {
                 vaultState(id, vault -> vault.put("running", false).put("status", "Timeout; retry queued"));
-                queued.put(id, new StartRequest(run.manual, run.override, null));
+                StartRequest retry = new StartRequest(run.manual, run.override, null, run.generation);
+                if (currentRequest(id, retry)) queued.put(id, retry);
                 return;
             }
             if (run.cancelled) {
@@ -529,6 +577,7 @@ public final class SyncCoordinator implements UiActions {
             while (runs.size() < 4 && !queued.isEmpty() && waiting-- > 0) {
                 String id = queued.keySet().iterator().next();
                 StartRequest request = queued.remove(id);
+                if (!currentRequest(id, request)) { discardQueued(id, request); continue; }
                 dispatching = true;
                 try { start(id, request.manual, request.override, request.recovery); }
                 finally { dispatching = false; }
@@ -556,11 +605,16 @@ public final class SyncCoordinator implements UiActions {
         }
         void reconcile() {
             JSONObject config = store.snapshot();
+            for (Map.Entry<String, StartRequest> entry : new ArrayList<>(queued.entrySet())) {
+                if (!currentRequest(entry.getKey(), entry.getValue())) {
+                    queued.remove(entry.getKey()); discardQueued(entry.getKey(), entry.getValue());
+                }
+            }
             if (!config.optBoolean("allowHttp")) for (HttpURLConnection connection : requests)
                 if ("http".equals(connection.getURL().getProtocol())) connection.disconnect();
             for (Map.Entry<String, Run> entry : new ArrayList<>(runs.entrySet())) {
                 String id = entry.getKey(); Run run = entry.getValue(); JSONObject vault = findVault(config, id);
-                if (vault == null || !run.policy.equals(policy(config, vault, run.override))
+                if (vault == null || run.generation != generations.getOrDefault(id, 0L) || !run.policy.equals(policy(config, vault, run.override))
                         || !networkAllowed(effectiveMobileAllowed(config, vault, run.override))
                         || !run.manual && (!serviceRunning || vault.optBoolean("paused") || !vault.optBoolean("background"))) {
                     run.timedOut = false; // Explicit policy/permission stops must not requeue a yielded manual pass.
