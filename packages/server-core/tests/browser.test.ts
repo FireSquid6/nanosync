@@ -139,12 +139,16 @@ test('parallel browser password attempts cannot queue unbounded verifier work', 
   const attempt = () => f.handle(req('/admin/api/session','POST',{password:'wrong'},{'x-nanosync-csrf':'login'}));
   const pending = Array.from({length:5}, attempt);
   // Let streaming JSON readers reach the injected async verification boundary.
-  while (entered < 5) await Bun.sleep(1);
+  while (entered < 2) await Bun.sleep(1);
   expect((await attempt()).status).toBe(429);
-  expect(entered).toBe(5);
+  expect(entered).toBe(2);
   release();
-  expect((await Promise.all(pending)).map(r => r.status).sort()).toEqual([401,401,401,401,429]);
+  expect((await Promise.all(pending)).map(r => r.status).sort()).toEqual([401,401,429,429,429]);
+  // Rejected overload does not count as a failed password. Advance both rolling
+  // admission buckets, then establish the persistent lockout with three failures.
   f.setNow(60_010);
+  for (let i=0;i<3;i++) expect((await attempt()).status).toBe(i === 2 ? 429 : 401);
+  f.setNow(120_010);
   // Persistent account lockout survives a fresh handler and the memory bucket window.
   expect((await f.make()(req('/admin/api/session','POST',{password:'correct'},{'x-nanosync-csrf':'login'}))).status).toBe(429);
   expect(entered).toBe(5);

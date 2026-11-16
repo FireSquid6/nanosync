@@ -7,6 +7,7 @@ import { LocalFilesystem } from "@nanosync/server-object-storage";
 import { OwnerOperations, AuthenticationService, createServerHandler, ServerMaintenance, type PasswordHasher } from "../src/index.ts";
 import { Argon2idPasswordHasher } from "../src/index.ts";
 import { hashRaw } from "@node-rs/argon2";
+import { ApiError } from "../src/http.ts";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -169,15 +170,90 @@ describe("production authentication lifecycle", () => {
     }
   });
 
+  test("password bursts share admission across device and owner verification without queueing", async () => {
+    const { database } = await setup();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let calls = 0, now = 100;
+    const inputs: Uint8Array[] = [];
+    const controlled: PasswordHasher = { hash: async () => verifier(), verify: async bytes => {
+      calls++; inputs.push(bytes); await gate; return false;
+    } };
+    const service = new AuthenticationService(new AuthenticationRepository(database), {
+      pepper: new Uint8Array(32), password: controlled, clock: () => now,
+    });
+    const admitted = [service.login("wrong"), service.verifyOwnerPassword("wrong")];
+    const settled = Promise.allSettled(admitted);
+    try {
+      const burst = await Promise.allSettled(Array.from({ length: 40 }, (_, i) =>
+        i % 2 ? service.login("wrong") : service.verifyOwnerPassword("wrong")));
+      expect(calls).toBe(2);
+      for (const result of burst) {
+        expect(result.status).toBe("rejected");
+        if (result.status === "rejected") expect(result.reason).toMatchObject({
+          status: 429, code: "RATE_LIMITED", headers: { "retry-after": "1" },
+        });
+      }
+    } finally { release(); await settled; }
+    expect(calls).toBe(2);
+    expect(inputs.every(bytes => bytes.every(byte => byte === 0))).toBe(true);
+    // Only admitted attempts count as password failures; overload does not lock the account.
+    expect(new AuthenticationRepository(database).lockoutRemaining(now)).toBe(0);
+    for (let i = 0; i < 3; i++) await expect(service.verifyOwnerPassword("wrong")).rejects.toMatchObject({ status: i === 2 ? 429 : 401 });
+    now += 900_000;
+    await expect(service.login("wrong")).rejects.toMatchObject({ status: 401 });
+    expect(calls).toBe(6);
+  });
+
+  test("hasher saturation remains a retryable 429 rather than a password failure", async () => {
+    const { database } = await setup();
+    const busy = new ApiError(429, "RATE_LIMITED", "Busy", { "retry-after": "1" }, 1);
+    const service = new AuthenticationService(new AuthenticationRepository(database), {
+      pepper: new Uint8Array(32), password: { hash: async () => verifier(), verify: async () => { throw busy; } },
+    });
+    await expect(service.login("password")).rejects.toBe(busy);
+    await expect(service.verifyOwnerPassword("password")).rejects.toBe(busy);
+    expect(database.get("SELECT * FROM authentication_rate_limit")).toBeNull();
+  });
+
+  test("Argon2 overload rejects immediately and releases capacity after completion", async () => {
+    const hasher = new Argon2idPasswordHasher();
+    const bytes = new TextEncoder().encode("password");
+    const admitted = [hasher.hash(bytes), hasher.hash(bytes)];
+    try {
+      await expect(hasher.verify(bytes, verifier())).rejects.toMatchObject({ status: 429, code: "RATE_LIMITED" });
+      await expect(hasher.hash(bytes)).rejects.toMatchObject({ status: 429, code: "RATE_LIMITED" });
+    } finally { await Promise.all(admitted); }
+    expect(await hasher.verify(bytes, (await admitted[0])!)).toBe(true);
+  });
+
+  test("successful password attempts also share a rolling admission budget", async () => {
+    const { database } = await setup();
+    let calls = 0, now = 100;
+    const service = new AuthenticationService(new AuthenticationRepository(database), {
+      pepper: new Uint8Array(32), clock: () => now,
+      password: { hash: async () => verifier(), verify: async () => { calls++; return true; } },
+    });
+    for (let i = 0; i < 5; i++) await service.verifyOwnerPassword("correct");
+    await expect(service.login("correct")).rejects.toMatchObject({ status: 429, headers: { "retry-after": "60" } });
+    expect(calls).toBe(5);
+    now += 60_000;
+    expect((await service.login("correct")).status).toBe(200);
+    expect(calls).toBe(6);
+  });
+
   test("a concurrent successful verification cannot commit after failures establish lockout", async () => {
     const { database } = await setup();
     let release!: () => void, started!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const entered = new Promise<void>((resolve) => { started = resolve; });
     const controlled: PasswordHasher = { hash: async () => verifier(), verify: async (bytes) => { const value = new TextDecoder().decode(bytes); if (value === "correct password") { started(); await gate; return true; } return false; } };
-    const service = new AuthenticationService(new AuthenticationRepository(database), { pepper: new Uint8Array(32).fill(7), password: controlled, clock: () => 100, random: () => new Uint8Array(32).fill(8) });
+    let now = 100;
+    const service = new AuthenticationService(new AuthenticationRepository(database), { pepper: new Uint8Array(32).fill(7), password: controlled, clock: () => now, random: () => new Uint8Array(32).fill(8) });
     const successful = service.login("correct password"); await entered;
-    await Promise.allSettled(Array.from({ length: 5 }, () => service.login("wrong")));
+    for (let i = 0; i < 4; i++) await service.login("wrong").catch(() => undefined);
+    now += 60_000; // Admission rolls over before the persistent failure bucket.
+    await service.login("wrong").catch(() => undefined);
     release();
     await expect(successful).rejects.toMatchObject({ code: "LOCKED" });
     expect(database.get<{ count: number }>("SELECT count(*) AS count FROM password_sessions")?.count).toBe(0);

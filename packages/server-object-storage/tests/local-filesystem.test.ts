@@ -227,10 +227,34 @@ describe("LocalFilesystem", () => {
 
   test("orders nested and sibling keys by the complete lexical key", async () => {
     const { filesystem } = await create();
-    for (const key of ["a/x", "a-", "a/y"]) {
+    for (const key of ["a/x", "a-", "a/y", "a0", "a./x"]) {
       await filesystem.putIfAbsent(key, stream("hello"), helloChecksum);
     }
-    expect(await filesystem.list()).toEqual({ keys: ["a-", "a/x", "a/y"], cursor: null });
+    expect(await filesystem.list()).toEqual({ keys: ["a-", "a./x", "a/x", "a/y", "a0"], cursor: null });
+    let cursor: string | undefined;
+    const keys: string[] = [];
+    do {
+      const page = await filesystem.list("", { cursor, limit: 1 });
+      keys.push(...page.keys);
+      cursor = page.cursor ?? undefined;
+    } while (cursor !== undefined);
+    expect(keys).toEqual(["a-", "a./x", "a/x", "a/y", "a0"]);
+    expect(await filesystem.list("a", { cursor: "a0", limit: 1 })).toEqual({ keys: [], cursor: null });
+  });
+
+  test("paged traversal stops after lookahead and skips subtrees before the cursor", async () => {
+    const { root, filesystem } = await create();
+    for (const key of ["a/one", "b/one", "b/two", "c/one", "z/one"]) {
+      await filesystem.putIfAbsent(key, stream("hello"), helloChecksum);
+    }
+    // Unsafe entries prove those subtrees are not inspected, without timing assertions.
+    await symlink("missing", join(root, "z", "unsafe"));
+    expect(await filesystem.list("", { limit: 1 })).toEqual({ keys: ["a/one"], cursor: "a/one" });
+    await symlink("missing", join(root, "a", "unsafe"));
+    expect(await filesystem.list("", { cursor: "b/one", limit: 1 })).toEqual({ keys: ["b/two"], cursor: "b/two" });
+    await expect(filesystem.list("z")).rejects.toMatchObject({ code: "SYMLINK" });
+    await chmod(join(root, "b"), 0o755);
+    await expect(filesystem.list("", { cursor: "b/one", limit: 1 })).rejects.toMatchObject({ code: "UNSAFE_PATH" });
   });
 
   test("cleans up after an interrupted source stream", async () => {

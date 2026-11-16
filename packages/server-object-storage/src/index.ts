@@ -7,6 +7,7 @@ import {
   open as openFile,
   opendir,
   realpath,
+  readdir,
   unlink,
   type FileHandle,
 } from "node:fs/promises";
@@ -479,10 +480,16 @@ export class LocalFilesystem implements Filesystem {
     maximum: number,
     output: string[],
   ): Promise<void> {
-    const entries = await opendir(directory);
-    for await (const entry of entries) {
+    // Directory subtrees sort at "name/", not "name" (e.g. a- precedes a/x).
+    const entries = await readdir(directory, { withFileTypes: true });
+    entries.sort((a, b) => compareNames(a.name + (a.isDirectory() ? "/" : ""), b.name + (b.isDirectory() ? "/" : "")));
+    for (const entry of entries) {
+      if (output.length >= maximum) return;
       if (!keyPrefix && entry.name === TEMP_DIRECTORY) continue;
       const key = keyPrefix ? `${keyPrefix}/${entry.name}` : entry.name;
+      if (!prefixesCanOverlap(key, requestedPrefix)) continue;
+      // All descendants lie in [key + "/", key + "0").
+      if (cursor !== undefined && compareNames(entry.isDirectory() ? `${key}0` : key, cursor) <= 0) continue;
       const path = join(directory, entry.name);
       const stats = await lstat(path);
       if (stats.isSymbolicLink()) throw symlinkError(key);
@@ -505,8 +512,6 @@ export class LocalFilesystem implements Filesystem {
           (cursor === undefined || compareNames(key, cursor) > 0)
         ) {
           output.push(key);
-          output.sort(compareNames);
-          if (output.length > maximum) output.pop();
         }
       } else {
         throw new ObjectStorageError(
