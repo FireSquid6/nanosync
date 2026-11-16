@@ -5,7 +5,10 @@ import { OWNER_GENESIS_AUTHOR_ID, parseEncryptedVaultCreateRequest, parsePersist
 import { encryptManifest, generateRecoverySecret, generateVaultMasterKey, displayRecoverySecret, wrapMasterKey, referenceSetMac } from '@nanosync/sync-core';
 import { privateDirectory, secureCreate, secureRead, secureReplace } from './security.ts';
 import { acquireServerStorage } from './server-ownership.ts';
-import { localOwner, withLocalOwner } from './server.ts';
+import { localOwner } from './server.ts';
+import { OwnerOperations } from '@nanosync/server-core';
+import { ServerMetadataDatabase } from '@nanosync/server-metadata';
+import { LocalFilesystem } from '@nanosync/server-object-storage';
 
 type EncryptedVaultCreateRequest = ReturnType<typeof parseEncryptedVaultCreateRequest>;
 type Receipt = { request: EncryptedVaultCreateRequest; phase: 'prepared' | 'delivered' | 'complete'; recoveryDigest: string; output: string | null };
@@ -59,8 +62,15 @@ export async function provisionLocalVault(directory: string, name: string, deliv
       } finally { master.fill(0); recovery.fill(0); }
     }
     const delivered = receipt!;
-    const result = await withLocalOwner(root, owner => owner.createVault(localOwner, delivered.request));
-    save({...delivered, phase:'complete'});
-    return { ...result, name };
+    secureRead(join(root, 'pepper.hex'), 64);
+    const database = new ServerMetadataDatabase(join(root, 'metadata.sqlite'));
+    try {
+      // Storage initialization/recovery is only legal inside the ownership gate.
+      const storage = new LocalFilesystem(join(root, 'objects'));
+      await storage.existsBatch([]);
+      const result = await new OwnerOperations(database, storage).createVault(localOwner, delivered.request);
+      save({...delivered, phase:'complete'});
+      return { ...result, name };
+    } finally { database.close(); }
   } finally { release(); }
 }

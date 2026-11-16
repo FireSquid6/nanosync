@@ -665,3 +665,57 @@ regressions. Exact changed paths:
 - `docs/security.md`
 - `docs/clients-and-operations.md`
 - `docs/implementation-progress.md`
+
+## Final review P2: metadata administration during staged uploads (completed)
+
+- Reproduced the review finding after `2a86cc4`: a separate CLI process running
+  `server devices view` during an outstanding HTTP object upload exited 2 with
+  “Staging belongs to another live process”. The earlier ownership regression
+  exercised an idle runtime and therefore missed storage initialization here.
+- Added explicit `OwnerMetadataOperations` for device/pending decisions, vault
+  listing/rename/tombstoning, and activity. `OwnerOperations` extends that boundary
+  with storage-backed creation. `withLocalOwner` now constructs only the metadata
+  service: no object storage construction, initialization, or recovery, and no fake
+  filesystem or ownership-gate bypass.
+- Local provisioning constructs and awaits its actual filesystem inside its
+  existing exclusive ownership scope, including receipt replay. Runtime creation
+  retains its existing storage instance and queue. Metadata deletion remains a
+  tombstone; ciphertext cleanup stays with the runtime.
+- `localAdminReport` deliberately retains actual filesystem initialization and
+  bounded scan behavior. These offline reports now acquire the shared ownership
+  gate before initialization, returning actionable stop-runtime guidance instead
+  of racing live staging/recovery. CLI/operations docs state this requirement;
+  the existing report integration test stops/restarts around offline reporting.
+- Real HTTP regression holds a partial upload open while separate CLI processes
+  view devices, approve, deny, revoke, and view/rename/delete a different vault.
+  Each command succeeds and the staging filename/inode remains intact. Local
+  creation and scanning remain excluded; finishing the upload returns 201 and
+  downloading it yields exactly the original bytes. All five local reports
+  succeed after stopping the runtime.
+
+### Verification
+
+- Red: the new subprocess/HTTP regression failed on `devices view` with the exact
+  live-staging error before implementation. Green: focused ownership/report tests
+  **13 passed, 0 failed**, 214 assertions.
+- `timeout --kill-after=5s 120s bun test`: **286 passed, 0 failed**, 2121
+  assertions, 31 files (20.97s).
+- `timeout --kill-after=5s 120s bun run typecheck`: all nine workspaces and
+  browser/build tooling passed. `git diff --check` passed.
+- Test subprocesses use hard shell timeouts; HTTP requests and the held upload
+  have deadlines. Verification commands used shell and tool deadlines. No push
+  or PR performed.
+
+### Review handoff
+
+Key types/functions: `OwnerMetadataOperations`, `OwnerOperations`,
+`withLocalOwner`, `provisionLocalVault`, `localAdminReport`.
+Exact changed paths:
+- `packages/server-core/src/owner-operations.ts`
+- `packages/cli/src/server.ts`
+- `packages/cli/src/local-provision.ts`
+- `packages/cli/tests/server-ownership.test.ts`
+- `packages/cli/tests/cli.test.ts`
+- `packages/cli/README.md`
+- `docs/clients-and-operations.md`
+- `docs/implementation-progress.md`

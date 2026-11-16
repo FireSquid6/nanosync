@@ -144,7 +144,7 @@ for (const [route, port] of [["/v1/bootstrap/initialize", 7541], ["/v1/bootstrap
 test("runtime server accepts encrypted genesis, approves second device, and revokes it", async () => {
   const root = directory(); chmodSync(root, 0o700);
   writeFileSync(join(root, "pepper.hex"), randomBytes(32).toString("hex"), { mode: 0o600 });
-  const server = await runServer({ directory: root, port: 7540, scanIntervalMs: 100 });
+  let server = await runServer({ directory: root, port: 7540, scanIntervalMs: 100 });
   const url = server.url, proof = secureRead(join(root, "bootstrap.hex")).toString("utf8");
   const vaultId = randomUUID(), principalId = randomUUID(), deviceId = randomUUID(), revisionId = randomUUID();
   const master = generateVaultMasterKey(), recovery = generateRecoverySecret(), password = "test-only-password";
@@ -168,9 +168,12 @@ test("runtime server accepts encrypted genesis, approves second device, and revo
     expect((await enroll(url, adminToken, deviceId, proof)).status).toBe("approved");
     const adminDir = directory();
     saveCredentials(adminDir, { baseUrl: url, vaultId, deviceId, token: adminToken, masterKey: Buffer.from(master).toString("hex") });
+    // Local report setup recovers object storage; it requires offline ownership.
+    await server.stop();
     for (const command of ["storage", "retention-dry-run", "gc-dry-run", "scan", "diagnostics"]) {
       expect(await main(["server", "admin", command, "--server-dir", root, "--json"])).toBe(0);
     }
+    server = await runServer({ directory: root, port: 7540, scanIntervalMs: 100 });
     expect(await main(["admin", "collect", "--client-dir", adminDir])).toBe(2);
     const second = randomUUID(), secondDir = directory();
     const nativeFetch = globalThis.fetch;

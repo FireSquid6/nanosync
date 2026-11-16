@@ -10,10 +10,10 @@ import { objectKey } from './object-service.ts';
  * perform CSRF and destructive confirmations BEFORE invoking these operations.
  * Actor provenance is supplied by the authenticated surface, never JSON input.
  */
-export class OwnerOperations {
+export class OwnerMetadataOperations {
   private readonly auth: AuthenticationRepository;
-  private readonly vaults: VaultRepository;
-  constructor(private readonly database: ServerMetadataDatabase, private readonly storage: Filesystem, private readonly clock: () => number = Date.now) {
+  protected readonly vaults: VaultRepository;
+  constructor(private readonly database: ServerMetadataDatabase, protected readonly clock: () => number = Date.now) {
     this.auth = new AuthenticationRepository(database);
     this.vaults = new VaultRepository(database);
   }
@@ -30,6 +30,21 @@ export class OwnerOperations {
     this.auth.revoke(actor, parseDeviceId(deviceId), this.clock());
   }
   listVaults(actor: OwnerActor) { parseOwnerActor(actor); return this.vaults.list(); }
+  renameVault(actor: OwnerActor, vaultId: unknown, name: string): void { parseOwnerActor(actor); this.vaults.rename(parseVaultId(vaultId), name, actor, this.clock()); }
+  markVaultDeleted(actor: OwnerActor, vaultId: unknown): void { parseOwnerActor(actor); this.vaults.markDeleted(parseVaultId(vaultId), actor, this.clock()); }
+  recentActivity(actor: OwnerActor, limit = 100) {
+    parseOwnerActor(actor);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error('Invalid activity limit');
+    return this.database.all<{ sequence: number; action: string; occurredAtMs: number; origin: 'device' | 'server-local' | 'browser'; actorId: string | null; targetId: string | null }>(
+      "SELECT sequence,event_type AS action,occurred_at_ms AS occurredAtMs,origin,actor_id AS actorId,target_id AS targetId FROM audit_events WHERE event_type IN ('enrollment.approved','enrollment.denied','device.revoked','vault.created','vault.renamed','vault.deleted') ORDER BY sequence DESC LIMIT ?", [limit]);
+  }
+}
+
+/** Storage-backed owner provisioning; callers must own runtime/offline storage. */
+export class OwnerOperations extends OwnerMetadataOperations {
+  constructor(database: ServerMetadataDatabase, private readonly storage: Filesystem, clock: () => number = Date.now) {
+    super(database, clock);
+  }
   async createVault(actor: OwnerActor, value: unknown) {
     const input = parseEncryptedVaultCreateRequest(value);
     return withVaultStorage(this.storage, input.vaultId, () => this.createVaultLocked(actor, value));
@@ -46,13 +61,5 @@ export class OwnerOperations {
     await this.storage.putIfAbsent(objectKey('manifest', reference.objectId, input.vaultId), new ReadableStream({ start(controller) { controller.enqueue(frame); controller.close(); } }), checksum);
     this.vaults.create(input.vaultId, input.name, input.recoveryWrap, input.genesisRevision, { objectId: reference.objectId, checksum, length: frame.length }, this.clock(), actor);
     return { vaultId: input.vaultId };
-  }
-  renameVault(actor: OwnerActor, vaultId: unknown, name: string): void { parseOwnerActor(actor); this.vaults.rename(parseVaultId(vaultId), name, actor, this.clock()); }
-  markVaultDeleted(actor: OwnerActor, vaultId: unknown): void { parseOwnerActor(actor); this.vaults.markDeleted(parseVaultId(vaultId), actor, this.clock()); }
-  recentActivity(actor: OwnerActor, limit = 100) {
-    parseOwnerActor(actor);
-    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error('Invalid activity limit');
-    return this.database.all<{ sequence: number; action: string; occurredAtMs: number; origin: 'device' | 'server-local' | 'browser'; actorId: string | null; targetId: string | null }>(
-      "SELECT sequence,event_type AS action,occurred_at_ms AS occurredAtMs,origin,actor_id AS actorId,target_id AS targetId FROM audit_events WHERE event_type IN ('enrollment.approved','enrollment.denied','device.revoked','vault.created','vault.renamed','vault.deleted') ORDER BY sequence DESC LIMIT ?", [limit]);
   }
 }
