@@ -98,6 +98,7 @@ export function mapAuthRepositoryError(error: unknown): never {
   if (error.code === "LOCKED") throw rateLimit(error.retryAfterMs ?? 1_000);
   if (error.code === "FORBIDDEN") throw new ApiError(403, "FORBIDDEN", error.message);
   if (error.code === "LIMIT") throw new ApiError(429, "RATE_LIMITED", error.message);
+  if (error.code === "VAULT_DELETED") throw new ApiError(410, "VAULT_DELETED", error.message);
   if (error.code === "CONFLICT") throw new ApiError(409, "CONFLICT", error.message);
   throw error;
 }

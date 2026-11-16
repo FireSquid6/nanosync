@@ -50,7 +50,7 @@ async function fixture() {
       masterKey: Buffer.from(creds.masterKey, "hex"), baseUrl: creds.baseUrl, token: creds.token,
       pollMs: 10_000, scan: { debounceMs: 100, stabilityMs: 100 } };
   }
-  return { firstDir, secondDir, firstFiles, secondFiles, first, second,
+  return { serverDir, firstDir, secondDir, firstFiles, secondFiles, first, second,
     a: options(first, firstDir, firstFiles), b: options(second, secondDir, secondFiles), url: server.url };
 }
 function start(options: SyncOptions) {
@@ -430,4 +430,32 @@ test("continuous sync reports an offline failure then retries until connected", 
     await waitFor(() => heads.length > 0);
     expect(heads[0]).toBeTruthy();
   } finally { controller.abort(); await watching; await stop(runner); }
+});
+
+
+test("deleted vault stops watch without changing plaintext or stored keys", async () => {
+  const f = await fixture();
+  writeFileSync(join(f.firstFiles, "precious.txt"), "offline unsynced work");
+  const { ServerMetadataDatabase, VaultRepository } = await import('@nanosync/server-metadata');
+  const db = new ServerMetadataDatabase(join(f.serverDir, 'metadata.sqlite'));
+  try { new VaultRepository(db).markDeleted(f.first.vaultId, {origin:'server-local',actorId:null}, Date.now()); }
+  finally { db.close(); }
+  const runner = start(f.a), controller = new AbortController();
+  const errors: unknown[] = [];
+  const outcome = await Promise.race([
+    runner.watch(controller.signal, () => { throw Error('deleted sync succeeded'); }, error => errors.push(error)).then(() => 'unexpected success', error => { expect(error).toMatchObject({code:'VAULT_DELETED'}); return 'stopped'; }),
+    Bun.sleep(1500).then(() => { controller.abort(); return 'retried'; }),
+  ]);
+  expect(outcome).toBe('stopped');
+  expect(errors).toHaveLength(1);
+  expect(errors[0]).toMatchObject({code:'VAULT_DELETED',status:410});
+  expect(readFileSync(join(f.firstFiles, 'precious.txt'),'utf8')).toBe('offline unsynced work');
+  expect(credentials(f.firstDir).masterKey).toBe(f.first.masterKey);
+  expect(Buffer.from(f.a.masterKey).toString('hex')).toBe(f.first.masterKey);
+  const inspection = new ServerMetadataDatabase(join(f.serverDir, 'metadata.sqlite'));
+  try {
+    await waitFor(() => new VaultRepository(inspection).deletions()[0]?.cleanupState === 'complete');
+  } finally { inspection.close(); }
+  const { LocalFilesystem } = await import('@nanosync/server-object-storage');
+  expect((await new LocalFilesystem(join(f.serverDir, 'objects')).list()).keys).toEqual([]);
 });

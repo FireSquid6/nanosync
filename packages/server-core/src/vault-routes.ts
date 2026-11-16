@@ -4,6 +4,7 @@ import { VaultRepository } from "@nanosync/server-metadata";
 import type { Filesystem } from "@nanosync/server-object-storage";
 import { AuthenticationService } from "./auth-service.ts";
 import { ApiError, json, readStrictJson } from "./http.ts";
+import { withVaultStorage } from "./vault-storage.ts";
 import { objectKey } from "./object-service.ts";
 
 export async function handleVaultRoute(request: Request, pathname: string, auth: AuthenticationService,
@@ -29,14 +30,18 @@ export async function handleVaultRoute(request: Request, pathname: string, auth:
         throw new Error();
       // Write immutable ciphertext first. A conflicting metadata transaction
       // can leave only an unreferenced object in this vault's namespace.
+      await withVaultStorage(storage, vaultId, async () => {
+      if (repository.deletions().some(d => d.vaultId === vaultId)) throw new ApiError(410, "VAULT_DELETED", "Vault is permanently deleted");
       await storage.putIfAbsent(objectKey("manifest", reference.objectId, vaultId), new ReadableStream({
         start(controller) { controller.enqueue(frame); controller.close(); },
       }), checksum);
       repository.create(vaultId, input.name as string, wrap, genesis,
         { objectId: reference.objectId, checksum, length: frame.length }, clock());
+      });
       return json({ protocolVersion: 1, vaultId, name: input.name, sequence: 1 }, 201);
     } catch (error) {
       if (error instanceof ApiError) throw error;
+      if (error instanceof Error && /vault ID is deleted/.test(error.message)) throw new ApiError(410, "VAULT_DELETED", "Vault is permanently deleted");
       if (error instanceof Error && /already in use|vault ID/.test(error.message)) throw new ApiError(409, "CONFLICT", error.message);
       throw new ApiError(400, "MALFORMED_REQUEST", "Invalid vault creation request");
     }

@@ -9,6 +9,7 @@ import {
   ObjectCatalogRepository, ObjectRepositoryError, type UploadIdentity, type UploadResultRecord,
 } from "@nanosync/server-metadata";
 import { ObjectStorageError, type ByteRange, type Filesystem } from "@nanosync/server-object-storage";
+import { withVaultStorage } from "./vault-storage.ts";
 import { ApiError, json } from "./http.ts";
 
 export interface AuthorizationContext { principalId: PrincipalId; deviceId: DeviceId; vaultId: VaultId; }
@@ -29,6 +30,7 @@ export class ObjectService {
     const rows = objectIds.map((id) => cataloged.get(id));
     const keys = rows.flatMap((row) => row ? [objectKey(row.object_type, row.object_id, this.storageVault(context.vaultId))] : []);
     const existence = await this.options.filesystem.existsBatch(keys);
+    this.repositoryCall(() => this.options.catalog.requireVault(context.vaultId));
     let position = 0;
     const missing: ObjectId[] = [];
     const objects = objectIds.map((objectId, index) => {
@@ -43,6 +45,10 @@ export class ObjectService {
   }
 
   async put(request: Request, context: AuthorizationContext, objectType: ObjectType, objectId: ObjectId): Promise<Response> {
+    return withVaultStorage(this.options.filesystem, context.vaultId, () => this.putLocked(request, context, objectType, objectId));
+  }
+
+  private async putLocked(request: Request, context: AuthorizationContext, objectType: ObjectType, objectId: ObjectId): Promise<Response> {
     let metadata: UploadMetadata;
     try {
       this.repositoryCall(() => this.options.catalog.requireVault(context.vaultId));
@@ -106,6 +112,7 @@ export class ObjectService {
     const stream = exactObjectStream(reader, prefix.header, prefix.remainder, frame.completeLength);
     let stored;
     try {
+      this.repositoryCall(() => this.options.catalog.requireVault(context.vaultId));
       stored = await this.options.filesystem.putIfAbsent(objectKey(objectType, objectId, this.storageVault(context.vaultId)), stream, metadata.checksum);
     } catch (error) {
       throw storageError(error);
@@ -145,6 +152,8 @@ export class ObjectService {
       }
       throw storageError(error);
     }
+    try { this.repositoryCall(() => this.options.catalog.requireVault(context.vaultId)); }
+    catch (error) { void opened.stream.cancel().catch(() => {}); throw error; }
     if (opened.size !== row.ciphertext_length) {
       void opened.stream.cancel().catch(() => undefined);
       this.repositoryCall(() => this.options.catalog.markIntegrity(context.vaultId, objectId, "corrupt", this.clock()));

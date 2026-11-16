@@ -52,6 +52,7 @@ export class AuthRepositoryError extends Error {
       | "UNAUTHORIZED"
       | "FORBIDDEN"
       | "CONFLICT"
+      | "VAULT_DELETED"
       | "LIMIT"
       | "LOCKED"
       | "INVARIANT",
@@ -562,7 +563,7 @@ export class AuthenticationRepository {
   }
 
   recoveryWrap(vaultId?: VaultId): RecoveryWrapV1 {
-    if (vaultId && this.database.get("SELECT 1 FROM vault_deletions WHERE vault_id=?", [vaultId])) throw new AuthRepositoryError("CONFLICT", "Vault is permanently deleted");
+    if (vaultId && this.database.get("SELECT 1 FROM vault_deletions WHERE vault_id=?", [vaultId])) throw new AuthRepositoryError("VAULT_DELETED", "Vault is permanently deleted");
     const row = this.database.get<{
       wrap_version: number;
       algorithm: string;

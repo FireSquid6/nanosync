@@ -249,3 +249,36 @@ test("offline staged backup restores private metadata and verifies copied cipher
     } finally { restored.close(); }
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("permanent cleanup reclaims uncataloged ciphertext, survives restart, and isolates namespaces", async () => {
+  const root = await mkdtemp(join(tmpdir(), "nanosync-delete-"));
+  const path = join(root, "metadata.sqlite"), second = "22345678-1234-1234-9234-123456789abc";
+  let db = new ServerMetadataDatabase(path);
+  try {
+    const storage = new LocalFilesystem(join(root, "objects"));
+    db.writeTransaction(tx => {
+      for (const id of [vault, second]) tx.run("INSERT INTO server_state(singleton,vault_id,name,current_sequence) VALUES(NULL,?,?,0)", [id,id]);
+    });
+    const { VaultRepository } = await import('@nanosync/server-metadata');
+    new VaultRepository(db).markDeleted(vault, {origin:'server-local',actorId:null}, now);
+    for (const id of [vault, second]) {
+      const bytes = frame('a'.repeat(64), id);
+      await storage.putIfAbsent(objectKey('chunk','a'.repeat(64),id), new Blob([bytes]).stream(), createHash('sha256').update(bytes).digest('hex'));
+    }
+    const extra = frame('b'.repeat(64), vault);
+    await storage.putIfAbsent(objectKey('chunk','b'.repeat(64),vault), new Blob([extra]).stream(), createHash('sha256').update(extra).digest('hex'));
+    const broken = Object.create(storage);
+    let deletes = 0;
+    broken.delete = async (key: string) => {
+      if (++deletes === 2) throw Error('disk unavailable');
+      return storage.delete(key);
+    };
+    await expect(new ServerMaintenance(new MaintenanceRepository(db), broken).cleanupDeleted()).rejects.toThrow('disk unavailable');
+    db.close(); db = new ServerMetadataDatabase(path);
+    const service = new ServerMaintenance(new MaintenanceRepository(db), storage);
+    await service.cleanupDeleted(); await service.cleanupDeleted();
+    expect(await storage.existsBatch([objectKey('chunk','a'.repeat(64),vault),objectKey('chunk','a'.repeat(64),second)])).toEqual([false,true]);
+    expect(new VaultRepository(db).deletions()[0]?.cleanupState).toBe('complete');
+    expect(db.get<{name:null;current_sequence:number}>('SELECT name,current_sequence FROM server_state WHERE vault_id=?',[vault])).toEqual({name:null,current_sequence:0});
+  } finally { db.close(); await rm(root,{recursive:true,force:true}); }
+});

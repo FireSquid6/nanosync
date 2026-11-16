@@ -63,3 +63,52 @@ Changed paths:
 - `docs/architecture.md`
 - `docs/security.md`
 - `docs/implementation-progress.md`
+
+## Permanent deletion worker and terminal client outcome (completed)
+
+### Public contracts / integration
+
+- `ServerMaintenance.cleanupDeleted(): Promise<void>` drains durable pending tombstones. It deletes all published ciphertext in the deleted vault's namespace (including uncataloged objects), then transactionally removes revisions, parent/reference edges, wraps, catalog, upload sessions, creation digests and vault-scoped idempotency results, and finally marks cleanup complete. Failed I/O rejects visibly and leaves the tombstone pending; a new worker/database instance resumes partial cleanup idempotently. Retention and live-vault GC rules are unchanged.
+- Tombstones and audit provenance survive forever. An empty identity-only `server_state` row remains (null name/head, sequence zero) because legacy account/device/bootstrap foreign keys reference it; no recovery wrap, history, encrypted content or human-readable vault metadata remains there. This does not make the UUID reusable.
+- Storage publication and reclamation share the internal per-vault `withVaultStorage` queue. Object uploads, owner creation/replays and the temporary legacy provisioning route all participate. Tombstoning itself remains synchronous/transactional and never waits on an upload. Cleanup waits for previously admitted writers; transactional upload/publication gates reject after tombstoning. Later writers recheck admission inside the queue, so they cannot write after completed reclamation. Reads recheck admission after awaited storage lookup.
+- **Runtime ownership requirement:** reuse the same `Filesystem` instance for request services, owner operations and maintenance (as `runServer` does). The queue coordinates the single serving runtime, not independent server processes. Do not concurrently serve one metadata/storage directory from multiple runtimes; offline maintenance still requires exclusive control. After process restart no prior writer survives, and durable pending cleanup is retried.
+- `runServer` starts mandatory, single-flight deletion cleanup immediately and every second, independently of integrity scanning; failures are reported and retried. Shutdown waits for active cleanup before closing metadata. Explicit deletion intentionally bypasses retention only within that deleted namespace. Legacy bootstrap storage has one dedicated unscoped type namespace; newer vaults use UUID namespaces.
+- Recovery-wrap requests now return HTTP **410 `VAULT_DELETED`**, matching head/revision/object admission. Provisioning replays cannot recreate tombstoned UUIDs or publish late ciphertext after reclamation.
+- `HttpRemote` does not retry deletion and supplies actionable preservation/disconnect/reconnection guidance. `SyncRunner` checks the remote head before journal replay/filesystem application. Watch reports deletion once and rejects terminally (allowing CLI failure exit), rather than polling forever. It does not remove bindings, stored keys, or plaintext. A future command adapter can catch this stable `RemoteError.code` for structured UX.
+
+### Evidence
+
+- Red observed for missing cleanup API, for watch retrying deletion, and for the late-owner-write cleanup race; then green through existing maintenance, request handler, owner service, remote and real-server sync seams.
+- Real upload paused before ciphertext publication: tombstone immediately returns 410 on reads; late upload returns 410, cleanup waits and removes its uncataloged bytes, subsequent uploads remain blocked.
+- Real revision publication paused during storage validation: cleanup completes first, then publication returns 410 without recreating history.
+- Partial cleanup deletes one object then encounters injected disk failure; database reopen plus a fresh worker reclaims the remainder, preserves a second vault with the same object ID, and repeated cleanup is harmless.
+- Real server/client watch test preserves unsynced plaintext and stored/caller key material, stops after one terminal error, and observes runtime cleanup completing without an explicit worker invocation.
+- `bun test packages/server-metadata packages/server-core packages/server-object-storage packages/sync-core`: **165 passed, 0 failed**.
+- `bun run typecheck`: **all eight packages passed**.
+- `bun test`: **249 passed, 0 failed**.
+
+### Review handoff
+
+Key functions: `ServerMaintenance.cleanupDeleted`, `MaintenanceRepository.deletedVaults/finishDeletion`, `withVaultStorage`, `ObjectService.put/putLocked/get/presence`, `OwnerOperations.createVault`, `handleVaultRoute`, `AuthenticationRepository.recoveryWrap`, `mapAuthRepositoryError`, `runServer`, `SyncRunner.run/watch`, `HttpRemote` error handling.
+
+Changed paths:
+- `packages/server-core/src/vault-storage.ts`
+- `packages/server-core/src/maintenance.ts`
+- `packages/server-core/src/object-service.ts`
+- `packages/server-core/src/owner-operations.ts`
+- `packages/server-core/src/vault-routes.ts`
+- `packages/server-core/src/auth-service.ts`
+- `packages/server-core/tests/maintenance.test.ts`
+- `packages/server-core/tests/owner.test.ts`
+- `packages/server-core/tests/server.test.ts`
+- `packages/server-core/tests/revisions.test.ts`
+- `packages/server-metadata/src/maintenance.ts`
+- `packages/server-metadata/src/auth-repository.ts`
+- `packages/sync-core/src/remote.ts`
+- `packages/sync-core/tests/remote.test.ts`
+- `packages/cli/src/server.ts`
+- `packages/cli/src/sync-runner.ts`
+- `packages/cli/tests/sync.test.ts`
+- `docs/implementation-progress.md`
+
+Surface confirmations, new CLI command routing and browser administration remain subsequent steps; this step does not expose a deletion HTTP endpoint or bypass their required confirmation/reauthentication workflows.

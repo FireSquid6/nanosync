@@ -3,6 +3,7 @@ import { OWNER_GENESIS_AUTHOR_ID, parseOwnerActor, parseOwnerEnrollmentAction, p
 import { AuthenticationRepository, ServerMetadataDatabase, VaultRepository } from '@nanosync/server-metadata';
 import type { Filesystem } from '@nanosync/server-object-storage';
 import { parseEncryptedVaultCreateRequest } from '@nanosync/protocol';
+import { withVaultStorage } from './vault-storage.ts';
 import { objectKey } from './object-service.ts';
 
 /** Trusted owner boundary. Callers authenticate local access/browser sessions,
@@ -30,6 +31,10 @@ export class OwnerOperations {
   }
   listVaults(actor: OwnerActor) { parseOwnerActor(actor); return this.vaults.list(); }
   async createVault(actor: OwnerActor, value: unknown) {
+    const input = parseEncryptedVaultCreateRequest(value);
+    return withVaultStorage(this.storage, input.vaultId, () => this.createVaultLocked(actor, value));
+  }
+  private async createVaultLocked(actor: OwnerActor, value: unknown) {
     parseOwnerActor(actor);
     const input = parseEncryptedVaultCreateRequest(value);
     if (input.genesisRevision.creatingDeviceId !== OWNER_GENESIS_AUTHOR_ID) throw new Error('Owner genesis requires reserved owner author');

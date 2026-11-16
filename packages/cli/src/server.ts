@@ -98,11 +98,22 @@ export async function runServer(options: RunServerOptions): Promise<{ stop(): Pr
       authorizeBootstrap,
       config,
     });
+    // Cleanup is mandatory even when an integrity scan fails. Each pass is single-flight.
+    let cleanupFlight: Promise<void> | undefined;
+    const cleanup = () => {
+      if (!cleanupFlight) cleanupFlight = maintenance.cleanupDeleted()
+        .catch(() => console.error("vault deletion cleanup failed; will retry"))
+        .finally(() => { cleanupFlight = undefined; });
+    };
+    cleanup();
+    const cleanupTimer = setInterval(cleanup, 1_000);
     scanner.start();
     return {
       url: server.url.href,
       stop: async () => {
+        clearInterval(cleanupTimer);
         server.stop(true);
+        await cleanupFlight;
         await scanner.stop();
         database.close();
       },

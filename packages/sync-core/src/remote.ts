@@ -195,7 +195,9 @@ export class HttpRemote {
   private async body(response: Response, statuses: number[] = [200]): Promise<unknown> {
     if (!statuses.includes(response.status)) {
       const envelope = parseProtocolErrorEnvelope(await json(response, 2048));
-      throw new RemoteError(response.status, envelope.code, envelope.message, envelope.retryAfterSeconds);
+      throw new RemoteError(response.status, envelope.code, envelope.code === "VAULT_DELETED"
+        ? "Vault permanently deleted on server. Local files and keys are preserved. Disconnect this binding or connect to a different vault."
+        : envelope.message, envelope.retryAfterSeconds);
     }
     return json(response);
   }

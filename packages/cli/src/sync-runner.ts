@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { ClientLocal } from "@nanosync/client-local";
 import { applyNewFiles, hydrateFile, LinuxScanner, LinuxWatcher, type ScanOptions, type ScanPlan } from "@nanosync/linux-client";
-import { decryptManifest, HttpRemote, IntegrityError, mergeManifests, verifyReferenceSetMac, type ManifestV1, type RemoteOptions } from "@nanosync/sync-core";
+import { decryptManifest, HttpRemote, IntegrityError, RemoteError, mergeManifests, verifyReferenceSetMac, type ManifestV1, type RemoteOptions } from "@nanosync/sync-core";
 import { parseDeviceId, parseVaultId, type RevisionEnvelope, type VisibleObjectReference } from "@nanosync/protocol";
 import { acquireSyncLock } from "./sync-lock.ts";
 import { privateDirectory } from "./security.ts";
@@ -132,7 +132,13 @@ export class SyncRunner {
             if (!this.watcher) { this.watcher = new LinuxWatcher(this.scanner); this.watcher.start(); }
             onSuccess(head);
           }
-        } catch (error) { onError(error); }
+        } catch (error) {
+          onError(error);
+          if (error instanceof RemoteError && error.code === "VAULT_DELETED") {
+            this.watcher?.close();
+            throw error;
+          }
+        }
       }
       if (!signal.aborted && !this.stopped) {
         try { await delay(250, undefined, { signal }); }
@@ -340,6 +346,8 @@ export class SyncRunner {
 
   private async run(): Promise<void> {
     await this.remote.capabilities();
+    // Check availability before replaying journals or applying local filesystem work.
+    await this.remote.head();
     await this.recoverHydration();
     // A partially applied filesystem is never scanned or overwritten.
     for (const pending of this.local.pendingApplies()) {
