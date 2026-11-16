@@ -1,15 +1,22 @@
 {
   "name": "nanosync-monorepo",
   "private": true,
-  "bin": { "nanosync": "./packages/cli/src/main.ts" },
-  "workspaces": ["packages/*"],
+  "bin": {
+    "nanosync": "./packages/cli/src/main.ts"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "test": "bun test",
-    "typecheck": "bun run --filter '*' typecheck",
+    "typecheck": "bun run --filter '*' typecheck && tsc -p tsconfig.tools.json --noEmit",
     "build:binary": "bash build/binary.sh",
-    "nanosync": "bun packages/cli/src/main.ts"
+    "nanosync": "bun packages/cli/src/main.ts",
+    "build:frontend": "bun build/frontend.ts",
+    "test:browser": "bun --bun node_modules/@playwright/test/cli.js test"
   },
   "devDependencies": {
+    "@playwright/test": "^1.65.1",
     "@types/bun": "1.3.14"
   },
   "peerDependencies": {

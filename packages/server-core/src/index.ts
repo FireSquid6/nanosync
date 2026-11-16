@@ -1,4 +1,4 @@
-import { BrowserAdministration, type AdminAssets } from "./browser-admin.ts";
+import { BrowserAdministration, browserSecurityHeaders, type AdminAssets } from "./browser-admin.ts";
 import type { OwnerOperations } from "./owner-operations.ts";
 import {
   CHUNK_SIZE, MAX_IDEMPOTENCY_KEY_LENGTH, MAX_JSON_METADATA_BYTES, MAX_PAGE_SIZE, MAX_PARENTS,
@@ -141,7 +141,10 @@ export function createServerHandler(dependencies: ServerDependencies): (request:
       throw new ApiError(404, "NOT_FOUND", "Route not found");
     } catch (error) {
       const response = errorResponse(error);
-      if (new URL(request.url).pathname.startsWith('/admin')) response.headers.set('cache-control', 'no-store');
+      if (new URL(request.url).pathname.startsWith('/admin')) {
+        response.headers.set('cache-control', 'no-store');
+        for (const [key, value] of Object.entries(browserSecurityHeaders)) response.headers.set(key, value);
+      }
       return response;
     }
   };

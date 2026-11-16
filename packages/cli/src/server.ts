@@ -1,3 +1,4 @@
+import { adminAssets } from '../../admin-ui/generated/assets.ts';
 import { parseDeviceId } from "@nanosync/protocol";
 import { timingSafeEqual, randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -80,7 +81,7 @@ export async function runServer(options: RunServerOptions): Promise<{ stop(): Pr
     });
     const server = startServer({
       owner: new OwnerOperations(database, filesystem),
-      adminAssets: options.adminAssets,
+      adminAssets: options.adminAssets ?? adminAssets,
       filesystem,
       catalog: new ObjectCatalogRepository(database),
       revisions: new RevisionRepository(database),

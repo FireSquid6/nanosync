@@ -38,3 +38,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 local.properties
 /apps/android/build/
 /apps/android/app/build/
+
+# browser test reports
+test-results/
+playwright-report/

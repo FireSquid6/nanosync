@@ -43,7 +43,7 @@ export class BrowserAdministration {
         if (request.method !== 'GET') throw new ApiError(405, 'MALFORMED_REQUEST', 'Method not supported');
         const asset = this.assets[path];
         if (!asset) throw new ApiError(404, 'NOT_FOUND', 'Route not found');
-        return new Response(typeof asset.body === "string" ? asset.body : Uint8Array.from(asset.body).buffer, { headers: { 'content-type': asset.contentType, 'cache-control':'no-store', 'x-content-type-options':'nosniff', 'content-security-policy':"default-src 'self'; frame-ancestors 'none'; base-uri 'none'" } });
+        return new Response(typeof asset.body === "string" ? asset.body : Uint8Array.from(asset.body).buffer, { headers: { 'content-type': asset.contentType, 'cache-control': path.startsWith('/admin/assets/') ? 'public, max-age=31536000, immutable' : 'no-store', ...browserSecurityHeaders } });
       }
       if (url.search && path !== '/admin/api/activity') throw malformed();
       if (path === '/admin/api/session' && request.method === 'POST') {
@@ -119,7 +119,7 @@ export class BrowserAdministration {
     this.attempts.push(now); // Reserve before awaiting expensive password verification.
     await this.auth.verifyOwnerPassword(value);
   }
-  private result(value: object, headers?: Record<string, string>): Response { return json({ protocolVersion: 1, ...value }, 200, { ...headers, 'cache-control':'no-store', 'x-content-type-options':'nosniff' }); }
+  private result(value: object, headers?: Record<string, string>): Response { return json({ protocolVersion: 1, ...value }, 200, { ...headers, 'cache-control':'no-store', ...browserSecurityHeaders }); }
 }
 function token(): string { return randomBytes(32).toString('base64url'); }
 function cookie(id: string, secure: boolean): string { return `${cookieName}=${id}; HttpOnly; SameSite=Strict; Path=/admin${secure ? '; Secure' : ''}`; }
@@ -129,3 +129,10 @@ async function body(request: Request, fields: string[]): Promise<Record<string, 
   if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).sort().join() !== [...fields].sort().join()) throw malformed();
   return input as Record<string, unknown>;
 }
+
+export const browserSecurityHeaders = {
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "no-referrer",
+  "permissions-policy": "camera=(), microphone=(), geolocation=()",
+  "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+};

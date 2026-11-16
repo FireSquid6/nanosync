@@ -438,3 +438,62 @@ Exact changed paths / key functions:
 Exact changed paths / key programs:
 - `packages/cli/tests/terminal.test.ts` — `initializationScript`, `confirmationScript`, delayed-exit subprocess regression.
 - `docs/implementation-progress.md` — contracts and verification evidence.
+
+## Embedded React Paper UI owner frontend (completed)
+
+### Public contracts
+
+- `packages/admin-ui` is the real React browser frontend, built with Bun's browser target; `build/frontend.ts` generates an exact pathname asset map with content-hashed JS/CSS and `/admin` HTML. The generated map is checked in for immediate source runs. `runServer` injects it by default (explicit test/integration asset overrides remain supported). Binary builds always regenerate and compile the map; no runtime disk assets/CDN/frontend service are required.
+- Copied upstream Paper UI Button, TextField, Dialog, classNames and scoped styles unchanged from `FireSquid6/paper-ui` revision `f6cd7e07c88aa780618717a388c3762fd406bef1`. `PAPER-UI-NOTICE.md` records provenance and absence of an upstream license file/header; it makes no invented license grant. Nix/AUR install that notice. Dialog uses maintained Radix focus trapping, dismissal and keyboard foundations, including safe initial Cancel focus and trigger restoration.
+- UI covers owner login/logout, complete pending identity/metadata/comparison codes, approve/deny, active/revoked clients, confirmed access-only revocation, vault list/create/rename/permanent delete with exact name/password, and timestamped origin/target activity. No files or existing recovery secrets can be browsed/retrieved.
+- Browser `prepare`/`verify` reuse portable sync-core genesis encryption, key wrap, recovery encoding, decryption and reference MAC verification. Secret acknowledgement precedes saving an encrypted request receipt; **only that encrypted request** goes to localStorage. Secret reentry verifies the wrap, manifest and MAC before every publication/retry. Plaintext key byte arrays are cleared; displayed secrets and password fields are cleared on workflow transitions/submission. No plaintext key/secret is persisted. Refresh/lost-response replay keeps the same UUID/ciphertext and requires recovery reentry. Per-origin Web Locks guard receipt replacement/removal across tabs; another acknowledged request cannot be overwritten. Unacknowledged preparations never publish.
+- HTML/API/errors remain no-store; exact allowlisted hashed assets use immutable caching. Browser responses include CSP (same-origin script/style/connect, no objects, no framing, no base, same-origin forms), nosniff, no-referrer and restricted permissions. Disabled UI still exposes no routes/assets; unknown paths have no fallback.
+- `bun run test:browser` runs local Playwright through Bun with the required real Chromium (override `CHROMIUM_PATH`). `NANOSYNC_TEST_BINARY="$PWD/dist/nanosync" bun run test:browser` tests the actual standalone executable. Browser tests are separately named `.pw.ts` so `bun test` does not incorrectly invoke Playwright's runner. Root typecheck includes frontend, build tooling and browser tests.
+- Updated frozen lock/Nix dependency expression includes all maintained React/Radix/Playwright dependencies. Nix offline sandbox and AUR use the shared binary build, which regenerates assets from copied source without network build steps. Existing exclusive server-runtime storage ownership remains unchanged.
+
+### Evidence
+
+- Initial real-browser test was red because opt-in `/admin` had no assets. After embedding, real browser workflows pass through actual temporary CLI-initialized servers, not component mocks. Missing tools are not skipped.
+- Browser coverage: login/logout; no mutation before acknowledgement; wrong secret refuses publication; refresh requires proof; encrypted-only request fields and no plaintext secret in local/session storage; rename; wrong exact-name deletion refusal; danger warnings/focus/Escape/trigger return; activity; mobile overflow; keyboard approval; CLI/browser comparison-code equality; denial/revocation; committed-but-lost creation response followed by byte-identical replay and one vault; hashed asset headers, unknown asset rejection and disabled routes; cross-tab receipt protection.
+- `bun run typecheck`: all nine workspaces plus browser/build tooling passed.
+- `bun test`: **283 passed, 0 failed**, 2042 assertions.
+- `bun run test:browser`: **4 passed**, real source server and Chromium.
+- `bun run build:binary`: passed; standalone embeds browser assets.
+- `NANOSYNC_TEST_BINARY="$PWD/dist/nanosync" bun run test:browser`: **4 passed**.
+- `nix --extra-experimental-features 'nix-command flakes' build .#nanosync --no-link`: passed. Subsequent `--offline --no-link` build also passed, including frontend regeneration in the Nix build. No AUR makepkg execution is claimed (shared binary build was exercised).
+- Existing deterministic server-handler tests remain the authority for idle/absolute expiry, cookies, CSRF, rate limits and trusted proxy policy; frontend does not replace these boundaries.
+
+### Review handoff
+
+Key functions/types: React `App`, browser `prepare/verify`, `Creation`, Bun frontend generation, `runServer` default asset injection, `browserSecurityHeaders`, `BrowserAdministration.handle/result`.
+
+Exact changed paths:
+- `.gitignore`
+- `package.json`
+- `bun.lock`
+- `tsconfig.tools.json`
+- `playwright.config.ts`
+- `browser-tests/admin.pw.ts`
+- `build/frontend.ts`
+- `build/binary.sh`
+- `build/aur/PKGBUILD`
+- `build/nix/README.md`
+- `build/nix/bun.nix`
+- `build/nix/package.nix`
+- `packages/admin-ui/package.json`
+- `packages/admin-ui/tsconfig.json`
+- `packages/admin-ui/README.md`
+- `packages/admin-ui/PAPER-UI-NOTICE.md`
+- `packages/admin-ui/generated/assets.ts`
+- `packages/admin-ui/src/main.tsx`
+- `packages/admin-ui/src/creation.ts`
+- `packages/admin-ui/src/styles.css`
+- `packages/admin-ui/src/paper/Button.tsx`
+- `packages/admin-ui/src/paper/TextField.tsx`
+- `packages/admin-ui/src/paper/Dialog.tsx`
+- `packages/admin-ui/src/paper/classNames.ts`
+- `packages/admin-ui/src/paper/styles.css`
+- `packages/cli/src/server.ts`
+- `packages/server-core/src/browser-admin.ts`
+- `packages/server-core/src/index.ts`
+- `docs/implementation-progress.md`
