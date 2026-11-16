@@ -365,7 +365,8 @@ public final class SyncCoordinator implements UiActions {
                     mutate(latest -> { JSONObject owner = serverForVault(latest, id); if (owner != null) removeById(owner.getJSONArray("vaults"), id); });
                     serverError(server.optString("id"), message(e));
                 }
-                vaultState(id, value -> value.put("running", false).put("status", "Blocked").put("error", message(e)));
+                vaultState(id, value -> value.put("running", runs.containsKey(id))
+                        .put("status", runs.containsKey(id) ? "Stopping" : "Blocked").put("error", message(e)));
                 notifyAction(id, message(e));
             }
         }
@@ -390,7 +391,7 @@ public final class SyncCoordinator implements UiActions {
                 io.execute(() -> store.removeJournal(id)); return;
             }
             if (run.cancelled) {
-                vaultState(id, vault -> vault.put("running", false));
+                vaultState(id, vault -> vault.put("running", false).put("status", vault.optBoolean("paused") ? "Paused" : "Stopped"));
                 next.put(id, System.currentTimeMillis() + 3000);
                 return;
             }
