@@ -39,6 +39,7 @@ export function install(host: NativeHost, target: { Nanosync?: unknown; Nanosync
       if (!master || !/^[a-fA-F0-9]{64}$/.test(master)) throw new Error("invalid vault master key");
       key = Uint8Array.from(master.match(/../g)!, pair => parseInt(pair, 16));
       const journal = new Journal(bridge), scanner = new Scanner(bridge, journal);
+      await journal.prepareStorage();
       await scanner.refresh();
       const remote = new HttpRemote({ baseUrl: context.server.baseUrl, token: context.server.token, vaultId: context.vault.vaultId, fetch: transport, journal });
       const applier = new Applier(bridge, journal, scanner, remote);

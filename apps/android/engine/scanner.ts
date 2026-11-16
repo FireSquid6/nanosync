@@ -51,6 +51,19 @@ export class Scanner implements SyncScanner {
     this.inventory = safeInventory(inventory);
   }
   snapshot() { return this.inventory.filter(e => !this.matcher.ignores(e.path, e.directory)); }
+  policySignature() { return this.ignoreText; }
+  async verifyPolicy(expected: string) {
+    const meta = await this.bridge.call<Metadata | { missing: true }>("stat", { path: ".nanosyncignore" });
+    let text = "";
+    if (!("missing" in meta)) {
+      if (meta.directory || meta.symlink || meta.size > 65536) throw new Error("invalid ignore file");
+      const read = await this.bridge.call<{ dataBase64: string; size: number; modified: number }>("read", { path: ".nanosyncignore", offset: 0, length: 65536 });
+      const bytes = fromBase64(read.dataBase64);
+      if (!sameMetadata(meta, read) || bytes.length !== meta.size) throw new Error("ignore policy changed during read; retry sync");
+      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    }
+    if (text !== expected) throw new Error("ignore policy changed during apply; retry sync before applying");
+  }
   async digest(meta: Metadata): Promise<string> {
     const result = await this.bridge.call<{ sha256: string; size: number; modified: number; fileKey?: string }>("digest", { path: meta.path });
     if (!sameMetadata(meta, result) || !/^[a-f0-9]{64}$/.test(result.sha256)) throw new Error(`file changed during scan: ${meta.path}`);
@@ -143,16 +156,18 @@ export class Scanner implements SyncScanner {
         if (!after || before.directory !== after.directory || (before.directory ? !!before.fileKey && before.fileKey !== after.fileKey : !sameMetadata(before, after))) throw new Error(`local tree changed before scan commit: ${before.path}`);
       }
       for (const source of sources.values()) if (await this.digest(source.meta) !== source.sha) throw new Error(`local content changed before scan commit: ${source.meta.path}`);
+      await this.verifyPolicy(ignoreText);
       this.journal.commitEntries(manifest, this.inventory);
     },
       async *chunks(known = new Set<string>()): AsyncGenerator<EncryptedObject> {
+        const yielded = new Set<string>();
         for (const entry of manifest.entries) {
           const source = sources.get(entry.id); if (!source) continue;
           if (await scanner.digest(source.meta) !== source.sha) throw new Error("source changed before publication");
           let index = 0;
           for await (const object of encryptFileChunks(scanner.source(source.meta), key, prior.vaultId)) {
             if (entry.chunks?.[index++]?.objectId !== object.reference.objectId) throw new Error("source chunks changed");
-            if (!known.has(object.reference.objectId)) yield object;
+            if (!known.has(object.reference.objectId) && !yielded.has(object.reference.objectId)) { yielded.add(object.reference.objectId); yield object; }
           }
           if (index !== entry.chunks!.length || await scanner.digest(source.meta) !== source.sha) throw new Error("source changed during publication");
         }

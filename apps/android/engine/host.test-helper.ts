@@ -1,6 +1,6 @@
 // Real filesystem host for adapter contract tests; never imported by index.ts.
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, rmdirSync, statSync, lstatSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, rmdirSync, statSync, lstatSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { install, type RunContext } from "./runtime.ts";
 import type { NativeHost } from "./bridge.ts";
@@ -73,7 +73,7 @@ export class TestHost implements NativeHost {
         try { writeSync(fd, Buffer.from(a.dataBase64, "base64"), 0, Buffer.from(a.dataBase64, "base64").length, a.offset); }
         finally { closeSync(fd); } return {};
       }
-      case "stageCommit": this.checkExpected(a.path, a.expected); renameSync(stage, path); return {};
+      case "stageCommit": this.checkExpected(a.path, a.expected); copyFileSync(stage, path); return {};
       case "stageDelete": if (existsSync(stage)) unlinkSync(stage); return {};
       case "mkdir": mkdirSync(path); return {};
       case "remove": this.checkExpected(a.path, a.expected); if (statSync(path).isDirectory()) rmdirSync(path); else unlinkSync(path); return {};

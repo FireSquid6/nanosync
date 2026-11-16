@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
@@ -78,6 +78,9 @@ test("durable apply resumes after crash without redownloading a completed chunk;
   const resumed = new TestHost(e.androidFiles, e.androidPrivate, fetch, e.context.server.baseUrl);
   await resumed.run(e.context);
   expect(readFileSync(join(e.androidFiles, "big"))).toEqual(bytes);
+  const finished = JSON.parse(readFileSync(join(e.androidPrivate, "state"), "utf8"));
+  expect(finished.garbage).toHaveLength(0);
+  expect(readdirSync(e.androidPrivate).sort()).toEqual(["state", ...Object.values(finished.chunks).map((c: any) => c.id)].sort());
   expect(before).toBe(2);
   expect(resumed.calls.filter(c => c.method === "http" && c.args.method === "GET" && c.args.path.includes("/objects/chunk/"))).toHaveLength(0);
   resumed.failure = method => { if (method === "listDirectory") throw new Error("permission denied"); };
@@ -108,15 +111,18 @@ test("capacity and guarded commit failures retain the old file and applied head"
   expect(readFileSync(join(e.androidFiles, "note"), "utf8")).toBe("new data");
 }, 30000);
 
-test("local edits during download are not discarded and pending apply remains blocked", async () => {
+test("local edits during download cancel an unmutated apply and retry merges both versions", async () => {
   const e = await fixture(); writeFileSync(join(e.cliFiles, "note"), "old"); await e.cli(); await e.host.run(e.context);
   writeFileSync(join(e.cliFiles, "note"), "new remote content"); await e.cli();
   let edited = false;
   e.host.failure = method => { if (method === "stageDigest" && !edited) { edited = true; writeFileSync(join(e.androidFiles, "note"), "concurrent local content"); } };
   await expect(e.host.run(e.context)).rejects.toThrow("local path changed");
   expect(readFileSync(join(e.androidFiles, "note"), "utf8")).toBe("concurrent local content");
+  expect(JSON.parse(readFileSync(join(e.androidPrivate, "state"), "utf8")).applies).toHaveLength(0);
   e.host.failure = undefined;
-  await expect(e.host.run(e.context)).rejects.toThrow("local path changed");
+  const recovered = await e.host.run(e.context);
+  const contents = [readFileSync(join(e.androidFiles, "note"), "utf8"), ...recovered.conflicts.map((p: string) => readFileSync(join(e.androidFiles, p), "utf8"))];
+  expect(new Set(contents)).toEqual(new Set(["concurrent local content", "new remote content"]));
 }, 30000);
 
 test("tracked exclusions remain remote and do not become deletions when another file uploads", async () => {
@@ -156,4 +162,82 @@ test("async scan commit catches edits after publication acceptance before advanc
   const state = JSON.parse(readFileSync(join(e.androidPrivate, "state"), "utf8"));
   expect(state.heads.applied.revisionId).toBe(original.revisionId);
   expect(state.proposal.state).toBe("accepted");
+}, 30000);
+
+test("file-directory-file topology transitions stage content before guarded removal", async () => {
+  const e = await fixture(); writeFileSync(join(e.cliFiles, "node"), "old file"); await e.cli(); await e.host.run(e.context);
+  rmSync(join(e.cliFiles, "node")); mkdirSync(join(e.cliFiles, "node")); writeFileSync(join(e.cliFiles, "node", "child"), "nested"); await e.cli();
+  const start = e.host.calls.length; await e.host.run(e.context);
+  expect(readFileSync(join(e.androidFiles, "node", "child"), "utf8")).toBe("nested");
+  const calls = e.host.calls.slice(start);
+  expect(calls.findIndex(c => c.method === "stageDigest")).toBeLessThan(calls.findIndex(c => c.method === "remove"));
+  rmSync(join(e.cliFiles, "node"), { recursive: true }); writeFileSync(join(e.cliFiles, "node"), "replacement file"); await e.cli();
+  await e.host.run(e.context); expect(readFileSync(join(e.androidFiles, "node"), "utf8")).toBe("replacement file");
+}, 30000);
+
+test("directory-to-file replacement never removes ignored or untracked child content", async () => {
+  const e = await fixture(); mkdirSync(join(e.cliFiles, "node")); writeFileSync(join(e.cliFiles, "node", "tracked"), "tracked"); await e.cli(); await e.host.run(e.context);
+  writeFileSync(join(e.androidFiles, ".nanosyncignore"), "node/private\n"); writeFileSync(join(e.androidFiles, "node", "private"), "never delete");
+  rmSync(join(e.cliFiles, "node"), { recursive: true }); writeFileSync(join(e.cliFiles, "node"), "replacement"); await e.cli();
+  await expect(e.host.run(e.context)).rejects.toThrow();
+  expect(readFileSync(join(e.androidFiles, "node", "private"), "utf8")).toBe("never delete");
+}, 30000);
+
+test("partial-apply edit has actionable move-aside recovery without clearing the journal", async () => {
+  const e = await fixture();
+  for (const name of ["a", "b"]) writeFileSync(join(e.cliFiles, name), "old");
+  await e.cli(); await e.host.run(e.context);
+  for (const name of ["a", "b"]) writeFileSync(join(e.cliFiles, name), "remote replacement");
+  await e.cli();
+  let editedPath = "";
+  e.host.failure = (method, args) => {
+    if (method === "stageCommit" && !editedPath) {
+      editedPath = args.path === "a" ? "b" : "a";
+      writeFileSync(join(e.androidFiles, editedPath), "precious concurrent edit");
+    }
+  };
+  await expect(e.host.run(e.context)).rejects.toThrow("Move the edited path outside this vault, then retry");
+  expect(readFileSync(join(e.androidFiles, editedPath), "utf8")).toBe("precious concurrent edit");
+  e.host.failure = undefined;
+  const saved = join(temp(), "saved-edit"); renameSync(join(e.androidFiles, editedPath), saved);
+  await e.host.run(e.context);
+  expect(readFileSync(saved, "utf8")).toBe("precious concurrent edit");
+  for (const name of ["a", "b"]) expect(readFileSync(join(e.androidFiles, name), "utf8")).toBe("remote replacement");
+  expect(JSON.parse(readFileSync(join(e.androidPrivate, "state"), "utf8")).applies).toHaveLength(0);
+}, 30000);
+
+test("Android deduplicates repeated file content frames during publication", async () => {
+  const e = await fixture();
+  for (const name of ["copy-a", "copy-b"]) writeFileSync(join(e.androidFiles, name), "identical content");
+  await e.host.run(e.context); await e.cli();
+  for (const name of ["copy-a", "copy-b"]) expect(readFileSync(join(e.cliFiles, name), "utf8")).toBe("identical content");
+}, 30000);
+
+test("ignore policy changed during staging blocks overwrite and safely replans on retry", async () => {
+  const e = await fixture(); writeFileSync(join(e.cliFiles, "note"), "old local bytes"); await e.cli(); await e.host.run(e.context);
+  writeFileSync(join(e.cliFiles, "note"), "new remote bytes"); await e.cli();
+  e.host.failure = method => { if (method === "stageDigest") writeFileSync(join(e.androidFiles, ".nanosyncignore"), "note\n"); };
+  await expect(e.host.run(e.context)).rejects.toThrow("ignore policy changed");
+  expect(readFileSync(join(e.androidFiles, "note"), "utf8")).toBe("old local bytes");
+  e.host.failure = undefined; const result = await e.host.run(e.context);
+  expect(result.exclusionsActive).toBe(true);
+  expect(readFileSync(join(e.androidFiles, "note"), "utf8")).toBe("old local bytes");
+}, 30000);
+
+test("ignore policy is revalidated before every commit and pinned across partial apply restart", async () => {
+  const e = await fixture();
+  for (const name of ["a", "b"]) writeFileSync(join(e.cliFiles, name), "old");
+  await e.cli(); await e.host.run(e.context);
+  for (const name of ["a", "b"]) writeFileSync(join(e.cliFiles, name), "remote replacement");
+  await e.cli(); let excluded = "";
+  e.host.failure = (method, args) => {
+    if (method === "stageCommit" && !excluded) { excluded = args.path === "a" ? "b" : "a"; writeFileSync(join(e.androidFiles, ".nanosyncignore"), `${excluded}\n`); }
+  };
+  await expect(e.host.run(e.context)).rejects.toThrow("Restore the previous .nanosyncignore rules");
+  expect(readFileSync(join(e.androidFiles, excluded), "utf8")).toBe("old");
+  e.host.failure = undefined;
+  const resumed = new TestHost(e.androidFiles, e.androidPrivate, fetch, e.context.server.baseUrl);
+  await expect(resumed.run(e.context)).rejects.toThrow("Restore the previous .nanosyncignore rules");
+  rmSync(join(e.androidFiles, ".nanosyncignore")); await resumed.run(e.context);
+  for (const name of ["a", "b"]) expect(readFileSync(join(e.androidFiles, name), "utf8")).toBe("remote replacement");
 }, 30000);
