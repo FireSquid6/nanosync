@@ -68,6 +68,7 @@ public final class SyncCoordinator implements UiActions {
                 public void cancel() { runtime.cancel(); }
             };
         }
+        void scheduleResume(Context context) { ResumeReceiver.schedule(context); }
         void startBackgroundService(Context context) { context.startForegroundService(new Intent(context, SyncService.class)); }
         void removeJournal(AppStore store, String id) { store.removeJournal(id); }
         long budgetMillis(int previousYields) {
@@ -245,6 +246,7 @@ public final class SyncCoordinator implements UiActions {
             state.retryCleanup();
             state.reconcile();
             if (state.hasBackground()) {
+                state.environment.scheduleResume(state.context);
                 try {
                     state.environment.startBackgroundService(state.context);
                 } catch (RuntimeException e) { state.backgroundUnavailable("Background sync could not start. Open Nanosync and allow background operation."); }
@@ -269,6 +271,7 @@ public final class SyncCoordinator implements UiActions {
         state.main.post(() -> {
             if (state.serviceOwner != null && state.serviceOwner != owner) return;
             state.serviceOwner = null; state.serviceRunning = false; state.backgroundUnavailable(reason);
+            if (state.hasBackground()) state.environment.scheduleResume(state.context);
         });
     }
     void resumeAfterReboot(Runnable prompt) {
@@ -278,12 +281,17 @@ public final class SyncCoordinator implements UiActions {
             prompt.run();
         });
     }
+    void startJob(Object owner, long budgetMillis, Runnable onDrained) {
+        state.main.post(() -> state.beginJob(owner, budgetMillis, onDrained));
+    }
+    void stopJob(Object owner) { state.main.post(() -> { if (state.job != null && state.job.owner == owner) state.stopJob(state.job); }); }
     boolean hasBackground() { return state.hasBackground(); }
     void tick() { state.main.post(state::reconcile); }
 
     private interface Change { void apply(JSONObject config) throws Exception; }
     private static final class Run {
         RuntimeHandle runtime;
+        JobLease job;
         Runnable deadline;
         boolean timedOut;
         boolean manual, override, cancelled, remove;
@@ -299,9 +307,18 @@ public final class SyncCoordinator implements UiActions {
         final boolean manual, override;
         final String recovery;
         final long generation;
-        StartRequest(boolean manual, boolean override, String recovery, long generation) {
-            this.manual = manual; this.override = override; this.recovery = recovery; this.generation = generation;
+        final JobLease job;
+        StartRequest(boolean manual, boolean override, String recovery, long generation, JobLease job) {
+            this.manual = manual; this.override = override; this.recovery = recovery; this.generation = generation; this.job = job;
         }
+    }
+    private static final class JobLease {
+        final Object owner;
+        final Runnable onDrained;
+        final Set<String> pending = new HashSet<>();
+        Runnable deadline;
+        boolean stopping;
+        JobLease(Object owner, Runnable onDrained) { this.owner = owner; this.onDrained = onDrained; }
     }
     private static final class Shared {
         final Context context;
@@ -323,6 +340,7 @@ public final class SyncCoordinator implements UiActions {
         final ArrayList<WeakReference<Runnable>> observers = new ArrayList<>();
         boolean serviceRunning;
         Object serviceOwner;
+        JobLease job;
 
         Shared(Context context, AppStore store) { this(context, store, new ExecutionEnvironment()); }
         Shared(Context context, AppStore store, ExecutionEnvironment environment) {
@@ -340,6 +358,51 @@ public final class SyncCoordinator implements UiActions {
                 }
             });
             retryCleanup();
+        }
+        void beginJob(Object owner, long budgetMillis, Runnable onDrained) {
+            retryCleanup();
+            // Existing FGS/manual ownership is never relabelled or cancelled by a job.
+            if (serviceOwner != null || job != null) { onDrained.run(); return; }
+            JobLease lease = new JobLease(owner, onDrained); job = lease;
+            JSONObject config = store.snapshot();
+            refreshPolicies(config);
+            JSONArray servers = config.optJSONArray("servers");
+            for (int i = 0; i < servers.length(); i++) {
+                JSONArray vaults = servers.optJSONObject(i).optJSONArray("vaults");
+                for (int j = 0; j < vaults.length(); j++) {
+                    JSONObject vault = vaults.optJSONObject(j);
+                    if (vault.optBoolean("background") && !vault.optBoolean("paused") && !vault.optString("masterKeyHex").isEmpty()) lease.pending.add(vault.optString("id"));
+                }
+            }
+            lease.deadline = () -> stopJob(lease);
+            main.postDelayed(lease.deadline, Math.max(1, Math.min(120_000, budgetMillis)));
+            for (String id : new ArrayList<>(lease.pending)) start(id, false, false, null, lease);
+            checkJob(lease);
+        }
+        void skipped(JobLease lease, String id) {
+            if (lease == null) return;
+            lease.pending.remove(id); main.post(() -> checkJob(lease));
+        }
+        void checkJob(JobLease lease) {
+            if (job != lease || !lease.pending.isEmpty()) return;
+            for (Run run : runs.values()) if (run.job == lease) return;
+            for (StartRequest request : queued.values()) if (request.job == lease) return;
+            main.removeCallbacks(lease.deadline);
+            job = null;
+            lease.onDrained.run(); // main looper; terminal callbacks have fenced all owned IO.
+        }
+        void stopJob(JobLease lease) {
+            if (job != lease || lease.stopping) return;
+            lease.stopping = true;
+            for (Map.Entry<String, StartRequest> entry : new ArrayList<>(queued.entrySet())) if (entry.getValue().job == lease) {
+                queued.remove(entry.getKey());
+                vaultState(entry.getKey(), vault -> vault.put("running", false).put("status", "Waiting for scheduled retry"));
+            }
+            lease.pending.clear();
+            for (Map.Entry<String, Run> entry : new ArrayList<>(runs.entrySet())) if (entry.getValue().job == lease) {
+                entry.getValue().timedOut = false; cancel(entry.getKey(), entry.getValue());
+            }
+            checkJob(lease);
         }
         void retryCleanup() {
             JSONArray cleanup = store.snapshot().optJSONArray("cleanupJournals");
@@ -378,10 +441,11 @@ public final class SyncCoordinator implements UiActions {
         }
         boolean currentRequest(String id, StartRequest request) {
             JSONObject config = store.snapshot(), vault = findVault(config, id);
-            return vault != null && request.generation == generations.getOrDefault(id, 0L)
+            return (request.job == null || job == request.job && !request.job.stopping) && vault != null && request.generation == generations.getOrDefault(id, 0L)
                     && policyStamp(config, vault).equals(policyValues.get(id));
         }
         void discardQueued(String id, StartRequest request) {
+            skipped(request.job, id);
             if (request.recovery != null) {
                 globalError("Connection cancelled by a settings change. Reconnect and enter the recovery key again.");
                 mutate(config -> removeConnection(config, id)); cleanupJournal(id);
@@ -429,18 +493,27 @@ public final class SyncCoordinator implements UiActions {
         boolean networkAllowed(boolean mobile) { return environment.networkAllowed(context, mobile); }
         boolean dispatching;
         void start(String id, boolean manual, boolean override, String recovery) {
-            if (runs.containsKey(id) || queued.containsKey(id)) return;
+            JobLease lease = !manual && !serviceRunning ? job : null;
+            if (lease != null && !lease.pending.contains(id)) return;
+            start(id, manual, override, recovery, lease);
+        }
+        void start(String id, boolean manual, boolean override, String recovery, JobLease lease) {
+            if (runs.containsKey(id) || queued.containsKey(id)) {
+                if (lease != null && !(runs.containsKey(id) && runs.get(id).job == lease)
+                        && !(queued.containsKey(id) && queued.get(id).job == lease)) skipped(lease, id);
+                return;
+            }
             JSONObject config = store.snapshot(), vault = findVault(config, id), server = serverForVault(config, id);
-            if (vault == null || server == null) return;
-            if (recovery == null && vault.optString("masterKeyHex").isEmpty()) return;
-            if (!manual && (vault.optBoolean("paused") || !vault.optBoolean("background") || !serviceRunning)) return;
+            if (vault == null || server == null || recovery == null && vault.optString("masterKeyHex").isEmpty()
+                    || !manual && (vault.optBoolean("paused") || !vault.optBoolean("background")
+                    || (lease == null ? !serviceRunning : job != lease || lease.stopping))) { skipped(lease, id); return; }
             refreshPolicies(config);
             // Repeatedly slow passes may use three slots, never all four. The reserved
             // fresh-pass slot keeps healthy/new vaults responsive while large scans get
             // progressively longer windows without monopolizing every execution slot.
             long slowRuns = runs.values().stream().filter(run -> run.previousYields > 0).count();
             if (runs.size() >= 4 || vault.optInt("runTimeouts") > 0 && slowRuns >= 3 || !dispatching && !queued.isEmpty()) {
-                queued.put(id, new StartRequest(manual, override, recovery, generations.getOrDefault(id, 0L)));
+                queued.put(id, new StartRequest(manual, override, recovery, generations.getOrDefault(id, 0L), lease));
                 vaultState(id, value -> value.put("running", false).put("status", "Queued"));
                 if (!dispatching) main.post(this::drainQueue);
                 return;
@@ -452,9 +525,10 @@ public final class SyncCoordinator implements UiActions {
                 if (!networkAllowed(mobile)) {
                     if (recovery != null) throw new IOException("Connect to a permitted network before recovering this vault.");
                     vaultState(id, value -> value.put("running", false).put("status", "Waiting for permitted network").put("error", "Connect to Wi-Fi or allow mobile data for this vault."));
+                    skipped(lease, id);
                     return;
                 }
-                Run run = new Run(); run.manual = manual; run.override = override; run.recovery = recovery;
+                Run run = new Run(); run.job = lease; run.manual = manual; run.override = override; run.recovery = recovery;
                 run.previousYields = vault.optInt("runTimeouts");
                 run.generation = generations.getOrDefault(id, 0L);
                 run.policy = policy(config, vault, override);
@@ -495,6 +569,7 @@ public final class SyncCoordinator implements UiActions {
                 vaultState(id, value -> value.put("running", runs.containsKey(id))
                         .put("status", runs.containsKey(id) ? "Stopping" : "Blocked").put("error", message(e)));
                 notifyAction(id, message(e));
+                if (!runs.containsKey(id)) skipped(lease, id);
             }
         }
         void event(String id, Run run, JSONObject event) {
@@ -511,6 +586,7 @@ public final class SyncCoordinator implements UiActions {
         void finish(String id, Run run, JSONObject result, String error) {
             if (runs.get(id) != run) return;
             runs.remove(id);
+            skipped(run.job, id);
             if (run.deadline != null) main.removeCallbacks(run.deadline);
             main.post(this::drainQueue);
             String recovery = run.recovery; run.recovery = null;
@@ -520,8 +596,8 @@ public final class SyncCoordinator implements UiActions {
             }
             if (run.cancelled && run.timedOut) {
                 vaultState(id, vault -> vault.put("running", false).put("status", "Timeout; retry queued"));
-                StartRequest retry = new StartRequest(run.manual, run.override, null, run.generation);
-                if (currentRequest(id, retry)) queued.put(id, retry);
+                StartRequest retry = new StartRequest(run.manual, run.override, null, run.generation, run.job);
+                if (run.job == null && currentRequest(id, retry)) queued.put(id, retry);
                 return;
             }
             if (run.cancelled) {
@@ -579,12 +655,13 @@ public final class SyncCoordinator implements UiActions {
                 StartRequest request = queued.remove(id);
                 if (!currentRequest(id, request)) { discardQueued(id, request); continue; }
                 dispatching = true;
-                try { start(id, request.manual, request.override, request.recovery); }
+                try { start(id, request.manual, request.override, request.recovery, request.job); }
                 finally { dispatching = false; }
             }
         }
         void disconnect(String id) {
-            queued.remove(id);
+            StartRequest removed = queued.remove(id);
+            if (removed != null) skipped(removed.job, id);
             Run run = runs.get(id);
             if (run != null) { run.remove = true; cancel(id, run); }
             mutate(config -> removeConnection(config, id));
@@ -616,7 +693,7 @@ public final class SyncCoordinator implements UiActions {
                 String id = entry.getKey(); Run run = entry.getValue(); JSONObject vault = findVault(config, id);
                 if (vault == null || run.generation != generations.getOrDefault(id, 0L) || !run.policy.equals(policy(config, vault, run.override))
                         || !networkAllowed(effectiveMobileAllowed(config, vault, run.override))
-                        || !run.manual && (!serviceRunning || vault.optBoolean("paused") || !vault.optBoolean("background"))) {
+                        || !run.manual && ((run.job == null ? !serviceRunning : run.job.stopping) || vault.optBoolean("paused") || !vault.optBoolean("background"))) {
                     run.timedOut = false; // Explicit policy/permission stops must not requeue a yielded manual pass.
                     cancel(id, run);
                 }
@@ -635,14 +712,16 @@ public final class SyncCoordinator implements UiActions {
             return config.optBoolean("allowHttp") + ":" + effectiveMobileAllowed(config, vault, override) + ":" + vault.optBoolean("paused");
         }
         void backgroundUnavailable(String reason) {
-            for (Map.Entry<String, Run> entry : new ArrayList<>(runs.entrySet())) if (!entry.getValue().manual) cancel(entry.getKey(), entry.getValue());
+            for (Map.Entry<String, Run> entry : new ArrayList<>(runs.entrySet())) if (!entry.getValue().manual && entry.getValue().job == null) cancel(entry.getKey(), entry.getValue());
             mutate(config -> {
                 JSONArray servers = config.getJSONArray("servers");
                 for (int i = 0; i < servers.length(); i++) {
                     JSONArray vaults = servers.getJSONObject(i).getJSONArray("vaults");
                     for (int j = 0; j < vaults.length(); j++) {
                         JSONObject vault = vaults.getJSONObject(j);
-                        if (vault.optBoolean("background")) vault.put("status", "Background not running").put("error", reason);
+                        Run active = runs.get(vault.optString("id"));
+                        if (vault.optBoolean("background") && (active == null || active.job == null)
+                                && (job == null || !job.pending.contains(vault.optString("id")))) vault.put("status", "Background not running").put("error", reason);
                     }
                 }
             });

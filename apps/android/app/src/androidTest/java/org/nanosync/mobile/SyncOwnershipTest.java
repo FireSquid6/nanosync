@@ -51,6 +51,7 @@ public final class SyncOwnershipTest {
                     .put("token", "test-only").put("enrollmentStatus", "approved").put("vaults", vaults);
             store.update(new JSONObject().put("servers", new JSONArray().put(server)));
             coordinator = new SyncCoordinator(context, store, null, new SyncCoordinator.ExecutionEnvironment() {
+                @Override void scheduleResume(Context ignored) { }
                 @Override void startBackgroundService(Context ignored) { }
                 @Override void removeJournal(AppStore target, String id) {
                     if (cleanupFailures.getAndUpdate(value -> Math.max(0, value - 1)) > 0) throw new IllegalStateException("Temporary cleanup failure");
@@ -81,6 +82,66 @@ public final class SyncOwnershipTest {
             for (FakeRun run : runs.values()) run.drain();
             await(() -> { for (String id : ids) if (tombstone(id)) return false; return true; });
             store.update(original);
+        }
+    }
+
+    @Test public void backgroundJobBudgetWaitsForDrainAndPreservesPreferencesAndJournal() throws Exception {
+        try (Fixture f = new Fixture(1, 60_000)) {
+            Object owner = new Object();
+            java.util.concurrent.atomic.AtomicBoolean completed = new java.util.concurrent.atomic.AtomicBoolean();
+            java.util.concurrent.atomic.AtomicBoolean onMain = new java.util.concurrent.atomic.AtomicBoolean();
+            f.coordinator.startJob(owner, 100, () -> {
+                onMain.set(android.os.Looper.myLooper() == android.os.Looper.getMainLooper()); completed.set(true);
+            });
+            await(() -> f.runs.size() == 1 && f.runs.values().iterator().next().cancelled);
+            assertFalse(completed.get());
+            assertTrue(f.vault(0).optBoolean("running"));
+            File journal = f.store.journalDirectory(f.ids.get(0));
+            assertTrue(new File(journal, "durable-progress").createNewFile());
+            f.runs.get(f.ids.get(0)).drain();
+            await(completed::get);
+            assertTrue(onMain.get()); assertTrue(journal.exists());
+            assertTrue(f.vault(0).optBoolean("background")); assertFalse(f.vault(0).optBoolean("paused"));
+            assertFalse(f.vault(0).optBoolean("running")); assertFalse(f.vault(0).optBoolean("initialSyncComplete"));
+        }
+    }
+
+    @Test public void stoppingJobCancelsOnlyItsOwnEnabledUnpausedRuns() throws Exception {
+        try (Fixture f = new Fixture(4, 60_000)) {
+            f.store.mutate(config -> { try {
+                JSONArray vaults = config.getJSONArray("servers").getJSONObject(0).getJSONArray("vaults");
+                vaults.getJSONObject(2).put("paused", true); vaults.getJSONObject(3).put("background", false);
+            } catch (Exception e) { throw new AssertionError(e); } });
+            f.coordinator.syncNow(f.ids.get(0), false);
+            await(() -> f.runs.size() == 1);
+            Object owner = new Object(); java.util.concurrent.atomic.AtomicBoolean completed = new java.util.concurrent.atomic.AtomicBoolean();
+            f.coordinator.startJob(owner, 60_000, () -> completed.set(true));
+            await(() -> f.runs.size() == 2);
+            assertTrue(f.runs.containsKey(f.ids.get(1)));
+            f.coordinator.stopJob(owner);
+            await(() -> f.runs.get(f.ids.get(1)).cancelled);
+            assertFalse(f.runs.get(f.ids.get(0)).cancelled); assertFalse(completed.get());
+            f.runs.get(f.ids.get(1)).drain(); await(completed::get);
+            assertTrue(f.vault(0).optBoolean("running"));
+            assertTrue(f.vault(2).optBoolean("paused")); assertFalse(f.vault(3).optBoolean("background"));
+        }
+    }
+
+    @Test public void backgroundJobPerformsOnePassAndNeverDisplacesLiveService() throws Exception {
+        try (Fixture f = new Fixture(1, 60_000)) {
+            Object job = new Object(); java.util.concurrent.atomic.AtomicBoolean completed = new java.util.concurrent.atomic.AtomicBoolean();
+            f.coordinator.startJob(job, 60_000, () -> completed.set(true));
+            await(() -> f.runs.size() == 1);
+            f.runs.get(f.ids.get(0)).listener.onFinished(new JSONObject().put("revisionId", UUID.randomUUID().toString())
+                    .put("sequence", 1).put("pendingUploads", 0).put("pendingDownloads", 0));
+            await(completed::get);
+            assertTrue(f.vault(0).optBoolean("initialSyncComplete"));
+            assertFalse(f.vault(0).optBoolean("running"));
+            Object service = new Object(); f.coordinator.serviceStarted(service);
+            java.util.concurrent.atomic.AtomicBoolean skipped = new java.util.concurrent.atomic.AtomicBoolean();
+            f.coordinator.startJob(new Object(), 100, () -> skipped.set(true));
+            await(skipped::get);
+            assertFalse(f.runs.values().iterator().next().cancelled);
         }
     }
 

@@ -1,9 +1,5 @@
 package org.nanosync.mobile;
 
-import android.app.Notification;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
-import android.app.PendingIntent;
 import android.app.job.JobInfo;
 import android.app.job.JobParameters;
 import android.app.job.JobScheduler;
@@ -13,10 +9,14 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.os.UserManager;
+import java.util.HashMap;
+import java.util.Map;
 
-/** Boot never launches a dataSync foreground service (forbidden for modern targets). */
+/** Native bounded sync jobs; boot never launches a prohibited dataSync foreground service. */
 public final class ResumeReceiver extends BroadcastReceiver {
     public static final int RESUME_JOB_ID = 6201;
+    public static final int PERIODIC_JOB_ID = 6202;
+    public static final long JOB_BUDGET_MILLIS = 120_000;
 
     @Override public void onReceive(Context context, Intent intent) {
         String action = intent.getAction();
@@ -26,35 +26,49 @@ public final class ResumeReceiver extends BroadcastReceiver {
 
     public static void schedule(Context context) {
         JobScheduler scheduler = context.getSystemService(JobScheduler.class);
-        scheduler.schedule(new JobInfo.Builder(RESUME_JOB_ID,
-                new ComponentName(context, ResumeJobService.class))
-                .setPersisted(true).setMinimumLatency(5000).setOverrideDeadline(60_000).build());
+        ComponentName service = new ComponentName(context, ResumeJobService.class);
+        // Do not replace an executing job: replacing it would revoke its live execution lease.
+        if (scheduler.getPendingJob(RESUME_JOB_ID) == null) scheduler.schedule(new JobInfo.Builder(RESUME_JOB_ID, service)
+                .setPersisted(true).setMinimumLatency(5000).setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+                .setBackoffCriteria(30_000, JobInfo.BACKOFF_POLICY_EXPONENTIAL).build());
+        if (scheduler.getPendingJob(PERIODIC_JOB_ID) == null) scheduler.schedule(new JobInfo.Builder(PERIODIC_JOB_ID, service)
+                .setPersisted(true).setPeriodic(15 * 60_000L).setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY).build());
     }
 
-    /** A job is not an exemption to FGS launch restrictions. Ask for a visible user resume. */
+    /** Jobs hold only their own runtime leases; all WebView work stays on the main looper. */
     public static final class ResumeJobService extends JobService {
-        @Override public boolean onStartJob(JobParameters parameters) {
-            if (!getSystemService(UserManager.class).isUserUnlocked()) {
-                // USER_UNLOCKED schedules another attempt; do not touch encrypted state yet.
-                return false;
-            }
-            try {
-                SyncCoordinator coordinator = SyncCoordinator.forService(this);
-                coordinator.resumeAfterReboot(() -> {
-                    try {
-                        NotificationManager manager = getSystemService(NotificationManager.class);
-                        manager.createNotificationChannel(new NotificationChannel("sync-resume", "Resume sync", NotificationManager.IMPORTANCE_DEFAULT));
-                        Intent launch = getPackageManager().getLaunchIntentForPackage(getPackageName());
-                        if (launch != null) manager.notify(62, new Notification.Builder(this, "sync-resume")
-                                .setSmallIcon(android.R.drawable.stat_notify_sync).setContentTitle("Resume Nanosync")
-                                .setContentText("Open Nanosync to resume your enabled background folders.")
-                                .setAutoCancel(true).setContentIntent(PendingIntent.getActivity(this, 62, launch,
-                                        PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE)).build());
-                    } catch (SecurityException ignored) { /* State remains visible in UI. */ }
-                });
-            } catch (SecurityException ignored) { /* Notification opt-in is requested only by visible UI. */ }
-            return false;
+        private final Map<Integer, Task> tasks = new HashMap<>();
+        private static final class Task {
+            final Object owner = new Object();
+            final JobParameters parameters;
+            final SyncCoordinator coordinator;
+            boolean stopped;
+            Task(JobParameters parameters, SyncCoordinator coordinator) { this.parameters = parameters; this.coordinator = coordinator; }
         }
-        @Override public boolean onStopJob(JobParameters parameters) { return true; }
+        @Override public boolean onStartJob(JobParameters parameters) {
+            if (!getSystemService(UserManager.class).isUserUnlocked()) return false;
+            SyncCoordinator coordinator = SyncCoordinator.forService(this);
+            Task task = new Task(parameters, coordinator);
+            tasks.put(parameters.getJobId(), task);
+            coordinator.startJob(task.owner, JOB_BUDGET_MILLIS, () -> {
+                if (tasks.get(parameters.getJobId()) == task) tasks.remove(parameters.getJobId());
+                // Android has already finished a stopped job. Still retain internal ownership
+                // until IO drains, but never call jobFinished on those obsolete parameters.
+                if (!task.stopped) jobFinished(parameters, false);
+            });
+            return true;
+        }
+        @Override public boolean onStopJob(JobParameters parameters) {
+            Task task = tasks.get(parameters.getJobId());
+            if (task != null) {
+                task.stopped = true;
+                task.coordinator.stopJob(task.owner);
+            }
+            return true;
+        }
+        @Override public void onDestroy() {
+            for (Task task : tasks.values()) { task.stopped = true; task.coordinator.stopJob(task.owner); }
+            super.onDestroy();
+        }
     }
 }

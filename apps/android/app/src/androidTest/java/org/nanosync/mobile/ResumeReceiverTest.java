@@ -20,9 +20,15 @@ public final class ResumeReceiverTest {
             JobInfo job = scheduler.getPendingJob(ResumeReceiver.RESUME_JOB_ID);
             assertNotNull(job);
             assertTrue(job.isPersisted());
+            assertEquals(JobInfo.NETWORK_TYPE_ANY, job.getNetworkType());
+            JobInfo periodic = scheduler.getPendingJob(ResumeReceiver.PERIODIC_JOB_ID);
+            assertNotNull(periodic);
+            assertTrue(periodic.isPeriodic());
+            assertTrue(periodic.isPersisted());
+            assertEquals(15 * 60_000L, periodic.getIntervalMillis());
             assertEquals(ResumeReceiver.ResumeJobService.class.getName(), job.getService().getClassName());
             assertTrue(job.getMinLatencyMillis() >= 5000);
-        } finally { scheduler.cancel(ResumeReceiver.RESUME_JOB_ID); }
+        } finally { scheduler.cancel(ResumeReceiver.RESUME_JOB_ID); scheduler.cancel(ResumeReceiver.PERIODIC_JOB_ID); }
     }
     @Test public void unrelatedBroadcastDoesNotScheduleWork() {
         Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
