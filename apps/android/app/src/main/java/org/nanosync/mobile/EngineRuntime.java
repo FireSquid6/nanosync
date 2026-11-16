@@ -105,36 +105,54 @@ public final class EngineRuntime {
         }); } catch (RejectedExecutionException ignored) { /* cancellation raced start */ }
     }
 
-    public void cancel() {
-        if (!closed.compareAndSet(false, true)) return;
-        stopResources();
-    }
+    public void cancel() { terminate(() -> listener.onError("Synchronization cancelled")); }
 
-    private void stopResources() {
-        HttpURLConnection connection = activeHttp;
-        if (connection != null) connection.disconnect();
+    /** A terminal callback transfers ownership back to the coordinator, so it must be LAST.
+     * Never await our executor on its own worker or block the main looper waiting for renderer I/O.
+     * A stuck platform operation intentionally retains ownership rather than permitting overlap.
+     */
+    private void terminate(Runnable callback) {
+        if (!closed.compareAndSet(false, true)) return;
         executor.shutdownNow();
+        java.util.concurrent.CountDownLatch destroyed = new java.util.concurrent.CountDownLatch(1);
         main.post(() -> {
-            if (webView != null) {
-                webView.stopLoading();
-                webView.removeJavascriptInterface("NanosyncNative");
-                webView.destroy();
-                webView = null;
-            }
+            try {
+                if (webView != null) {
+                    WebView worker = webView;
+                    webView = null;
+                    try { worker.stopLoading(); worker.removeJavascriptInterface("NanosyncNative"); }
+                    finally { worker.destroy(); }
+                }
+            } finally { destroyed.countDown(); }
         });
+        Thread cleanup = new Thread(() -> {
+            HttpURLConnection connection = activeHttp;
+            if (connection != null) {
+                try { connection.disconnect(); }
+                catch (RuntimeException ignored) { /* still wait for the bounded I/O to really exit */ }
+            }
+            boolean interrupted = false;
+            for (;;) {
+                try {
+                    if (executor.awaitTermination(1, java.util.concurrent.TimeUnit.SECONDS)) break;
+                } catch (InterruptedException e) { interrupted = true; }
+            }
+            // sync journal writes run on WebView's bridge thread, not our executor.
+            synchronized (journalLock) { /* wait for any in-flight atomic journal write */ }
+            for (;;) {
+                try { destroyed.await(); break; }
+                catch (InterruptedException e) { interrupted = true; }
+            }
+            main.post(callback);
+            if (interrupted) Thread.currentThread().interrupt();
+        }, "nanosync-engine-close");
+        cleanup.setDaemon(true);
+        cleanup.start();
     }
 
-    private void error(String message) {
-        if (!closed.compareAndSet(false, true)) return;
-        stopResources();
-        main.post(() -> listener.onError(message));
-    }
+    private void error(String message) { terminate(() -> listener.onError(message)); }
 
-    private void finished(JSONObject result) {
-        if (!closed.compareAndSet(false, true)) return;
-        stopResources();
-        main.post(() -> listener.onFinished(result));
-    }
+    private void finished(JSONObject result) { terminate(() -> listener.onFinished(result)); }
 
     private void createWorker() {
         try {

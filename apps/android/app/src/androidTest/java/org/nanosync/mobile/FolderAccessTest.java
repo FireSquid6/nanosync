@@ -77,7 +77,7 @@ public final class FolderAccessTest {
         try (Fixture f = new Fixture()) {
             Files.write(new File(f.root, "good.txt").toPath(), new byte[]{1});
             // Unsupported control entry invalidates scan even if another entry was already read.
-            Files.write(new File(f.root, ".nanosync-control").toPath(), new byte[]{2});
+            Files.write(new File(f.root, ".nanosync").toPath(), new byte[]{2});
             try { f.access.list(); fail("Partial list must not escape"); }
             catch (IllegalArgumentException expected) { }
         }
@@ -86,7 +86,7 @@ public final class FolderAccessTest {
     @Test public void shallowListingDoesNotTraverseIgnoredCandidates() throws Exception {
         try (Fixture f = new Fixture()) {
             File ignored = new File(f.root, "ignored"); assertTrue(ignored.mkdir());
-            Files.write(new File(ignored, ".nanosync-control").toPath(), new byte[]{1});
+            Files.write(new File(ignored, ".nanosync").toPath(), new byte[]{1});
             assertEquals(1, f.access.listDirectory("").length());
             assertEquals("ignored", f.access.listDirectory("").getJSONObject(0).getString("path"));
         }
@@ -99,6 +99,107 @@ public final class FolderAccessTest {
             catch (IOException expected) { }
             try { f.access.capacity(); fail("Unavailable root has no usable capacity"); }
             catch (IOException expected) { }
+        }
+    }
+
+    private static int descriptorCount(File scope) throws Exception {
+        int count = 0;
+        String prefix = scope == null ? null : scope.getCanonicalPath() + "/";
+        File[] descriptors = new File("/proc/self/fd").listFiles();
+        assertNotNull(descriptors);
+        for (File descriptor : descriptors) {
+            try {
+                String target = android.system.Os.readlink(descriptor.getPath());
+                if (prefix == null || target.startsWith(prefix)) count++;
+            } catch (android.system.ErrnoException vanished) { /* fd directory enumeration itself closed */ }
+        }
+        return count;
+    }
+
+    @Test public void noFollowReadsAndCommitCopiesCloseOwnedDescriptors() throws Exception {
+        try (Fixture f = new Fixture()) {
+            Files.write(new File(f.root, "source").toPath(), new byte[]{1, 2, 3});
+            String id = UUID.randomUUID().toString();
+            f.access.stageWrite(id, 0, "YWJj");
+            // Warm up lazy digest/channel initialization before measuring.
+            f.access.digest("source"); f.access.stageDigest(id);
+            int before = descriptorCount(null);
+            int sharedBefore = descriptorCount(f.root), privateBefore = descriptorCount(f.journal);
+            for (int i = 0; i < 64; i++) {
+                f.access.read("source", 0, 3); f.access.digest("source");
+                f.access.stageRead(id, 0, 3); f.access.stageDigest(id);
+                f.access.stageCommit(id, "committed", f.access.stat("committed"));
+            }
+            assertEquals(sharedBefore, descriptorCount(f.root));
+            assertEquals(privateBefore, descriptorCount(f.journal));
+            assertTrue("/proc/self/fd must not grow per read", descriptorCount(null) <= before + 8);
+        }
+    }
+
+    /** Simulate the durable on-disk protocol at a process-death boundary, not a live runtime. */
+    private static File staleCommit(Fixture f, String stageId, String target, boolean verified) throws Exception {
+        String token = UUID.randomUUID().toString();
+        File temp = new File(f.root, ".nanosync-tmp-" + token + ".stage");
+        JSONObject intent = new JSONObject().put("version", 1).put("root", f.root.getCanonicalPath())
+            .put("target", target).put("stageId", stageId).put("token", token);
+        android.system.StructStat parent = android.system.Os.stat(f.root.getPath());
+        intent.put("parentDevice", parent.st_dev).put("parentInode", parent.st_ino);
+        writeIntent(f, intent); // durable intent always precedes the shared file
+        Files.write(temp.toPath(), new byte[]{4, 5}); // interrupted partial copy
+        if (verified) {
+            android.system.StructStat stat = android.system.Os.lstat(temp.getPath());
+            intent.put("device", stat.st_dev).put("inode", stat.st_ino);
+            writeIntent(f, intent); // identity is persisted before any production copy writes
+        }
+        return temp;
+    }
+
+    private static void writeIntent(Fixture f, JSONObject intent) throws Exception {
+        android.util.AtomicFile file = new android.util.AtomicFile(new File(f.journal, "commit-intent.json"));
+        java.io.FileOutputStream out = file.startWrite();
+        try {
+            out.write(intent.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            out.getFD().sync(); file.finishWrite(out);
+        } catch (Exception e) { file.failWrite(out); throw e; }
+    }
+
+    @Test public void restartReclaimsOnlyVerifiedPartialCommitAndRetriesPrivateStage() throws Exception {
+        try (Fixture f = new Fixture()) {
+            String id = UUID.randomUUID().toString();
+            f.access.stageWrite(id, 0, "YWJj");
+            Files.write(new File(f.root, "target").toPath(), new byte[]{9});
+            File unrelated = new File(f.root, ".nanosync-tmp-user.stage");
+            Files.write(unrelated.toPath(), new byte[]{8});
+            File temp = staleCommit(f, id, "target", true);
+            FolderAccess reopened = new FolderAccess(context(), f.root, f.journal);
+            assertFalse(temp.exists());
+            assertArrayEquals(new byte[]{8}, Files.readAllBytes(unrelated.toPath()));
+            assertArrayEquals(new byte[]{9}, Files.readAllBytes(new File(f.root, "target").toPath()));
+            assertEquals("YWJj", reopened.stageRead(id, 0, 3).getString("dataBase64"));
+            reopened.stageCommit(id, "target", reopened.stat("target"));
+            assertArrayEquals(new byte[]{97, 98, 99}, Files.readAllBytes(new File(f.root, "target").toPath()));
+            assertFalse(new File(f.journal, "commit-intent.json").exists());
+        }
+    }
+
+    @Test public void restartNeverDeletesReplacedOrUnverifiedTemp() throws Exception {
+        try (Fixture f = new Fixture()) {
+            String id = UUID.randomUUID().toString();
+            f.access.stageWrite(id, 0, "YWJj");
+            File temp = staleCommit(f, id, "target", true);
+            // Retain the original inode so the replacement cannot accidentally reuse it.
+            Files.move(temp.toPath(), new File(f.root, "retained-original").toPath());
+            Files.write(temp.toPath(), new byte[]{7});
+            try { new FolderAccess(context(), f.root, f.journal); fail("Foreign inode must block recovery"); }
+            catch (IOException expected) { }
+            assertArrayEquals(new byte[]{7}, Files.readAllBytes(temp.toPath()));
+        }
+        try (Fixture f = new Fixture()) {
+            String id = UUID.randomUUID().toString();
+            File temp = staleCommit(f, id, "target", false);
+            try { new FolderAccess(context(), f.root, f.journal); fail("Unknown ownership must fail closed"); }
+            catch (IOException expected) { }
+            assertTrue(temp.exists());
         }
     }
 

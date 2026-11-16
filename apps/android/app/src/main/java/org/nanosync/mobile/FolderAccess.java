@@ -5,8 +5,11 @@ import android.content.Context;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Environment;
+import android.os.ParcelFileDescriptor;
 import android.system.Os;
 import android.system.OsConstants;
+import android.system.StructStat;
+import android.util.AtomicFile;
 import android.util.Base64;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -41,6 +44,7 @@ public final class FolderAccess {
     private final Context context;
     private final File root;
     private final File stages;
+    private final AtomicFile commitIntent;
 
     public FolderAccess(Context context, File root, File journalDirectory) throws IOException {
         this.context = context.getApplicationContext();
@@ -57,7 +61,10 @@ public final class FolderAccess {
         stages = new File(journal, "stages");
         if ((!stages.isDirectory() && !stages.mkdir()) || Files.isSymbolicLink(stages.toPath()))
             throw new IOException("Cannot open private stages");
+        commitIntent = new AtomicFile(new File(journal, "commit-intent.json"));
         checkAccessible();
+        try { recoverPendingCommit(); }
+        catch (Exception e) { throw new IOException("Cannot safely recover pending shared commit", e); }
     }
 
     public static File validateJournalDirectory(Context context, File directory) throws IOException {
@@ -201,8 +208,24 @@ public final class FolderAccess {
         }
     }
 
+    /** FileInputStream(FileDescriptor) does NOT own an Os.open descriptor on Android.
+     * Transfer a duplicate to ParcelFileDescriptor's explicit owning stream and close the original,
+     * including all error paths. O_NOFOLLOW remains enforced by the original open.
+     */
+    private ParcelFileDescriptor openOwned(File file, int flags) throws Exception {
+        java.io.FileDescriptor raw = Os.open(file.getPath(), flags | OsConstants.O_NOFOLLOW | OsConstants.O_CLOEXEC, 0600);
+        ParcelFileDescriptor owned = null;
+        try {
+            owned = ParcelFileDescriptor.dup(raw);
+            return owned;
+        } finally {
+            try { Os.close(raw); }
+            catch (Exception e) { if (owned != null) owned.close(); throw e; }
+        }
+    }
+
     private FileInputStream openRead(File file) throws Exception {
-        return new FileInputStream(Os.open(file.getPath(), OsConstants.O_RDONLY | OsConstants.O_NOFOLLOW | OsConstants.O_CLOEXEC, 0));
+        return new ParcelFileDescriptor.AutoCloseInputStream(openOwned(file, OsConstants.O_RDONLY));
     }
 
     public JSONObject read(String path, long offset, int length) throws Exception {
@@ -316,26 +339,117 @@ public final class FolderAccess {
         }
     }
 
+    private void syncIntentDirectory() throws Exception {
+        java.io.FileDescriptor fd = Os.open(stages.getParent(), OsConstants.O_RDONLY | OsConstants.O_NOFOLLOW | OsConstants.O_CLOEXEC, 0);
+        try {
+            if (!OsConstants.S_ISDIR(Os.fstat(fd).st_mode)) throw new IOException("Private intent parent is not a directory");
+            Os.fsync(fd);
+        } finally { Os.close(fd); }
+    }
+
+    private void saveCommitIntent(JSONObject intent) throws Exception {
+        FileOutputStream out = null;
+        try {
+            out = commitIntent.startWrite();
+            out.write(intent.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            out.getFD().sync(); commitIntent.finishWrite(out);
+            syncIntentDirectory();
+        } catch (Exception e) { if (out != null) commitIntent.failWrite(out); throw e; }
+    }
+
+    private JSONObject readCommitIntent() throws Exception {
+        if (!commitIntent.getBaseFile().exists() && !new File(commitIntent.getBaseFile() + ".bak").exists()) return null;
+        try (FileInputStream in = commitIntent.openRead()) {
+            java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+            byte[] buffer = new byte[4096]; int n;
+            while ((n = in.read(buffer)) != -1) {
+                if (bytes.size() + n > 65536) throw new IOException("Invalid commit intent size");
+                bytes.write(buffer, 0, n);
+            }
+            return new JSONObject(new String(bytes.toByteArray(), java.nio.charset.StandardCharsets.UTF_8));
+        }
+    }
+
+    private static String canonicalUuid(String value) throws IOException {
+        try {
+            if (UUID.fromString(value).toString().equals(value)) return value;
+        } catch (IllegalArgumentException ignored) { }
+        throw new IOException("Invalid commit UUID");
+    }
+
+    /** Only a private durable mapping AND recorded no-follow inode identity authorize cleanup.
+     * A death between exclusive creation and identity persistence can leave one empty, unverified
+     * file. That narrow window fails closed for manual resolution; it must never authorize deletion
+     * of a user replacement. No bulk copy begins until identity persistence has completed.
+     * There is no wildcard sweep of reserved names, and old unjournaled temporaries are NOT deleted.
+     */
+    private void recoverPendingCommit() throws Exception {
+        JSONObject intent = readCommitIntent();
+        if (intent == null) return;
+        checkAccessible();
+        if (intent.getInt("version") != 1 || !root.getCanonicalPath().equals(intent.getString("root")))
+            throw new IOException("Commit intent belongs to a different root");
+        canonicalUuid(intent.getString("stageId"));
+        String token = canonicalUuid(intent.getString("token"));
+        File target = resolve(intent.getString("target"), false);
+        StructStat parent = Os.stat(target.getParent());
+        if (parent.st_dev != intent.getLong("parentDevice") || parent.st_ino != intent.getLong("parentInode"))
+            throw new IOException("Commit parent changed; temporary ownership is unknown");
+        File temp = new File(target.getParentFile(), TEMP_PREFIX + token + ".stage");
+        StructStat stat = null;
+        try { stat = Os.lstat(temp.getPath()); }
+        catch (android.system.ErrnoException e) { if (e.errno != OsConstants.ENOENT) throw e; }
+        if (stat != null) {
+            if (!intent.has("device") || !intent.has("inode") || !OsConstants.S_ISREG(stat.st_mode)
+                    || stat.st_dev != intent.getLong("device") || stat.st_ino != intent.getLong("inode"))
+                throw new IOException("Commit temporary changed or ownership is unverified; refusing deletion");
+            Files.delete(temp.toPath());
+        }
+        commitIntent.delete();
+        syncIntentDirectory();
+    }
+
     public void stageCommit(String id, String path, JSONObject expected) throws Exception {
+        recoverPendingCommit();
         File source = stage(id), target = resolve(path, false);
         if (!source.isFile()) throw new IOException("Stage missing");
         guard(target, expected);
-        Path temp = Files.createTempFile(target.getParentFile().toPath(), TEMP_PREFIX, ".stage");
+        String token = UUID.randomUUID().toString();
+        StructStat parent = Os.stat(target.getParent());
+        JSONObject intent = new JSONObject().put("version", 1).put("root", root.getCanonicalPath())
+            .put("target", path).put("stageId", id).put("token", token)
+            .put("parentDevice", parent.st_dev).put("parentInode", parent.st_ino);
+        // The random scoped name is durably mapped BEFORE exclusive creation on shared storage.
+        saveCommitIntent(intent);
+        File temp = new File(target.getParentFile(), TEMP_PREFIX + token + ".stage");
         try {
-            try (FileInputStream in = openRead(source); FileOutputStream out = new FileOutputStream(temp.toFile())) {
-                byte[] buffer = new byte[64 * 1024]; int n;
-                while ((n = in.read(buffer)) != -1) {
-                    if (Thread.currentThread().isInterrupted()) throw new IOException("Cancelled");
-                    out.write(buffer, 0, n);
+            try (FileOutputStream out = new ParcelFileDescriptor.AutoCloseOutputStream(
+                    openOwned(temp, OsConstants.O_WRONLY | OsConstants.O_CREAT | OsConstants.O_EXCL))) {
+                StructStat created = Os.fstat(out.getFD());
+                intent.put("device", created.st_dev).put("inode", created.st_ino);
+                saveCommitIntent(intent); // no bulk data may be written before this durable checkpoint
+                try (FileInputStream in = openRead(source)) {
+                    byte[] buffer = new byte[64 * 1024]; int n;
+                    while ((n = in.read(buffer)) != -1) {
+                        if (Thread.currentThread().isInterrupted()) throw new IOException("Cancelled");
+                        out.write(buffer, 0, n);
+                    }
                 }
                 out.getFD().sync();
             }
             target = resolve(path, false);
             guard(target, expected);
             if (target.isDirectory()) throw new IOException("Cannot replace directory");
-            Files.move(temp, target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            StructStat ready = Os.lstat(temp.getPath());
+            if (!OsConstants.S_ISREG(ready.st_mode) || ready.st_dev != intent.getLong("device") || ready.st_ino != intent.getLong("inode"))
+                throw new IOException("Commit temporary changed before replacement");
+            Files.move(temp.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             // Keep the private stage until explicit stageDelete (checkpoint/retry ownership belongs to JS).
-        } finally { Files.deleteIfExists(temp); }
+        } finally {
+            // Interrupted/failed cleanup leaves its durable mapping for the next runtime. Recovery
+            // validates identity again and never deletes the target or the authenticated private stage.
+            recoverPendingCommit();
+        }
     }
 
     public void stageDelete(String id) throws Exception { Files.deleteIfExists(stage(id).toPath()); }

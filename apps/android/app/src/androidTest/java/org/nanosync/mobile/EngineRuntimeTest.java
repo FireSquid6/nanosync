@@ -38,6 +38,9 @@ public final class EngineRuntimeTest {
             assertTrue(done.await(10, TimeUnit.SECONDS));
             assertTrue(onMain.get()); assertEquals(1, errors.get()); assertEquals(0, successes.get());
             assertTrue(journal.isDirectory());
+            runtime.cancel();
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            assertEquals("cancel must not duplicate an error", 1, errors.get());
         } finally { runtime.cancel(); Files.deleteIfExists(journal.toPath()); }
     }
 
@@ -49,16 +52,25 @@ public final class EngineRuntimeTest {
         byte[] bytes = "{\"checkpoint\":7}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
         Files.write(checkpoint.toPath(), bytes);
         AtomicInteger callbacks = new AtomicInteger();
+        CountDownLatch cancelled = new CountDownLatch(1);
+        AtomicBoolean onMain = new AtomicBoolean();
+        java.util.concurrent.atomic.AtomicReference<String> outcome = new java.util.concurrent.atomic.AtomicReference<>();
         EngineRuntime runtime = new EngineRuntime(context, journal, new JSONObject(), new JSONObject(), false, false,
             new EngineRuntime.Listener() {
                 @Override public void onEvent(JSONObject value) { callbacks.incrementAndGet(); }
                 @Override public void onFinished(JSONObject value) { callbacks.incrementAndGet(); }
-                @Override public void onError(String message) { callbacks.incrementAndGet(); }
+                @Override public void onError(String message) {
+                    onMain.set(Looper.myLooper() == Looper.getMainLooper());
+                    outcome.set(message); callbacks.incrementAndGet(); cancelled.countDown();
+                }
             });
         try {
             runtime.cancel(); runtime.start(); runtime.cancel();
+            assertTrue(cancelled.await(10, TimeUnit.SECONDS));
             InstrumentationRegistry.getInstrumentation().waitForIdleSync();
-            assertEquals(0, callbacks.get());
+            assertEquals(1, callbacks.get());
+            assertTrue(onMain.get());
+            assertEquals("Synchronization cancelled", outcome.get());
             assertArrayEquals(bytes, Files.readAllBytes(checkpoint.toPath()));
         } finally { Files.deleteIfExists(checkpoint.toPath()); Files.deleteIfExists(journal.toPath()); }
     }
