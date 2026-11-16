@@ -123,29 +123,38 @@ The server should create storage with restrictive permissions and refuse to star
 
 ## Administration
 
-Current multi-vault initialization uses:
+This release intentionally breaks old command names and stored client/server setup state.
+There is no supported migration or legacy bootstrap CLI. Back up old metadata,
+objects, recovery material and plaintext before resetting; do not delete your only
+copy. Initialize a new private server directory and client state directory, provision
+new vaults, and deliberately reconnect/import retained files. Do not reuse an old
+`.nanosync` marker with new credentials. Disconnect with the matching old tool/state
+first, or archive the old root and import a separate plaintext copy.
 
-1. `server init` to establish one owner password, even when the server has no vaults.
-2. `enroll` on each device, followed by `approve NAME --server-dir DIR` locally on the server.
-3. `vault create` from any approved device; protect the independent per-vault recovery secret.
-4. `setup` to select a server, vault and directory. A missing local key requires that vault's recovery secret.
+1. `nanosync server init --server-dir DIR` establishes the owner password.
+2. Provision locally while the runtime is stopped:
+   `nanosync server vaults create --server-dir DIR --name documents`.
+   Save and acknowledge the newly delivered recovery secret.
+3. `nanosync server run --server-dir DIR --web-ui` serves sync and optional owner UI.
+4. `nanosync client connections add --url URL --alias home` enrolls a device.
+   Compare the printed request code and approve its exact UUID in `/admin` or with
+   `nanosync server devices approve --server-dir DIR --device-id UUID`.
+5. `nanosync client vaults connect --server home --vault documents --path DIRECTORY`
+   binds without transfer; `nanosync client sync --path DIRECTORY` starts transfer.
 
-The legacy single-vault bootstrap protocol remains available for pre-existing deployments; its historical sequence was:
+Local owner operations require possession of the private server directory; browser
+operations require the owner password. Use the browser for live provisioning. Stop
+the runtime before local storage provisioning or offline maintenance: separate
+processes must not concurrently own storage. Multiple approved devices and multiple
+nonoverlapping directory replicas are supported; each replica has its own lock/journal.
 
-1. Start an uninitialized server on a trusted local interface.
-2. Create the sole account.
-3. Initialize the encrypted vault from the first client.
-4. Generate and confirm storage of the recovery key.
-5. Mark the first device approved.
-6. Disable bootstrap endpoints permanently unless the server is reset through an offline administrative procedure.
-
-The v1 implementation stages steps 2–5: an explicitly bootstrap-authorized initialize request records the account verifier, opaque recovery wrap, singleton vault, and designated first-device identity; bootstrap-authorized encrypted objects are then streamed through the ordinary validated object path; completion atomically publishes the zero-parent genesis and seals bootstrap. Status is public but reveals only `uninitialized`, `initializedWithoutHead`, or `sealed`. A crash before completion leaves no head and permits repair/retry. Sealing is irreversible through the network API. First-device credential issuance, password login, approval, enrollment, and revocation are provided by the normal authentication API, not by bootstrap mutations.
-
-The private client checkpoint contains the vault master key and exact encrypted genesis but no password or password-derived verifier; the recovery secret is displayed and confirmed once, not stored in the checkpoint. On retry, bootstrap completion uses the operator proof and saved genesis, then normal password login verifies the supplied password. A wrong password may seal an in-progress bootstrap before login rejects it; the checkpoint remains intact for retry with the correct password. Protect this owner-only file and its backups as a vault key until durable client credentials replace it.
-
-After sealing, the designated first device obtains a password session and submits enrollment with a separate `X-Nanosync-Bootstrap-Authorization` operator proof. Operators should provision this proof through the same protected local/secret mechanism used by the injected bootstrap authorizer and make it one-time where practical. The server strips the password-session `Authorization` header before invoking that authorizer. This handoff activates only the exact persisted initial identity and does not re-enable initialize, bootstrap object upload, or completion. If the activation response is lost, the same enrolled session can safely retry without consuming another proof.
-
-Migration 2 treats an empty migration-1 database as uninitialized and ready for bootstrap. A legacy migration-1 database that already contains `server_state` but lacks the migration-2 account/device/recovery/bootstrap identity set fails bootstrap status and initialization closed; it requires an offline operator migration or reset rather than guessing identities through the network API.
+Remove/disconnect changes local configuration and preserves files; revoke removes
+future server access without erasing retained files or keys; delete destroys the
+server vault, not client plaintext. Explicit deletion overrides retention only for
+that UUID, immediately rejects access with HTTP 410 `VAULT_DELETED`, and schedules
+restart-safe cleanup. Successful deletion means tombstoned, not necessarily reclaimed.
+Backups may still hold deleted data and revoked credentials; control their retention
+separately. Recovery secrets alone cannot restore deleted ciphertext.
 
 Administrative capabilities include:
 
@@ -234,8 +243,43 @@ Browser administration is disabled by default. Enable with
 add `--external-origin https://sync.example --trusted-proxy <exact-peer-IP>`.
 The insecure-sync exposure acknowledgement never permits public browser HTTP.
 No forwarded headers establish trust. See [security.md](security.md) before
-exposing the backend listener. The runtime accepts `webUi`, `externalOrigin`,
-`trustedProxyAddresses`, and an explicit `adminAssets` map; this backend step
-provides no default frontend bundle yet. A UI integrator supplies `/admin` and
-each asset explicitly as `{body,contentType}` entries on the existing listener.
+exposing the backend listener. The runtime embeds the React/Paper UI HTML and content-hashed JS/CSS in the
+source asset map and standalone executable. No adjacent assets, CDN, or frontend
+service is needed. Unknown assets have no fallback. HTML/API are no-store; exact
+hashed assets are immutable. The programmatic `adminAssets` map is an explicit
+override for integrators/tests.
 Client provisioning mutations and legacy CLI aliases have been removed. Use `server vaults create|rename|delete` locally, or the owner browser API, for provisioning. The CLI no longer exposes a bootstrap workflow; historical protocol fixtures remain test-only.
+
+
+### Reverse proxy example
+
+For a TLS terminator on the same machine:
+
+```sh
+nanosync server run --server-dir /srv/nanosync --host 127.0.0.1 --port 8787 \
+  --web-ui --external-origin https://sync.example.com --trusted-proxy 127.0.0.1
+```
+
+Configure the proxy's HTTPS virtual host for **only** `sync.example.com`, forward
+all paths to `http://127.0.0.1:8787`, preserve the browser Origin/custom CSRF header,
+and disable shared caching for `/admin` HTML/API. Serve assets on that same origin.
+Forwarded/X-Forwarded-* headers are neither needed nor trusted. Restrict backend
+access to the proxy; a shared trusted source IP is not an identity boundary.
+For a remote proxy use its exact observed socket IP, firewall the backend, and add
+`--acknowledge-exposure` when binding nonloopback. Proxy body/time limits must allow
+streamed sync uploads; do not log Authorization, cookies, passwords or request bodies.
+A VPN or insecure-sync acknowledgement alone does not permit nonloopback browser HTTP.
+
+### Secret delivery and automation
+
+Use hidden prompts, `NANOSYNC_PASSWORD`/`NANOSYNC_RECOVERY_SECRET`, or protected
+`--password-file`/`--recovery-file` inputs, never literal secret arguments. For
+scripted creation use `--recovery-output /private/new-secret` in a private 0700
+parent; the new output is owner-only 0600. Retry the same name and absolute output
+path after interruption to replay the encrypted receipt. Do not change/delete the
+output before retry. Deliver it securely/offline to the client and remove the
+operator copy after durable independent backup. This explicit delivery file is
+not ordinary server key persistence. Browser creation acknowledges backup, stores
+only an encrypted receipt, and requires secret reentry after refresh before publish.
+There is no recovery-secret retrieval API. See the [CLI contract](../packages/cli/README.md)
+for complete JSON/exit and confirmation rules.

@@ -5,13 +5,15 @@ This is a breaking command/state redesign: no legacy aliases, bootstrap command,
 
 ```sh
 nanosync server init --server-dir "$HOME/nanosync-server"
-nanosync server run --server-dir "$HOME/nanosync-server"
-# On the client:
+# Provision locally while the runtime is stopped; save the recovery secret.
+nanosync server vaults create --server-dir "$HOME/nanosync-server" --name documents
+nanosync server run --server-dir "$HOME/nanosync-server" --web-ui
+# In another terminal/on the client:
 nanosync client connections add --url https://sync.example.com --alias home
 # On the server, compare the verification code and use the exact printed UUID:
 nanosync server devices approve --device-id UUID
-nanosync server vaults create --server-dir "$HOME/nanosync-server" --name documents
 # Deliver the creation recovery secret offline to the client:
+mkdir -p "$HOME/Sync"
 nanosync client vaults connect --server home --vault documents --path "$HOME/Sync"
 nanosync client sync --path "$HOME/Sync"
 nanosync client sync --watch --path "$HOME/Sync"
@@ -83,3 +85,28 @@ This is a deliberately limited gitignore-style format, **not** `.gitignore` inte
 Each device can use different rules. Ignored paths are opaque: local changes there are never published as deletions, and remote additions, changes and deletions under those paths never touch local files. A previously tracked ignored entry remains in the shared manifest unchanged when this device publishes other changes; another device without that rule can still update or delete it. Local state records previously ignored identities durably. A remote rename of an ignored tracked entry to an included path fails before apply rather than moving or overwriting the local copy. Removing an ignore rule does **not** automatically reconcile absent, changed or remote-only paths: sync fails visibly rather than guessing whether to upload a local edit or publish a deletion. Move or back up the local copy and reconcile deliberately before unignoring; restore the ignore rule to keep syncing unrelated paths in the meantime. Avoid excluding a parent directory that contains files you still wish to sync; there is no negation to re-include children.
 
 Continuous sync reloads this root file on watcher events and periodic full scans. Changing it during a scan or an in-progress apply aborts; for a persisted interrupted apply, restore the original rules until recovery completes. Do not edit ignore rules concurrently with sync. Ignoring existing remote data does not delete it from the server or reclaim storage. Included links, hardlinks and special files still fail safely.
+
+
+### Unattended provisioning and deletion
+
+```sh
+# Private 0700 parent; secret is read from this owned 0600 file, never argv.
+nanosync server init --server-dir /private/server --password-file /private/password --non-interactive --json
+nanosync server vaults create --server-dir /private/server --name docs \
+  --recovery-output /private/docs-recovery --non-interactive --json
+# Destruction: exact UUID confirmation is mandatory even with --yes/--force.
+nanosync server vaults delete --server-dir /private/server --vault UUID \
+  --confirm-delete UUID --non-interactive --json
+```
+
+Use `--wait-ms 0 --json --non-interactive` on connections add to submit and exit 3;
+resume the same URL/alias after approval to save credentials and exit 0. Do not treat
+pending as success or automatically pass `--fresh` on a denied/expired request.
+
+The embedded browser has separate password sessions, logout and expiry. Browser
+creation requires saving the displayed secret, acknowledging it, saving an encrypted
+receipt and reentering the secret to publish. Neither normal views nor APIs retrieve
+existing secrets. A compromised server can serve malicious JavaScript; browser-side
+encryption does not resist this. See [proxy setup](../../docs/clients-and-operations.md#reverse-proxy-example).
+For this breaking release, preserve old state and plaintext backups, use fresh
+server/client directories, and reconnect deliberately; there is no migration path.

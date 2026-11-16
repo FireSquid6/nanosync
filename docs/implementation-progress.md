@@ -497,3 +497,104 @@ Exact changed paths:
 - `packages/server-core/src/browser-admin.ts`
 - `packages/server-core/src/index.ts`
 - `docs/implementation-progress.md`
+
+## Cross-surface acceptance and final documentation (completed)
+
+This is the final integration slice for `docs/server-ui-and-client-cli-spec.md`.
+Earlier entries are chronological evidence; their “next slice”/frontend-not-yet
+statements are superseded by subsequent completed entries and this matrix.
+
+### Public acceptance contracts
+
+- `browser-tests/journey.pw.ts` uses only actual CLI subprocesses, the served
+  browser/API and user files. It runs unchanged against source or
+  `NANOSYNC_TEST_BINARY`. One real temporary server is initialized locally; a
+  recovery-output-backed local vault is created before runtime storage ownership;
+  two independent CLI devices enroll and compare codes with browser approval;
+  both bind and publish/download files; the browser creates a second vault.
+  Revocation returns structured `UNAUTHORIZED` / exit 5 with empty stdout, then
+  deletion returns structured `VAULT_DELETED` / exit 5 for the other device. Both
+  replicas retain synchronized files and different unsynced local work. The second
+  vault survives. Activity verifies local/browser creation and browser
+  approval/revocation/deletion provenance, timestamps/target UUID, and no secret or
+  filename leakage. Production semantics required no additional change.
+- Full-suite execution exposed an existing two-tab test race: opening the next
+  tab immediately after clicking login could precede cookie commitment. The test
+  now waits for authenticated UI before navigating that tab, not a fixed delay.
+  The new binary journey also exposed an assertion race: background headings are
+  inaccessible while a modal is open, so heading count zero did not prove deletion.
+  It now waits for the destructive dialog to close before checking disappearance
+  and terminal CLI access. No tests were dropped/retried away or security gates relaxed.
+- `build/test-standalone.sh [binary]` copies only the executable to a temporary
+  bin directory and runs it from a separate empty working directory outside the
+  checkout. Python's standard library starts initialized enabled/disabled servers,
+  verifies embedded HTML plus both exact hashed JS/CSS assets and cache contracts,
+  unknown asset 404, and disabled HTML/assets/session 404. The bin directory is
+  asserted to contain only the executable. No Bun, node_modules or adjacent assets
+  are used by the tested runtime (Python only drives the smoke test).
+- Root/CLI README and architecture/security/formats/protocol/decisions/operations
+  now describe the actual embedded surface, separate authority, transient local
+  provisioning secret exception, explicit protected secret delivery, malicious
+  served-code trust, proxy/external-origin setup, breaking-state reset, and
+  command/confirmation/JSON/exit contracts. Obsolete approved-device provisioning
+  and no-frontend deployment guidance was removed.
+
+### Requirement matrix (spec user-story numbers)
+
+All rows are implemented and exercised; focused tests complement, rather than
+replace, the real cross-surface journey.
+
+| Stories | Observable requirements | Executable evidence |
+| --- | --- | --- |
+| 1–9 | Explicit command groups, directory/flags, maintained prompts, secret input, nonterminal/JSON/errors | `packages/cli/tests/command-tree.test.ts`, `terminal.test.ts`, `local-safety.test.ts`; CLI README machine contract |
+| 10–17 | Alias/device distinction, code/exact UUID approval, capability link, waiting modes | `packages/cli/tests/command-tree.test.ts`, `enrollment-network.test.ts`; `browser-tests/admin.pw.ts`, `journey.pw.ts` |
+| 18–23 | Lost responses, cancellation, retries/deadlines, terminal fresh, per-server pending, existing connection and next-step guidance | `packages/cli/tests/command-tree.test.ts`, `enrollment-network.test.ts`, `multi-vault.test.ts` |
+| 24–27 | Secret-free views, removal refusal/force, retained files and no remote revocation | `packages/cli/tests/command-tree.test.ts`, `sync.test.ts` |
+| 28–33 | Select server/vault, CWD destination, key-aware recovery, nonempty confirmation, no transfer, independent replicas | `packages/cli/tests/command-tree.test.ts`, `sync.test.ts`, `multi-vault.test.ts`; `browser-tests/journey.pw.ts` |
+| 34–39 | Bindings, dirty/forced disconnect, all-lock preflight, CWD discovery/path/watch | `packages/cli/tests/command-tree.test.ts`, `sync.test.ts`; `packages/cli/tests/connections.test.ts` |
+| 40–43 | Opt-in routes/assets, shared listener, sessions/logout/expiry, transport/cookie/CSRF/authority separation | `packages/server-core/tests/browser.test.ts`; `browser-tests/admin.pw.ts`; `build/test-standalone.sh` |
+| 44–47 | Pending metadata/code, browser/local approve/deny/revoke and retained-data warnings | `packages/server-core/tests/owner.test.ts`, `browser.test.ts`; `packages/cli/tests/command-tree.test.ts`; `browser-tests/admin.pw.ts`, `journey.pw.ts` |
+| 48–53 | Owner-local/browser vault lifecycle, acknowledged/protected recovery delivery, browser-only encryption, refresh/lost-response/crash-safe receipts | `packages/cli/tests/command-tree.test.ts`, `local-safety.test.ts`, `terminal.test.ts`, `multi-vault.test.ts`; `browser-tests/admin.pw.ts`, `journey.pw.ts` |
+| 54–58 | Exact deletion confirmations/warnings; no yes/force bypass; no client consent; immediate terminal access, restart/race-safe cleanup; retained work | `packages/cli/tests/terminal.test.ts`, `command-tree.test.ts`, `sync.test.ts`; `packages/server-core/tests/maintenance.test.ts`, `server.test.ts`, `revisions.test.ts`; `packages/server-object-storage/tests/local-filesystem.test.ts`; `browser-tests/journey.pw.ts` |
+| 59 | Timestamp/action/target/local-browser activity without filenames/secrets | `packages/server-core/tests/owner.test.ts`, `browser.test.ts`; `browser-tests/journey.pw.ts` |
+| 60 | Real copied Paper UI/Radix, mobile layout, keyboard and safe destructive focus/dismissal | `browser-tests/admin.pw.ts`; `packages/admin-ui/PAPER-UI-NOTICE.md` pins upstream revision |
+
+### Verification evidence
+
+- `bun test`: **283 passed, 0 failed**, 2042 assertions (baseline before issue: 237).
+- `bun run typecheck`: all **nine workspaces** plus frontend/browser/build tooling passed.
+- `bun run test:browser`: **5 passed**, real Chromium against source.
+- `NANOSYNC_TEST_BINARY="$PWD/dist/nanosync" bun run test:browser`: **5 passed**,
+  including the complete two-device/two-replica journey against the compiled binary.
+- `bun test packages/cli/tests/terminal.test.ts`: **3 passed**, 29 assertions,
+  real PTY initialization/password hiding/acknowledgement/deletion and exit handling.
+- `bash build/test-install.sh`: passed latest/pinned/custom-directory/checksum fixtures.
+- `bun run build:binary`: passed frontend regeneration and standalone compilation.
+- `bash build/test-standalone.sh`: passed isolated enabled/disabled HTML/assets/API smoke.
+- `nix --extra-experimental-features 'nix-command flakes' build .#nanosync --offline --no-link`:
+  passed package build with frontend regeneration; installed `bin/nanosync --help` passed.
+- No required tools were unavailable. Full AUR `makepkg` release build is not claimed:
+  its source is remote Git main, not this unpublished checkout. The shared build and
+  installer are tested here; no package publication, push or PR is performed.
+
+### Review handoff
+
+Key boundaries: new subprocess/browser journey; existing two-tab login readiness;
+standalone artifact smoke. No production function/type or cryptographic format changed.
+Exact changed paths:
+- `README.md`
+- `packages/cli/README.md`
+- `browser-tests/admin.pw.ts`
+- `browser-tests/journey.pw.ts`
+- `build/test-standalone.sh`
+- `docs/architecture.md`
+- `docs/security.md`
+- `docs/formats.md`
+- `docs/sync-protocol.md`
+- `docs/decisions.md`
+- `docs/clients-and-operations.md`
+- `docs/implementation-progress.md`
+
+Final rerun after staging the new acceptance files: offline Nix build passed with
+this checkout included; full Bun suite remained **283/0** and all typechecks passed.
+`git diff --check` and `bash -n build/test-standalone.sh` passed.

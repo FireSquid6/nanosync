@@ -2,7 +2,8 @@
 
 ## Goals
 
-- Prevent the server from reading file contents or encrypted manifests.
+- Keep ordinary persisted server data encrypted (with the explicit transient
+  server-local provisioning exception below).
 - Authenticate each device independently.
 - Require explicit approval before a new device can access vault objects.
 - Recover vault access with a user-held recovery key.
@@ -33,7 +34,7 @@ flowchart LR
     OP -. cannot derive vault key from server data alone .-> KEYS
 ```
 
-The server is trusted for availability and ordering but not for confidentiality of vault data. A malicious server can deny service, replay old data, omit revisions, or lie about availability. Clients should detect integrity violations and obvious rollback where local state permits, but complete anti-rollback protection requires an external trust anchor and is not a version 1 goal.
+The server is trusted for availability and ordering but ordinary persisted server data is not trusted for confidentiality. Server-local provisioning temporarily trusts the operator machine with newly generated keys. Browser provisioning additionally trusts the served code: a compromised origin can exfiltrate passwords, secrets and keys despite TLS and CSP. Use a trusted native client for stronger separation; protection against malicious served JavaScript is not promised. A malicious server can deny service, replay old data, omit revisions, or lie about availability. Clients should detect integrity violations and obvious rollback where local state permits, but complete anti-rollback protection requires an external trust anchor and is not a version 1 goal.
 
 ## Key hierarchy
 
@@ -221,7 +222,7 @@ Before implementation is considered production-ready, review:
 
 ### Owner provisioning boundary
 
-The owner-administration redesign intentionally permits server-local provisioning to handle plaintext vault keys and new recovery material transiently on the operator machine. It must not persist those plaintext secrets. Browser provisioning instead submits only existing-format encrypted frames, a recovery wrap, and a MAC-authenticated genesis envelope. Owner-created genesis uses reserved author UUID `00000000-0000-4000-8000-000000000001` in both manifest and envelope: this is an author label, never an enrolled device or credential. Encryption and MAC formats are unchanged. A malicious server can deliver malicious browser code; browser provisioning does not defend against that threat.
+The owner-administration redesign intentionally permits server-local provisioning to handle plaintext vault keys and new recovery material transiently on the operator machine. It must not persist plaintext master keys or recovery secrets in ordinary server state; an explicitly requested protected recovery-output file is the delivery-only exception. Browser provisioning instead submits only existing-format encrypted frames, a recovery wrap, and a MAC-authenticated genesis envelope. Owner-created genesis uses reserved author UUID `00000000-0000-4000-8000-000000000001` in both manifest and envelope: this is an author label, never an enrolled device or credential. Encryption and MAC formats are unchanged. A malicious server can deliver malicious browser code; browser provisioning does not defend against that threat.
 
 Shared owner operations require an already authenticated owner boundary; their actor object records provenance, not proof of authentication. Browser session authentication, CSRF, transport policy, and deletion confirmations belong to the invoking surface. Verification codes are public comparisons of immutable enrollment identity/fingerprint, never authenticators.
 
@@ -260,3 +261,25 @@ or loopback HTTP on a loopback listener and must match any configured origin.
 Do not expose a trusted proxy's backend listener to untrusted users on that
 same peer address. Capability links use only the validated configured origin,
 never Host/Forwarded headers; without it the enabled capability omits its URL.
+
+
+### Secret delivery versus ordinary persistence
+
+Hidden prompts or protected secret files/environment supply passwords and recovery
+input; never put literal secrets in argv. Ordinary logs, JSON results, audit events,
+metadata and encrypted creation receipts contain no plaintext keys/recovery secrets.
+An explicitly requested protected recovery-output file is an intentional delivery
+artifact, not a server key store: deliver/back it up offline, then remove the
+operator copy. Secret files and their private parents require owner-only permissions;
+symlinks/hardlinks and unsafe files fail visibly. Browser storage contains only
+an encrypted request receipt; refresh requires secret proof before publication.
+Acknowledgement/durable file delivery happens before owner mutation. Clearing byte
+arrays and UI fields reduces exposure but is not a guarantee of erasure from a
+JavaScript runtime, swap, crash dump or compromised host.
+
+Successful audit events identify timestamp, action, target and browser/server-local
+origin, not filenames or secrets. Device revocation only prevents future access;
+owner deletion only destroys server data. Neither invalidates retained client keys
+or wipes local work. Deleted bindings stop with `VAULT_DELETED` rather than apply
+an empty manifest. Backups remain separate copies and must have their own access
+and retention controls.

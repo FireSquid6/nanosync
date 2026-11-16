@@ -345,6 +345,8 @@ test('two tabs cannot overwrite an acknowledged encrypted receipt', async ({page
  await page.goto(url+'/admin');
  await page.getByLabel('Owner password',{exact:true}).fill('browser-owner-password');
  await page.getByRole('button',{name:'Log in',exact:true}).click();
+ // Wait for login to commit its cookie before navigating the second tab.
+ await expect(page.getByRole('heading',{name:'Vaults',exact:true})).toBeVisible();
  const other=await context.newPage();await other.goto(url+'/admin');
  for(const [tab,name] of [[page,'first-tab'],[other,'second-tab']] as const){
   await tab.getByLabel('New vault name').fill(name);

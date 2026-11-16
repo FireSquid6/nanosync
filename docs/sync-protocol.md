@@ -294,3 +294,11 @@ Approved-device `GET /v1/vaults` and `/v1/recovery-wrap` remain available.
 Device-authorized vault create/rename routes are removed (404). Existing
 `/v1/admin` device-admin operations retain their separate bearer authentication
 and device self/last-administrator safeguards.
+
+Successful recent owner activity records `{sequence,action,occurredAtMs,origin,
+actorId,targetId}`. Origins distinguish `browser` from `server-local`; actions
+include `enrollment.approved`, `enrollment.denied`, `device.revoked`,
+`vault.created`, `vault.renamed`, `vault.deleted`. They are provenance, not client
+supplied authorization. Files, secret material and audit details are excluded.
+All deleted-vault sync/recovery/object/publication operations return HTTP 410
+`VAULT_DELETED`; this is not a retryable outage or an empty remote manifest.
