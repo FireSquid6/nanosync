@@ -2,7 +2,8 @@
 
 ## Goals
 
-- Prevent the server from reading file contents or encrypted manifests.
+- Keep ordinary persisted server data encrypted (with the explicit transient
+  server-local provisioning exception below).
 - Authenticate each device independently.
 - Require explicit approval before a new device can access vault objects.
 - Recover vault access with a user-held recovery key.
@@ -33,7 +34,7 @@ flowchart LR
     OP -. cannot derive vault key from server data alone .-> KEYS
 ```
 
-The server is trusted for availability and ordering but not for confidentiality of vault data. A malicious server can deny service, replay old data, omit revisions, or lie about availability. Clients should detect integrity violations and obvious rollback where local state permits, but complete anti-rollback protection requires an external trust anchor and is not a version 1 goal.
+The server is trusted for availability and ordering but ordinary persisted server data is not trusted for confidentiality. Server-local provisioning temporarily trusts the operator machine with newly generated keys. Browser provisioning additionally trusts the served code: a compromised origin can exfiltrate passwords, secrets and keys despite TLS and CSP. Use a trusted native client for stronger separation; protection against malicious served JavaScript is not promised. A malicious server can deny service, replay old data, omit revisions, or lie about availability. Clients should detect integrity violations and obvious rollback where local state permits, but complete anti-rollback protection requires an external trust anchor and is not a version 1 goal.
 
 ## Key hierarchy
 
@@ -103,7 +104,7 @@ After approval, each device receives a unique opaque 256-bit random bearer crede
 
 The password endpoint creates a random 256-bit token and stores only its pepper-HMAC digest. A token initially authenticates only enrollment creation/status. Enrollment extends its lifetime from 10 minutes to 24 hours. Approval transactionally promotes that digest into the device credential field, so no plaintext credential is persisted or delivered in a second lossy response; the already client-held token becomes the credential. The designated bootstrap device is activated exactly once only when its password session also carries an independently verified operator bootstrap handoff. Password plus knowledge of the initial UUID is insufficient. The handoff uses a separate header, is checked by the injected bootstrap authorizer after sealing, and does not reopen any bootstrap mutation route. Exact retries by the already promoted session do not consume a second handoff. Responses containing a token or recovery wrap use `Cache-Control: no-store`.
 
-Password failures use one persistent account-global bucket because v1 has one account and does not trust remote or forwarding addresses. Five failures in 15 minutes lock login for 15 minutes, including across restart. This permits unauthenticated denial of service; proxy/IP buckets may only be added after explicit proxy trust configuration. At most two Argon2 jobs run concurrently. Public failures do not distinguish wrong passwords, missing account state, verifier corruption, or internal verification errors.
+Password failures use one persistent account-global bucket because v1 has one account and does not trust remote or forwarding addresses. Five failures in 15 minutes lock login for 15 minutes, including across restart. This permits unauthenticated denial of service; proxy/IP buckets may only be added after explicit proxy trust configuration. Device login and owner-password verification share a runtime admission gate: at most two active checks and five admitted attempts per rolling minute, including successful attempts. Excess requests receive retryable HTTP 429 before expensive work; the hasher also rejects saturation instead of queueing passwords. Public failures do not distinguish wrong passwords, missing account state, verifier corruption, or internal verification errors.
 
 Successful login rechecks both the active lockout and the exact verifier tuple inside the session-creation transaction after asynchronous Argon2 verification. Establishing lockout invalidates unbound password sessions. This prevents a delayed successful verifier job or stale pre-upgrade verifier from committing after concurrent security state changed.
 
@@ -134,7 +135,7 @@ Revocation does not:
 - Prevent decryption of encrypted objects already downloaded.
 - Rotate the vault key or re-encrypt history.
 
-V1 rejects self-revocation and any revocation that would remove the last active administrator. Revocation clears the server credential digest and enrollment session in one transaction.
+Device-admin routes reject self-revocation and any revocation that would remove the last active administrator. Explicit owner operations use separate browser/server-local provenance, not a fabricated device; they may revoke even the last device administrator. Revocation clears the server credential digest and enrollment session in one transaction.
 
 The UI must describe this as access revocation, not data erasure.
 
@@ -218,3 +219,73 @@ Before implementation is considered production-ready, review:
 - Filesystem path traversal and symlink handling.
 - Reverse-proxy trust configuration.
 - Secret storage on Linux and Android.
+
+### Owner provisioning boundary
+
+The owner-administration redesign intentionally permits server-local provisioning to handle plaintext vault keys and new recovery material transiently on the operator machine. It must not persist plaintext master keys or recovery secrets in ordinary server state; an explicitly requested protected recovery-output file is the delivery-only exception. Browser provisioning instead submits only existing-format encrypted frames, a recovery wrap, and a MAC-authenticated genesis envelope. Owner-created genesis uses reserved author UUID `00000000-0000-4000-8000-000000000001` in both manifest and envelope: this is an author label, never an enrolled device or credential. Encryption and MAC formats are unchanged. A malicious server can deliver malicious browser code; browser provisioning does not defend against that threat.
+
+Shared owner operations require an already authenticated owner boundary; their actor object records provenance, not proof of authentication. Browser session authentication, CSRF, transport policy, and deletion confirmations belong to the invoking surface. Verification codes are public comparisons of immutable enrollment identity/fingerprint, never authenticators.
+
+### Opt-in browser administration
+
+`server run --web-ui` enables the separate `/admin/api` owner boundary. Without
+that flag all `/admin` assets and endpoints return 404. Browser sessions are
+256-bit random, runtime-memory-only capabilities, never enrollment/device
+credentials. Their cookies are HttpOnly, SameSite=Strict, Path=/admin, Secure
+under HTTPS, with no persistence lifetime. Logout removes the session; restart
+invalidates all sessions. Exact 30-minute idle and 12-hour absolute limits use
+the injected server clock. At most 1,000 concurrent sessions are retained.
+
+Every mutation, **including login**, requires an exact allowed `Origin` and a
+nonempty `X-Nanosync-CSRF` header; authenticated mutations must additionally
+match the random token returned by session login/inspection. The login header
+is a custom-header/preflight defense, not a previously issued secret. No CORS
+permission is granted. Foreign/null origins are rejected. Browser routes reject
+Authorization headers rather than falling back to device or enrollment tokens.
+Cookies never authorize device, recovery, revision or object routes.
+
+Browser password verification (login and deletion combined) reserves at most
+five attempts per rolling minute per runtime before asynchronous Argon2 work,
+including successful attempts. Failed passwords also use the persistent shared
+account lockout. Success mints no device token. Deletion requires the current
+exact vault name and password, then uses shared owner tombstoning/cleanup.
+
+Nonloopback browser HTTP is forbidden even with `--acknowledge-exposure`.
+For TLS termination configure `--external-origin https://sync.example` and
+`--trusted-proxy <exact-IP>`. The programmatic `trustedProxyAddresses` option
+accepts multiple exact IPs. Only Bun's observed socket peer establishes proxy
+trust; forwarding headers are ignored entirely. The configured external origin
+is authoritative for trusted peers (proxies must restrict public host/origin
+routing accordingly). Without proxy trust, the actual request URL must be HTTPS
+or loopback HTTP on a loopback listener and must match any configured origin.
+Do not expose a trusted proxy's backend listener to untrusted users on that
+same peer address. Capability links use only the validated configured origin,
+never Host/Forwarded headers; without it the enabled capability omits its URL.
+
+
+### Secret delivery versus ordinary persistence
+
+Hidden prompts or protected secret files/environment supply passwords and recovery
+input; never put literal secrets in argv. Ordinary logs, JSON results, audit events,
+metadata and encrypted creation receipts contain no plaintext keys/recovery secrets.
+An explicitly requested protected recovery-output file is an intentional delivery
+artifact, not a server key store: deliver/back it up offline, then remove the
+operator copy. Secret files and their private parents require owner-only permissions;
+symlinks/hardlinks and unsafe files fail visibly. Browser storage contains only
+an encrypted request receipt; refresh requires secret proof before publication.
+Acknowledgement/durable file delivery happens before owner mutation. Server-local
+provisioning takes the same server-root process-identity ownership gate as
+initialization and the full serving runtime lifetime, before touching recovery
+output/receipts. This prevents separate storage instances from late-writing
+ciphertext after runtime tombstone cleanup. Contention fails with stop-and-retry
+guidance and leaves prior delivery/receipts intact; metadata-only owner commands
+remain available while serving. There is no lock bypass flag. Clearing byte
+arrays and UI fields reduces exposure but is not a guarantee of erasure from a
+JavaScript runtime, swap, crash dump or compromised host.
+
+Successful audit events identify timestamp, action, target and browser/server-local
+origin, not filenames or secrets. Device revocation only prevents future access;
+owner deletion only destroys server data. Neither invalidates retained client keys
+or wipes local work. Deleted bindings stop with `VAULT_DELETED` rather than apply
+an empty manifest. Backups remain separate copies and must have their own access
+and retention controls.

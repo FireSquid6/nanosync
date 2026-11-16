@@ -1,301 +1,223 @@
 #!/usr/bin/env bun
-import { join } from "node:path";
-import { existsSync } from "node:fs";
-import { isatty } from "node:tty";
-import { openSync, closeSync, writeSync } from "node:fs";
-import { Command, CommanderError, Option } from "commander";
-import { parseDeviceId } from "@nanosync/protocol";
-import { RemoteError } from "@nanosync/sync-core";
-import { api, bootstrap, credentials, joinVault, readPassword } from "./client.ts";
-import { privateDirectory, secureCreate, secureRead, provisionSecret } from "./security.ts";
-import { runServer, initializeServerOwner, approveLocalDevice, revokeLocalDevice, localDevices, localAdminReport } from "./server.ts";
-import { SyncRunner } from "./sync-runner.ts";
-import { createConnection, discoverConnection, repairConnection } from "./connections.ts";
-import { createVault, enrollServer, key, prompt, secretPrompt, server as selectServer, servers, unlockVault } from "./vault-client.ts";
+import { join } from 'node:path';
+import { hostname } from 'node:os';
+import { readdirSync } from 'node:fs';
+import { Command, CommanderError, Option } from 'commander';
+import { parseDeviceId, parseVaultId } from '@nanosync/protocol';
+import { RemoteError } from '@nanosync/sync-core';
+import { api, baseUrl } from './client.ts';
+import { privateDirectory, secureCreate, secureRead } from './security.ts';
+import { runServer, initializeServerOwner, localAdminReport, withLocalOwner, localOwner } from './server.ts';
+import { SyncRunner } from './sync-runner.ts';
+import { connectRegisteredVault, discoverConnection, records, disconnectConnections, removeServerConnection, withConnectionRegistry } from './connections.ts';
+import { enrollServer, key, server as storedServer, servers, unlockVault, pendingEnrollments, connectionSummary } from './vault-client.ts';
+import { provisionLocalVault } from './local-provision.ts';
+import { CliError, interactive, text, hidden, choose, acknowledge } from './prompts.ts';
 
-type CliOptions = { clientDir?: string; syncDir?: string; continuous?: boolean; serverDir?: string; url?: string; proofFile?: string;
-  deviceId?: string; recoveryFile?: string; host?: string; port?: string; acknowledgeExposure?: boolean;
-  json?: boolean; env?: boolean; name?: string; server?: string; vault?: string; path?: string; watch?: boolean;
-  confirmNonempty?: boolean; repair?: string; recoveryOutput?: string; waitMs?: string };
-function required(value: string | undefined, label: string): string {
-  if (!value) throw new Error(`required ${label}`);
-  return value;
-}
-function output(value: unknown, json = false) { console.log(json || typeof value !== "string" ? JSON.stringify(value) : value); }
-
+type Options = { [key: string]: any };
 export async function main(args = process.argv.slice(2)): Promise<number> {
   try {
-    const program = new Command().name("nanosync")
-      .description("Nanosync Linux CLI. Secrets must never be passed as command-line values. See packages/cli/README.md.")
-      .showHelpAfterError(false).exitOverride()
-      .configureOutput({ writeErr: () => {} });
+    const program = new Command().name('nanosync').description('Explicit server-local administration and client synchronization').exitOverride()
+      .configureOutput({ writeErr: () => {} }).showHelpAfterError(false);
     const seen = new Set<string>();
-    function flags(command: Command, ...definitions: string[]): Command {
+    function flags(command: Command, ...definitions: string[]) {
       for (const definition of definitions) {
         const option = new Option(definition);
-        if (command === program && !["--client-dir", "--json"].includes(option.long!)) {
-          option.hideHelp();
-        }
-        if (option.required) {
-          option.argParser(value => {
-            if (!value) throw new Error(`missing ${option.long} value`);
-            return value;
-          });
-        }
-        command.addOption(option);
-        command.on(`option:${option.name()}`, () => {
-          if (seen.has(option.long!)) {
-            throw new Error(`unknown or duplicate flag: ${option.long}`);
-          }
+        command.addOption(option).on(`option:${option.name()}`, () => {
+          if (seen.has(option.long!)) throw new CliError('INVALID_INPUT', `duplicate flag: ${option.long}`);
           seen.add(option.long!);
         });
       }
       return command;
     }
-    const common = ["--client-dir <dir>", "--json"];
-    flags(program, ...common, "--sync-dir <dir>", "--continuous", "--server-dir <dir>", "--url <url>", "--proof-file <file>",
-      "--device-id <uuid>", "--recovery-file <file>", "--host <host>", "--port <port>",
-      "--acknowledge-exposure", "--env", "--name <name>", "--vault <name-or-uuid>", "--server <name-or-id>",
-       "--path <directory>", "--watch", "--confirm-nonempty", "--repair <move-or-copy>", "--recovery-output <file>", "--wait-ms <milliseconds>");
-    const opts = (command: Command): CliOptions => command.optsWithGlobals<CliOptions>();
-    const directory = (command: Command) => opts(command).clientDir ?? join(process.env.HOME ?? "", ".nanosync");
-    const serverDirectory = (command: Command) => opts(command).serverDir ?? join(privateDirectory(directory(command)), "server");
-    let result: unknown, code = 0;
-    const server = flags(
-      program.command("server").description("Server provisioning and runtime"),
-      "--server-dir <dir>", "--host <host>", "--port <port>", "--acknowledge-exposure", ...common);
-    flags(
-       server.command("init").description("Initialize owner password without creating a vault"),
-       "--server-dir <dir>", "--env",
-       ...common,
-     )
-       .action(async (_options: CliOptions, command: Command) => {
-         const dir = privateDirectory(serverDirectory(command));
-         const password = opts(command).env ? required(process.env.NANOSYNC_PASSWORD, "NANOSYNC_PASSWORD") : await secretPrompt("Enter owner password");
-         if (!opts(command).env && password !== await secretPrompt("Confirm owner password")) throw new Error("password confirmation does not match");
-         provisionSecret(join(dir, "pepper.hex"));
-         provisionSecret(join(dir, "bootstrap.hex"));
-         await initializeServerOwner(dir, password);
-         result = { initialized: true };
-      });
-    flags(
-      server.command("run").description("Run server until SIGINT or SIGTERM"),
-      "--server-dir <dir>", "--host <host>", "--port <port>", "--acknowledge-exposure", ...common,
-    )
-      .action(async (_options: CliOptions, command: Command) => {
-        const config = opts(command);
-        const running = await runServer({
-           directory: serverDirectory(command),
-          host: config.host,
-          port: config.port === undefined ? undefined : Number(config.port),
-          acknowledgeExposure: config.acknowledgeExposure === true,
-        });
+    const common = ['--json', '--non-interactive', '--yes'];
+    const local = ['--server-dir <directory>'];
+    const clientFlags = ['--client-dir <directory>'];
+    flags(program, ...common, ...local, ...clientFlags);
+    const opts = (command: Command): Options => command.optsWithGlobals();
+    const canPrompt = (command: Command) => interactive(opts(command).nonInteractive);
+    const root = (command: Command) => opts(command).clientDir ?? join(process.env.HOME ?? '', '.nanosync');
+    const need = async (command: Command, flag: string, label = `--${flag}`): Promise<string> =>
+      opts(command)[flag.replace(/-([a-z])/g, (_: string, c: string) => c.toUpperCase())] ?? await text(label, canPrompt(command));
+    const serverRoot = async (command: Command) => need(command, 'server-dir');
+    const secret = async (command: Command, variable: string, fileFlag: string, label: string): Promise<string> => {
+      const path = opts(command)[fileFlag];
+      return path ? secureRead(path, 4096).toString('utf8').trimEnd() : process.env[variable] ?? await hidden(label, canPrompt(command));
+    };
+    async function selectServer(command: Command) {
+      const choice = opts(command).server ?? await choose('--server', servers(root(command)).map(s => ({name:`${s.name}: ${s.baseUrl}`, value:s.serverId})), canPrompt(command));
+      return storedServer(root(command), choice);
+    }
+    let result: unknown, exitCode = 0, resultCode = 'OK';
+    const server = flags(program.command('server').description('Local server administration'), ...local, ...common);
+    flags(server.command('init'), ...local, ...common, '--password-file <file>').action(async (_o, command) => {
+      const dir = privateDirectory(await serverRoot(command));
+      const password = await secret(command, 'NANOSYNC_PASSWORD', 'passwordFile', 'Owner password');
+      if (!opts(command).passwordFile && !process.env.NANOSYNC_PASSWORD && password !== await hidden('Confirm owner password', canPrompt(command))) throw new CliError('INVALID_INPUT', 'password confirmation mismatch');
+      await initializeServerOwner(dir, password);
+      result = { initialized: true, serverDirectory: dir };
+    });
+    flags(server.command('run'), ...local, ...common, '--host <host>', '--port <port>', '--acknowledge-exposure', '--web-ui', '--external-origin <origin>', '--trusted-proxy <ip>')
+      .action(async (_o, command) => {
+        const o = opts(command);
+        const running = await runServer({ directory:await serverRoot(command), host:o.host, port:o.port === undefined ? undefined : Number(o.port),
+          acknowledgeExposure:!!o.acknowledgeExposure, webUi:!!o.webUi, externalOrigin:o.externalOrigin, trustedProxyAddresses:o.trustedProxy ? [o.trustedProxy] : undefined });
         console.error(`Server listening at ${running.url}`);
-        await new Promise<void>(resolveStop => {
-          process.once("SIGINT", resolveStop);
-          process.once("SIGTERM", resolveStop);
-        });
-        await running.stop();
+        await new Promise<void>(resolve => { process.once('SIGINT', resolve); process.once('SIGTERM', resolve); });
+        await running.stop(); result = { stopped:true };
       });
-    flags(
-      program.command("bootstrap").description("Initialize first device (password on stdin, recovery on TTY)"),
-      "--url <url>", "--proof-file <file>", ...common,
-    )
-      .action(async (_options: CliOptions, command: Command) => {
-        const config = opts(command);
-        result = await bootstrap(directory(command), required(config.url, "--url"), required(config.proofFile, "--proof-file"));
-      });
-    flags(
-       program.command("enroll").description("Enroll a named device; resume a pending request on retry"),
-       "--url <url>", "--device-id <uuid>", "--recovery-file <file>", "--name <name>", "--env", "--wait-ms <milliseconds>", ...common,
-    )
-      .action(async (_options: CliOptions, command: Command) => {
-        const config = opts(command), dir = directory(command);
-         if (config.deviceId) {
-           const url = required(config.url, "--url"), id = parseDeviceId(config.deviceId);
-           const recovery = config.recoveryFile ? secureRead(config.recoveryFile, 128).toString("utf8").trim() : undefined;
-           result = await joinVault(dir, url, id, existsSync(join(dir, "enrollment.json")) ? undefined : readPassword(), recovery);
-         } else {
-           const url = config.env ? required(process.env.NANOSYNC_SERVER, "NANOSYNC_SERVER") : config.url ?? await prompt("Enter remote server");
-           const password = existsSync(join(dir, "enrollment.json")) ? undefined : config.env ? required(process.env.NANOSYNC_PASSWORD, "NANOSYNC_PASSWORD") : await secretPrompt("Enter password");
-           const name = config.env ? required(process.env.NANOSYNC_DEVICE_NAME, "NANOSYNC_DEVICE_NAME") : config.name ?? await prompt("Enter device name");
-           const wait = config.waitMs === undefined ? 60_000 : Number(config.waitMs);
-           if (!Number.isSafeInteger(wait) || wait < 0 || wait > 600_000) throw new Error("--wait-ms must be 0..600000");
-           result = await enrollServer(dir, url, password, name, wait);
-           if ((result as { status: string }).status === "approved") console.error("Approval received! Run `nanosync setup` to start syncing with vaults");
-         }
-         if ((result as { status?: string }).status === "pending") code = 3;
-       });
-    const vault = flags(program.command("vault").description("Manage encrypted vaults"), ...common);
-    flags(vault.command("list"), "--server <name-or-id>", ...common).action(async (_options: CliOptions, command: Command) => {
-      const info = selectServer(directory(command), opts(command).server);
-      result = await api(info.baseUrl, "/v1/vaults", {}, info.token);
+    const devices = flags(server.command('devices'), ...local, ...common);
+    flags(devices.command('view'), ...local, ...common).action(async (_o, command) => {
+      result = await withLocalOwner(await serverRoot(command), owner => ({ devices:owner.devices(localOwner), pending:owner.pending(localOwner) }));
     });
-    flags(vault.command("create"), "--server <name-or-id>", "--name <name>", "--recovery-output <file>", ...common)
-      .action(async (_options: CliOptions, command: Command) => {
-        const config = opts(command), root = directory(command), info = selectServer(root, config.server);
-        if (!config.recoveryOutput) {
-          let fd: number;
-          try { fd = openSync("/dev/tty", "r+"); }
-          catch { throw new Error("vault creation requires a terminal or --recovery-output"); }
-          try { if (!isatty(fd)) throw new Error("vault creation requires a terminal or --recovery-output"); }
-          finally { closeSync(fd); }
+    for (const action of ['approve', 'deny', 'revoke'] as const) {
+      flags(devices.command(action), ...local, ...common, '--device-id <uuid>').action(async (_o, command) => {
+        const dir = await serverRoot(command), id = parseDeviceId(await need(command, 'device-id'));
+        if (action === 'revoke') {
+          console.error('Revocation blocks future access; downloaded ciphertext, plaintext and keys are not erased.');
+          if (!opts(command).yes && !await acknowledge('Revoke this device?', canPrompt(command))) throw new CliError('CANCELLED', 'revocation cancelled');
         }
-        const name = config.name ?? await prompt("Enter vault name");
-        result = await createVault(root, info, name, async secret => {
-          if (config.recoveryOutput) {
-            if (existsSync(config.recoveryOutput)) {
-              if (secureRead(config.recoveryOutput, 256).toString("utf8") !== secret + "\n") throw new Error("recovery output differs from pending vault creation");
-            } else secureCreate(config.recoveryOutput, secret + "\n");
-          }
+        result = await withLocalOwner(dir, owner => {
+          if (action === 'revoke') owner.revoke(localOwner, id);
           else {
-            const fd = openSync("/dev/tty", "r+");
-            try {
-              if (!isatty(fd)) throw new Error("recovery display requires a terminal or --recovery-output");
-              writeSync(fd, `Recovery secret (record offline; shown once): ${secret}\n`);
-            } finally { closeSync(fd); }
-            if (await secretPrompt("Confirm recovery secret") !== secret) throw new Error("recovery confirmation failed");
+            const request = owner.pending(localOwner).find(r => r.deviceId === id);
+            if (request) console.error(`Verification code: ${request.verificationCode}`);
+            owner.decideEnrollment(localOwner, {protocolVersion:1, deviceId:id, decision:action});
           }
+          return {deviceId:id, status:action === 'approve' ? 'approved' : action === 'deny' ? 'denied' : 'revoked'};
         });
       });
-    flags(vault.command("rename").argument("<vault>"), "--server <name-or-id>", "--name <name>", ...common)
-      .action(async (chosen: string, _options: CliOptions, command: Command) => {
-        const info = selectServer(directory(command), opts(command).server);
-        const list = await api(info.baseUrl, "/v1/vaults", {}, info.token);
-        const matches = list.vaults.filter((entry: {name:string;vaultId:string}) => entry.vaultId === chosen || entry.name === chosen);
-        if (matches.length !== 1) throw new Error("vault not found or ambiguous");
-        result = await api(info.baseUrl, `/v1/vaults/${matches[0].vaultId}/rename`, { method: "POST",
-          body: JSON.stringify({ name: required(opts(command).name, "--name") }) }, info.token);
-      });
-    flags(program.command("setup").description("Connect a directory to an existing vault"), "--server <name-or-id>", "--vault <name-or-uuid>",
-      "--path <directory>", "--confirm-nonempty", "--repair <move-or-copy>", "--env", ...common)
-      .action(async (_options: CliOptions, command: Command) => {
-        const config = opts(command), root = directory(command);
-        const choices = servers(root);
-        const chosen = config.server ?? (choices.length === 1 ? choices[0]!.serverId : config.env ? undefined :
-          (console.error(choices.map((item,i) => `${i+1}. ${item.name}: ${item.baseUrl}`).join("\n")),
-            choices[Number(await prompt("Select server (enter number)"))-1]?.serverId));
-        const info = selectServer(root, required(chosen, "--server"));
-        const path = config.path ?? (config.env ? undefined : await prompt("Enter sync destination"));
-        const destination = required(path, "--path");
-        if (config.repair) {
-          if (config.repair !== "move" && config.repair !== "copy") throw new Error("--repair must be move or copy");
-          result = repairConnection(root, destination, config.repair, config.confirmNonempty);
-        } else {
-          const list = (await api(info.baseUrl, "/v1/vaults", {}, info.token)).vaults as {vaultId:string;name:string}[];
-          if (!list.length) throw new Error("No vaults exist; run `nanosync vault create`");
-          const choice = config.vault ?? (config.env ? undefined : (console.error(list.map((item,i) => `${i+1}. ${item.name}`).join("\n")),
-            list[Number(await prompt("Select vault (enter number)"))-1]?.vaultId));
-          const matches = list.filter(item => item.vaultId === choice || item.name === choice);
-          if (matches.length !== 1) throw new Error("select a vault by name or UUID");
-          const vaultId = matches[0]!.vaultId;
-          if (!key(root, info.serverId, vaultId)) {
-            const secret = config.env ? required(process.env.NANOSYNC_RECOVERY_SECRET, "NANOSYNC_RECOVERY_SECRET") : await secretPrompt(`Enter recovery secret for ${matches[0]!.name}`);
-            await unlockVault(root, info, vaultId, secret);
-          }
-          result = createConnection(root, destination, info.serverId, vaultId, info.deviceId, config.confirmNonempty);
-        }
-        console.error("Setup complete! Run `nanosync sync` to continue syncing!");
-      });
-    flags(
-      program.command("sync").description("Synchronize once or continuously; reads local .nanosyncignore in --sync-dir"),
-       "--sync-dir <dir>", "--continuous", "--path <directory>", "--watch", ...common,
-    ).action(async (_options: CliOptions, command: Command) => {
-       const dir = directory(command);
-       const config = opts(command);
-       const connection = config.syncDir ? null : discoverConnection(dir, config.path ?? process.cwd());
-       const info = connection ? selectServer(dir, connection.serverId) : null;
-       if (connection && info!.deviceId !== connection.deviceId) throw new Error("connection device differs from server registration; run setup to repair");
-       const syncDirectory = connection?.root ?? required(config.syncDir, "--path");
-       const creds = connection ? null : credentials(dir);
-       const masterKey = connection ? key(dir, info!.serverId, connection.vaultId) : Buffer.from(creds!.masterKey, "hex");
-       if (!masterKey) throw new Error("vault key is missing; run nanosync setup to unlock it");
-       let runner: SyncRunner;
-       try {
-         runner = SyncRunner.start({
-           clientDirectory: connection ? privateDirectory(join(privateDirectory(join(privateDirectory(dir), "replicas")), connection.connectionId)) : dir,
-           syncDirectory,
-           vaultId: connection?.vaultId ?? creds!.vaultId,
-           deviceId: connection?.deviceId ?? creds!.deviceId,
-           masterKey,
-           baseUrl: info?.baseUrl ?? creds!.baseUrl,
-           token: info?.token ?? creds!.token,
-        });
-      } finally {
-        masterKey.fill(0);
-      }
-      try {
-         if (!opts(command).continuous && !opts(command).watch) {
-          result = await runner.syncOnce();
-        } else {
-          const controller = new AbortController();
-          const stop = () => controller.abort();
-          process.once("SIGINT", stop);
-          process.once("SIGTERM", stop);
-          try {
-            await runner.watch(controller.signal, head => output(head, true), error => {
-              console.error(JSON.stringify({ error: error instanceof Error ? error.message : "sync failed" }));
-            });
-          } finally {
-            process.off("SIGINT", stop);
-            process.off("SIGTERM", stop);
-          }
-        }
-      } finally {
-        await runner.stop();
-      }
+    }
+    const vaults = flags(server.command('vaults'), ...local, ...common);
+    flags(vaults.command('view'), ...local, ...common).action(async (_o, command) => {
+      result = await withLocalOwner(await serverRoot(command), owner => ({vaults:owner.listVaults(localOwner)}));
     });
-    flags(program.command("devices").description("List devices (administrator)"), "--server-dir <dir>", ...common)
-       .action(async (_options: CliOptions, command: Command) => {
-         if (opts(command).serverDir) { result = { devices: localDevices(serverDirectory(command)) }; return; }
-         const creds = credentials(directory(command)); result = await api(creds.baseUrl, "/v1/admin/devices", {}, creds.token);
-       });
-    for (const name of ["approve", "revoke"] as const) {
-       flags(program.command(name).description(`${name} device (administrator)`).argument("<device-id-or-name>"), "--server-dir <dir>", ...common)
-         .action(async (deviceId: string, _options: CliOptions, command: Command) => {
-           if (opts(command).serverDir || existsSync(join(serverDirectory(command), "metadata.sqlite"))) {
-             result = { status: name === "approve" ? "approved" : "revoked",
-               deviceId: name === "approve" ? approveLocalDevice(serverDirectory(command), deviceId) : revokeLocalDevice(serverDirectory(command), deviceId) };
-             return;
-           }
-          const id = parseDeviceId(deviceId), creds = credentials(directory(command));
-          result = await api(
-            creds.baseUrl,
-            name === "approve"
-              ? `/v1/admin/enrollments/${id}/approve`
-              : `/v1/admin/devices/${id}/revoke`,
-            { method: "POST", body: JSON.stringify({ protocolVersion: 1 }) },
-            creds.token,
-          );
-        });
+    flags(vaults.command('create'), ...local, ...common, '--name <name>', '--recovery-output <file>').action(async (_o, command) => {
+      const dir = await serverRoot(command), name = await need(command, 'name');
+      if (!opts(command).recoveryOutput && !canPrompt(command)) throw new CliError('INPUT_REQUIRED', '--recovery-output is required in scripts');
+      result = await provisionLocalVault(dir, name, async recovery => {
+        const path = opts(command).recoveryOutput;
+        if (path) secureCreate(path, recovery + '\n');
+        else {
+          console.error(`Recovery secret (record offline): ${recovery}`);
+          if (await hidden('Retype recovery secret to acknowledge backup', canPrompt(command)) !== recovery) throw new CliError('INVALID_INPUT', 'recovery acknowledgement mismatch; no vault created');
+        }
+      }, opts(command).recoveryOutput);
+    });
+    flags(vaults.command('rename'), ...local, ...common, '--vault <uuid>', '--name <name>').action(async (_o, command) => {
+      const dir = await serverRoot(command), id = parseVaultId(await need(command, 'vault')), name = await need(command, 'name');
+      await withLocalOwner(dir, owner => owner.renameVault(localOwner, id, name)); result = {vaultId:id, name};
+    });
+    flags(vaults.command('delete'), ...local, ...common, '--vault <uuid>', '--confirm-delete <uuid>').action(async (_o, command) => {
+      const dir = await serverRoot(command), id = parseVaultId(await need(command, 'vault'));
+      const vault = await withLocalOwner(dir, owner => owner.listVaults(localOwner).find(v => v.vaultId === id));
+      if (!vault) throw new CliError('NOT_FOUND', 'vault not found');
+      console.error(`PERMANENT deletion: ${dir} / ${vault.name} / ${id}. History, encrypted objects and recovery wraps are destroyed. Recovery secrets cannot restore data without a server backup. Offline clients may have unsynced work. Client files are preserved.`);
+      if (canPrompt(command)) {
+        if (await text(`Type exact vault name: ${vault.name}`, true) !== vault.name) throw new CliError('INVALID_INPUT', 'vault name confirmation mismatch');
+      } else {
+        if (!opts(command).confirmDelete) throw new CliError('INPUT_REQUIRED', '--confirm-delete <same vault UUID> is required in scripts; --yes/--force cannot authorize deletion');
+        if (opts(command).confirmDelete !== id) throw new CliError('INVALID_INPUT', '--confirm-delete must equal --vault UUID');
+      }
+      await withLocalOwner(dir, owner => owner.markVaultDeleted(localOwner, id));
+      result = {vaultId:id, status:'deleted', cleanup:'pending'};
+    });
+    const admin = flags(server.command('admin'), ...local, ...common);
+    for (const name of ['storage', 'retention-dry-run', 'gc-dry-run', 'scan', 'diagnostics']) {
+      flags(admin.command(name), ...local, ...common).action(async (_o, command) => { result = await localAdminReport(await serverRoot(command), name); });
     }
-    const admin = flags(program.command("admin").description("Aggregate administrator reports"), ...common);
-    for (const [name, path] of Object.entries({
-      storage: "storage",
-      "retention-dry-run": "retention/dry-run",
-      "gc-dry-run": "gc/dry-run",
-      scan: "integrity/scan",
-      diagnostics: "diagnostics",
-    })) {
-       flags(admin.command(name).description(`Administrator ${name} report`), "--server-dir <dir>", ...common)
-         .action(async (_options: CliOptions, command: Command) => {
-           if (opts(command).serverDir) { result = await localAdminReport(serverDirectory(command), name); return; }
-          const creds = credentials(directory(command));
-          result = await api(creds.baseUrl, `/v1/admin/${path}`, name === "scan" ? { method: "POST" } : {}, creds.token);
-        });
-    }
+    const client = flags(program.command('client').description('Local connections, vault bindings and sync'), ...clientFlags, ...common);
+    const connections = flags(client.command('connections'), ...clientFlags, ...common);
+    flags(connections.command('view'), ...clientFlags, ...common).action(async (_o, command) => {
+      result = {connections:servers(root(command)).map(connectionSummary), pending:pendingEnrollments(root(command)).map(p => ({alias:p.alias, url:p.url, deviceId:p.deviceId, deviceName:p.name, status:Date.now() >= p.expiresAtMs ? 'expired' : p.status ?? 'pending'}))};
+    });
+    flags(connections.command('add'), ...clientFlags, ...common, '--url <url>', '--alias <alias>', '--device-name <name>', '--password-file <file>', '--wait-ms <milliseconds>', '--fresh')
+      .action(async (_o, command) => {
+        const o = opts(command), dir = root(command), url = baseUrl(await need(command, 'url'));
+        const existing = servers(dir).find(s => s.baseUrl === url);
+        if (existing) { result = await enrollServer(dir, url, undefined, '', 0); return; }
+        const pending = pendingEnrollments(dir).find(p => p.url === url);
+        const alias = o.alias ?? pending?.alias ?? await need(command, 'alias');
+        const deviceName = o.deviceName ?? pending?.name ?? (canPrompt(command) ? await text('Device display name (--device-name)', true, hostname()) : hostname());
+        const wait = o.waitMs === undefined ? (canPrompt(command) ? Infinity : 0) : Number(o.waitMs);
+        if (o.waitMs !== undefined && (!Number.isSafeInteger(wait) || wait < 0)) throw new CliError('INVALID_INPUT', '--wait-ms must be a nonnegative integer');
+        const controller = new AbortController(), stop = () => controller.abort();
+        process.once('SIGINT', stop);
+        try {
+          const response = await enrollServer(dir, url, undefined, deviceName, wait, {alias, fresh:o.fresh, signal:controller.signal,
+            password:() => secret(command, 'NANOSYNC_PASSWORD', 'passwordFile', 'Owner password')});
+          result = response;
+          if (response.status === 'pending') { exitCode = 3; resultCode = 'PENDING_APPROVAL'; }
+          if (response.status === 'denied' || response.status === 'expired') { exitCode = 4; resultCode = response.status === 'denied' ? 'ENROLLMENT_DENIED' : 'ENROLLMENT_EXPIRED'; }
+        } finally { process.off('SIGINT', stop); }
+      });
+    flags(connections.command('remove'), ...clientFlags, ...common, '--server <alias-or-id>', '--force').action(async (_o, command) => {
+      const info = await selectServer(command), dir = root(command);
+      console.error('Local removal only: remote device access is NOT revoked. Files and remote data are preserved. --force discards pending synchronization state.');
+      removeServerConnection(dir, info.serverId, !!opts(command).force);
+      result = {serverId:info.serverId, removed:true, remotelyRevoked:false};
+    });
+    const bindings = flags(client.command('vaults'), ...clientFlags, ...common);
+    flags(bindings.command('view'), ...clientFlags, ...common).action(async (_o, command) => {
+      const list = servers(root(command)); result = {bindings:records(root(command)).map(c => ({...c, serverAlias:list.find(s => s.serverId === c.serverId)?.name ?? null}))};
+    });
+    flags(bindings.command('connect'), ...clientFlags, ...common, '--server <alias-or-id>', '--vault <name-or-uuid>', '--path <directory>', '--confirm-nonempty', '--recovery-file <file>')
+      .action(async (_o, command) => {
+        const o = opts(command), dir = root(command), info = await selectServer(command);
+        const list = (await api(info.baseUrl, '/v1/vaults', {}, info.token)).vaults as {vaultId:string;name:string}[];
+        const choice = o.vault ?? await choose('--vault', list.map(v => ({name:v.name, value:v.vaultId})), canPrompt(command));
+        const matches = list.filter(v => v.vaultId === choice || v.name === choice);
+        if (matches.length !== 1) throw new CliError('NOT_FOUND', 'vault not found or ambiguous');
+        const vault = matches[0]!, destination = o.path ?? process.cwd();
+        let confirmed = !!o.confirmNonempty;
+        if (readdirSync(destination).length && !confirmed) confirmed = !!o.yes || await acknowledge('Existing files will participate in synchronization. Continue?', canPrompt(command));
+        if (!confirmed && readdirSync(destination).length) throw new CliError('CANCELLED', 'connection cancelled');
+        const stored = key(dir, info.serverId, vault.vaultId);
+        if (!stored) await unlockVault(dir, info, vault.vaultId, await secret(command, 'NANOSYNC_RECOVERY_SECRET', 'recoveryFile', 'Vault recovery secret'));
+        else stored.fill(0);
+        result = connectRegisteredVault(dir, destination, info.serverId, vault.vaultId, info.deviceId, confirmed);
+        console.error('Connected; no files transferred. Next: nanosync client sync');
+      });
+    flags(bindings.command('disconnect'), ...clientFlags, ...common, '--path <directory>', '--force').action(async (_o, command) => {
+      const dir = root(command), binding = discoverConnection(dir, opts(command).path ?? process.cwd(), !!opts(command).force);
+      if (opts(command).force) console.error('Disconnect discards pending synchronization state. Local files and remote data are preserved.');
+      disconnectConnections(dir, [binding], !!opts(command).force); result = {connectionId:binding.connectionId, disconnected:true, filesPreserved:true};
+    });
+    flags(client.command('sync'), ...clientFlags, ...common, '--path <directory>', '--watch').action(async (_o, command) => {
+      const dir = root(command), binding = discoverConnection(dir, opts(command).path ?? process.cwd()), info = storedServer(dir, binding.serverId);
+      if (binding.deviceId !== info.deviceId) throw new CliError('CONFLICT', 'binding device differs from connection');
+      const master = key(dir, info.serverId, binding.vaultId);
+      if (!master) throw new CliError('INPUT_REQUIRED', 'vault key is missing; reconnect to unlock');
+      let runner: SyncRunner;
+      try { runner = withConnectionRegistry(dir, () => {
+        if (discoverConnection(dir, binding.root).connectionId !== binding.connectionId) throw new CliError('CONFLICT', 'binding changed');
+        storedServer(dir, binding.serverId);
+        return SyncRunner.start({clientDirectory:privateDirectory(join(privateDirectory(join(privateDirectory(dir), 'replicas')), binding.connectionId)),
+          syncDirectory:binding.root, vaultId:binding.vaultId, deviceId:binding.deviceId, masterKey:master, baseUrl:info.baseUrl, token:info.token});
+      }); }
+      finally { master.fill(0); }
+      try {
+        if (!opts(command).watch) result = await runner.syncOnce();
+        else {
+          const controller = new AbortController(), stop = () => controller.abort();
+          process.once('SIGINT', stop); process.once('SIGTERM', stop);
+          try { await runner.watch(controller.signal, head => console.error(JSON.stringify({event:'synced', head})), error => console.error(JSON.stringify({event:'sync-error', message:error instanceof Error ? error.message : 'sync failed'}))); }
+          finally { process.off('SIGINT', stop); process.off('SIGTERM', stop); }
+          result = {stopped:true};
+        }
+      } finally { await runner.stop(); }
+    });
     if (!args.length) { program.outputHelp(); return 0; }
-    await program.parseAsync(args, { from: "user" });
-    if (result !== undefined) output(result, seen.has("--json"));
-    return code;
+    await program.parseAsync(args, {from:'user'});
+    if (result !== undefined) console.log(opts(program).json || seen.has('--json') ? JSON.stringify({ok:true, code:resultCode, data:result}) : JSON.stringify(result, null, 2));
+    return exitCode;
   } catch (error) {
-    if (error instanceof CommanderError && error.exitCode === 0 &&
-      (error.code === "commander.helpDisplayed" || error.code === "commander.help")) return 0;
-    const message = error instanceof Error ? error.message : "command failed";
-    const state = error instanceof RemoteError && (error.status === 401 || error.status === 403) ? "auth_required" : "unknown";
-    const code = state === "auth_required" ? 3 : 2;
-    console.error(JSON.stringify({ error: message, state, exitCode: code }));
-    return code;
+    if (error instanceof CommanderError && error.exitCode === 0) return 0;
+    const interrupted = error instanceof Error && error.name === 'ExitPromptError';
+    const code = error instanceof CliError ? error.code : interrupted ? 'INTERRUPTED' : error instanceof RemoteError ? error.code : error instanceof CommanderError ? 'INVALID_INPUT' : 'OPERATION_FAILED';
+    const exitCode = error instanceof CliError ? error.exitCode : interrupted ? 130 : error instanceof RemoteError ? 5 : 2;
+    console.error(JSON.stringify({ok:false, code, message:error instanceof Error ? error.message : 'Command failed', exitCode}));
+    return exitCode;
   }
 }
 if (import.meta.main) process.exitCode = await main();

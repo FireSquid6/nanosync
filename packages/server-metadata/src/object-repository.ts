@@ -16,6 +16,7 @@ import {
 export type ObjectRepositoryErrorCode =
   | "CATALOG_CONFLICT"
   | "IDEMPOTENCY_KEY_REUSE"
+  | "VAULT_DELETED"
   | "VAULT_CONFLICT"
   | "SERVER_UNINITIALIZED"
   | "INVARIANT";
@@ -64,6 +65,7 @@ export class ObjectCatalogRepository {
   }
 
   requireVault(vaultId: VaultId): void {
+    if (this.database.get("SELECT 1 FROM vault_deletions WHERE vault_id=?", [vaultId])) throw new ObjectRepositoryError("VAULT_DELETED", "Vault is permanently deleted");
     const state = this.database.get<{ vault_id: string }>(
       "SELECT vault_id FROM server_state WHERE vault_id = ?",
       [vaultId],
@@ -237,6 +239,7 @@ export class ObjectCatalogRepository {
 }
 
 function requireVault(tx: MetadataTransaction, vaultId: VaultId): void {
+  if (tx.get("SELECT 1 FROM vault_deletions WHERE vault_id=?", [vaultId])) throw new ObjectRepositoryError("VAULT_DELETED", "Vault is permanently deleted");
   const state = tx.get<{ vault_id: string }>(
     "SELECT vault_id FROM server_state WHERE vault_id = ?",
     [vaultId],

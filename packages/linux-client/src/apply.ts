@@ -18,6 +18,7 @@ const fileFlags = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLO
 type Old = { entry: Entry; device: string; inode: string };
 type Plan = {
   version: 1;
+  phase?: "staging" | "ready";
   rootDevice: string;
   rootInode: string;
   manifest: ManifestV1;
@@ -265,7 +266,7 @@ function planApply(root: Root, local: ClientLocal, manifest: ManifestV1, sequenc
     if (e.kind === "file" && hydration === "downloaded" && (!prior || prior.hydration === "evicted" || prior.fingerprint !== e.sha256 ||
         root.at(prior.path) && !!(root.at(prior.path)!.mode & 0o100) !== e.executable))
       stages[e.id] = temp(plan, e.id, "new");
-    desired.push({ id: e.id, path, kind: e.kind, fingerprint: e.sha256 ?? null, hydration, revision: manifest.revisionId });
+    desired.push({ id: e.id, path, kind: e.kind, fingerprint: e.sha256 ?? null, executable: e.kind === "file" ? (e.executable ? 1 : 0) : null, hydration, revision: manifest.revisionId });
   }
   for (const entry of oldEntries) if (entry.path && ignore.ignores(entry.path, entry.kind === "directory")) desired.push(entry);
   const snapshot = scan(root, ignore);
@@ -281,10 +282,15 @@ function planApply(root: Root, local: ClientLocal, manifest: ManifestV1, sequenc
   return plan;
 }
 
+function newDirectories(plan: Plan) {
+  return plan.manifest.entries.filter(e => e.kind === "directory" && e.parentId !== null &&
+    plan.desired.some(d => d.id === e.id && d.revision === plan.manifest.revisionId) && !plan.old.some(o => o.entry.id === e.id));
+}
+
 function verifyBeforeMutation(root: Root, plan: Plan, ignore: IgnoreRules) {
   const allowedStages = new Set([
     ...Object.values(plan.stages),
-    ...Object.keys(plan.created).map(id => temp(plan, id, "new")),
+    ...newDirectories(plan).map(e => temp(plan, e.id, "new")),
   ]);
   const inventory = scan(root, ignore);
   for (const [path, stat] of inventory) {
@@ -368,12 +374,11 @@ export async function applyNewFiles(rootInput: string, local: ClientLocal, remot
     throw new Error("unaccepted revision");
   const plan = saved ? JSON.parse(saved) as Plan : null;
   if (plan && (plan.version !== 1 || plan.operationId !== pending[0]!.id ||
+      plan.phase !== undefined && plan.phase !== "staging" && plan.phase !== "ready" ||
       !Buffer.from(encodeManifest(plan.manifest)).equals(Buffer.from(encodeManifest(manifest))))) throw new Error("corrupt apply intent");
   const root = new Root(resolve(rootInput), plan ?? undefined);
   const ignore = new IgnoreRules(root.path);
   if (plan && plan.ignoreSignature !== ignore.signature) { root.close(); throw new Error(".nanosyncignore changed during pending apply; restore prior rules to recover"); }
-  let prepared = false;
-  let active: Plan | null = null;
   try {
     const authenticated = await remote.manifest(manifest.revisionId, master);
     if (!Buffer.from(encodeManifest(authenticated.manifest)).equals(Buffer.from(encodeManifest(manifest)))) throw new Error("manifest differs from authenticated revision");
@@ -385,36 +390,52 @@ export async function applyNewFiles(rootInput: string, local: ClientLocal, remot
       if (ids.length && (await remote.presence("chunk", ids)).size) throw new Error("eviction requires remotely durable chunks");
     }
     const work = plan ?? planApply(root, local, manifest, sequence, options.evictIds ?? new Set(), ignore);
-    active = work;
-    if (plan) verifyRecovery(root, plan, ignore);
+    if (plan) {
+      if (plan.phase === "staging") verifyBeforeMutation(root, plan, ignore);
+      else verifyRecovery(root, plan, ignore);
+    }
     if (plan && options.evictIds && [...options.evictIds].some(id => work.desired.find(e => e.id === id)?.hydration !== "evicted"))
       throw new Error("eviction policy differs from persisted intent");
+    if (!plan) {
+      work.phase = "staging";
+      local.prepareApply(work.operationId, manifest.revisionId, sequence, JSON.stringify(work));
+    }
+    // The durable staging intent is a scanner barrier, including on download failure.
     // All files are downloaded and fsynced before the first destructive mutation.
     await stage(root, work, remote, master, refs);
-    for (const entry of work.manifest.entries.filter(e => e.kind === "directory" && e.parentId !== null &&
-      work.desired.some(d => d.id === e.id && d.revision === manifest.revisionId) && !work.old.some(o => o.entry.id === e.id))) {
+    for (const entry of newDirectories(work)) {
       const name = temp(work, entry.id, "new"), target = manifestPaths(manifest);
       const path = [...target].find(([, e]) => e.id === entry.id)![0];
-      let st = root.at(name) ?? root.at(path);
-      if (!st && !plan) {
+      let st = root.at(name) ?? (work.phase !== "staging" ? root.at(path) : null);
+      if (!st && work.phase === "staging" && !work.created[entry.id]) {
         root.withParent(name, (location, check, fd) => {
           check(); if (statOrNull(location)) throw new Error("occupied staged directory");
           mkdirSync(location, { mode: 0o700 }); fsyncSync(fd); check();
         });
         st = root.at(name);
       }
-      if (!st || !st.isDirectory() || st.uid !== process.getuid!()) throw new Error("staged directory missing");
+      if (!st) throw new Error("staged directory missing");
+      safe(st, "directory");
       const identity = { device: String(st.dev), inode: String(st.ino) };
-      if (plan && (work.created[entry.id]?.device !== identity.device || work.created[entry.id]?.inode !== identity.inode))
+      const recorded = work.created[entry.id];
+      if (recorded && (recorded.device !== identity.device || recorded.inode !== identity.inode))
         throw new Error("staged directory identity conflict");
-      work.created[entry.id] = identity;
+      if (!recorded) {
+        // mkdir and the database checkpoint cannot be atomic; only adopt an empty private stage.
+        if (work.phase !== "staging" || (st.mode & 0o777) !== 0o700 ||
+            root.withParent(name, location => readdirSync(location).length)) throw new Error("staged directory conflict");
+        work.created[entry.id] = identity;
+        fsyncSync(root.fd);
+        local.updateApplyPlan(work.operationId, JSON.stringify(work));
+      }
     }
-    if (!plan) {
+    if (work.phase === "staging") {
       verifyBeforeMutation(root, work, ignore);
       if (new IgnoreRules(root.path).signature !== ignore.signature) throw new Error(".nanosyncignore changed during apply preparation");
-      fsyncSync(root.fd); local.prepareApply(work.operationId, manifest.revisionId, sequence, JSON.stringify(work));
+      fsyncSync(root.fd);
+      work.phase = "ready";
+      local.updateApplyPlan(work.operationId, JSON.stringify(work));
     }
-    prepared = true;
     local.transition("operations", work.operationId, "running");
     const old = work.old.filter(o => o.entry.path);
     const oldById = new Map(old.map(o => [o.entry.id, o]));
@@ -509,12 +530,6 @@ export async function applyNewFiles(rootInput: string, local: ClientLocal, remot
     local.finishApply(work.operationId, { revisionId: manifest.revisionId, sequence }, work.desired,
       [...identities, ...work.ignoredIdentities ?? []]);
   } finally {
-    // Before an intent exists, orphan stages are private and can be removed safely.
-    if (!prepared && !plan && active) for (const name of readdirSync(`/proc/self/fd/${root.fd}`)) if (name.startsWith(`.nanosync-${active.operationId}-`)) {
-      const st = root.at(name);
-      if (st?.isFile() && st.nlink === 1) unlinkSync(`/proc/self/fd/${root.fd}/${name}`);
-      else if (st?.isDirectory()) rmdirSync(`/proc/self/fd/${root.fd}/${name}`);
-    }
     root.close();
   }
 }

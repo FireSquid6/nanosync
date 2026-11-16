@@ -227,10 +227,34 @@ describe("LocalFilesystem", () => {
 
   test("orders nested and sibling keys by the complete lexical key", async () => {
     const { filesystem } = await create();
-    for (const key of ["a/x", "a-", "a/y"]) {
+    for (const key of ["a/x", "a-", "a/y", "a0", "a./x"]) {
       await filesystem.putIfAbsent(key, stream("hello"), helloChecksum);
     }
-    expect(await filesystem.list()).toEqual({ keys: ["a-", "a/x", "a/y"], cursor: null });
+    expect(await filesystem.list()).toEqual({ keys: ["a-", "a./x", "a/x", "a/y", "a0"], cursor: null });
+    let cursor: string | undefined;
+    const keys: string[] = [];
+    do {
+      const page = await filesystem.list("", { cursor, limit: 1 });
+      keys.push(...page.keys);
+      cursor = page.cursor ?? undefined;
+    } while (cursor !== undefined);
+    expect(keys).toEqual(["a-", "a./x", "a/x", "a/y", "a0"]);
+    expect(await filesystem.list("a", { cursor: "a0", limit: 1 })).toEqual({ keys: [], cursor: null });
+  });
+
+  test("paged traversal stops after lookahead and skips subtrees before the cursor", async () => {
+    const { root, filesystem } = await create();
+    for (const key of ["a/one", "b/one", "b/two", "c/one", "z/one"]) {
+      await filesystem.putIfAbsent(key, stream("hello"), helloChecksum);
+    }
+    // Unsafe entries prove those subtrees are not inspected, without timing assertions.
+    await symlink("missing", join(root, "z", "unsafe"));
+    expect(await filesystem.list("", { limit: 1 })).toEqual({ keys: ["a/one"], cursor: "a/one" });
+    await symlink("missing", join(root, "a", "unsafe"));
+    expect(await filesystem.list("", { cursor: "b/one", limit: 1 })).toEqual({ keys: ["b/two"], cursor: "b/two" });
+    await expect(filesystem.list("z")).rejects.toMatchObject({ code: "SYMLINK" });
+    await chmod(join(root, "b"), 0o755);
+    await expect(filesystem.list("", { cursor: "b/one", limit: 1 })).rejects.toMatchObject({ code: "UNSAFE_PATH" });
   });
 
   test("cleans up after an interrupted source stream", async () => {
@@ -349,4 +373,44 @@ describe("LocalFilesystem", () => {
     await link(join(hardLinkRoot, "object"), join(hardLinkRoot, "alias"));
     await expect(hardLinkFilesystem.existsBatch(["object"])).rejects.toMatchObject({ code: "UNSAFE_PATH" });
   });
+});
+
+
+test("opening another storage instance preserves an active staged upload", async () => {
+  const { root, filesystem } = await create();
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  const uploading = filesystem.putIfAbsent("chunks/active", new ReadableStream({
+    start(value) { controller = value; controller.enqueue(encoder.encode("hello")); },
+  }), helloChecksum);
+  try {
+    let staged = false;
+    for (let attempt = 0; attempt < 300; attempt++) {
+      const names = await readdir(join(root, ".nanosync-tmp")).catch(() => []);
+      for (const name of names) {
+        if ((await lstat(join(root, ".nanosync-tmp", name))).size === 5) staged = true;
+      }
+      if (staged) break;
+      await Bun.sleep(10);
+    }
+    expect(staged).toBe(true);
+    expect((await new LocalFilesystem(root).list()).keys).toEqual([]);
+    expect(await readdir(join(root, ".nanosync-tmp"))).toHaveLength(1);
+  } finally {
+    controller.close();
+  }
+  expect((await uploading).status).toBe("stored");
+  expect(await text((await filesystem.open("chunks/active")).stream)).toBe("hello");
+});
+
+test("restart reclaims legacy staging and an interrupted publication hard link", async () => {
+  const { root, filesystem } = await create();
+  await filesystem.putIfAbsent("chunks/published", stream("hello"), helloChecksum);
+  const staging = join(root, ".nanosync-tmp");
+  await writeFile(join(staging, "12345678-1234-4234-9234-123456789abc"), "abandoned", { mode: 0o600 });
+  await link(join(root, "chunks/published"), join(staging, "22345678-1234-4234-9234-123456789abc"));
+  const reopened = new LocalFilesystem(root);
+  expect((await reopened.list()).keys).toEqual(["chunks/published"]);
+  expect(await readdir(staging)).toEqual([]);
+  expect(await text((await reopened.open("chunks/published")).stream)).toBe("hello");
+  expect((await lstat(join(root, "chunks/published"))).nlink).toBe(1);
 });

@@ -144,13 +144,13 @@ The advance request digest is SHA-256 over JCS of `{expectedRevisionId,proposedR
 
 Normal publication rejects null `expectedRevisionId` as `invalidRevision/GENESIS_REQUIRES_BOOTSTRAP`. One-parent revisions must name the expected revision; sorted two-parent merges must include it. Every parent must already be stored in the vault, including a prepared stale proposal where applicable. Before transaction entry the server checks exact catalog metadata and non-failed integrity state, confirms storage existence in batches of at most 1,000, and confirms stored length. The transaction rechecks exact catalog metadata and integrity before inserting or accepting. A stale structurally valid proposal is retained with a null sequence.
 
-Storage itself cannot participate in the SQLite transaction. The object store is operator-exclusive, and no in-process GC exists in v1; future GC must coordinate with metadata transactions and recheck reachability before deletion. External object mutation is outside this contract. The server stores but cannot verify `referenceSetMac`; clients authenticate it. Server sequence and acceptance order are authoritative, while `createdAt` remains display metadata.
+Storage itself cannot participate in the SQLite transaction. The object store is operator-exclusive, and ordinary live-vault GC is offline-only; explicit owner deletion uses coordinated per-vault cleanup and tombstone admission checks. External object mutation is outside this contract. The server stores but cannot verify `referenceSetMac`; clients authenticate it. Server sequence and acceptance order are authoritative, while `createdAt` remains display metadata.
 
 ## Protocol errors
 
 General API failures use the strict JSON shape `{ protocolVersion: 1, code, message, retryAfterSeconds? }`; no other fields are allowed. `message` is safe public text of 1–512 UTF-8 bytes without control characters and must never contain secrets, SQL/filesystem details, stack traces, credentials, object plaintext, or internal exception text. `retryAfterSeconds`, when present, is a safe integer from 0 through 86,400.
 
-Stable v1 codes are `MALFORMED_REQUEST`, `UNSUPPORTED_PROTOCOL_VERSION`, `UNSUPPORTED_FORMAT_VERSION`, `UNAUTHORIZED`, `FORBIDDEN`, `NOT_FOUND`, `CONFLICT`, `IDEMPOTENCY_KEY_REUSE`, `BODY_LIMIT_EXCEEDED`, `OBJECT_LIMIT_EXCEEDED`, `REFERENCE_LIMIT_EXCEEDED`, `CHECKSUM_MISMATCH`, `LENGTH_MISMATCH`, `RATE_LIMITED`, `STALE_HEAD`, `MISSING_OBJECTS`, `INVALID_REVISION`, `INTERNAL`, and `UNAVAILABLE`. HTTP status is transport metadata and does not replace this code. Unknown codes or error-envelope fields are rejected by v1 clients. Detailed diagnostics belong only in access-controlled server logs with secret redaction.
+Stable v1 codes are `MALFORMED_REQUEST`, `UNSUPPORTED_PROTOCOL_VERSION`, `UNSUPPORTED_FORMAT_VERSION`, `UNAUTHORIZED`, `FORBIDDEN`, `NOT_FOUND`, `CONFLICT`, `IDEMPOTENCY_KEY_REUSE`, `BODY_LIMIT_EXCEEDED`, `OBJECT_LIMIT_EXCEEDED`, `REFERENCE_LIMIT_EXCEEDED`, `CHECKSUM_MISMATCH`, `LENGTH_MISMATCH`, `RATE_LIMITED`, `STALE_HEAD`, `MISSING_OBJECTS`, `INVALID_REVISION`, `VAULT_DELETED`, `INTERNAL`, and `UNAVAILABLE`. HTTP status is transport metadata and does not replace this code. Unknown codes or error-envelope fields are rejected by v1 clients. Detailed diagnostics belong only in access-controlled server logs with secret redaction.
 
 ## Version 1 object HTTP API
 
@@ -173,7 +173,18 @@ Bearer/password-session tokens are exactly 32 random bytes encoded as canonical 
 - `GET /v1/admin/devices` lists safe device metadata/state. `POST /v1/admin/devices/{deviceId}/revoke` requires exactly `{"protocolVersion":1}`. Self and last-active-administrator revocation are forbidden.
 - `GET /v1/recovery-wrap` returns `{"protocolVersion":1,"recoveryWrap":RecoveryWrapV1}` only to active approved credentials, with `Cache-Control: no-store`. No recovery-secret, plaintext-key, unwrapping, or key-validation endpoint exists.
 
-New vault lifecycle endpoints authenticate approved server-wide devices: `GET /v1/vaults` lists vault UUID/name/sequence, `POST /v1/vaults` accepts a unique name, new UUID, client-generated recovery wrap, encrypted empty-genesis manifest frame and matching revision, and `POST /v1/vaults/{vaultId}/rename` changes the case-insensitively unique display name without changing the UUID. Creation retries with the same UUID/name/genesis are idempotent. No remote deletion endpoint exists. Every approved device may create and access any vault, but a recovery secret or stored key is still necessary to decrypt it.
+Approved server-wide devices retain `GET /v1/vaults` (UUID/name/sequence) and per-vault
+recovery-wrap access. Device `POST /v1/vaults` and rename mutations are removed (404).
+Owner creation/rename/delete use local operations or `/admin/api`; see
+[sync-protocol.md](sync-protocol.md). Owner creation strictly validates
+`{vaultId,name,recoveryWrap,frame,genesisRevision}` using the existing encrypted
+frame/wrap/MAC formats and reserved owner author UUID
+`00000000-0000-4000-8000-000000000001`. Complete encrypted request replay is
+idempotent, including after rename; changed encrypted material conflicts. Deleted
+UUIDs are never reusable. HTTP 410 `VAULT_DELETED` is terminal for all vault access.
+Browser sessions have no persisted format; encrypted browser receipts contain no
+plaintext keys or secrets. Local encrypted provisioning receipts are not recovery
+secret retrieval facilities.
 
 Authentication JSON bodies are limited to 2 KiB (device action bodies to 128 bytes), require `application/json`, and use duplicate-key-aware parsing. Public output never includes verifier parameters, salts, hashes, credential digests, audit internals, passwords, pepper, or repository errors.
 

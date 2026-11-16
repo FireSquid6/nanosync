@@ -276,3 +276,48 @@ describe("presence and request errors", () => {
     expect(await body(sanitized)).toEqual({ protocolVersion: 1, code: "INTERNAL", message: "Request failed" });
   });
 });
+
+test('tombstone blocks requests while an upload writes late ciphertext and cleanup waits', async () => {
+  const {handle,filesystem,database} = await setup();
+  const { VaultRepository, MaintenanceRepository } = await import('@nanosync/server-metadata');
+  const { ServerMaintenance } = await import('../src/maintenance.ts');
+  let enter!: () => void, release!: () => void;
+  const entered = new Promise<void>(resolve => { enter=resolve; });
+  const gate = new Promise<void>(resolve => { release=resolve; });
+  const put = filesystem.putIfAbsent.bind(filesystem);
+  filesystem.putIfAbsent = async (...args) => { enter(); await gate; return put(...args); };
+  const upload = handle(putRequest(frame()));
+  await entered;
+  new VaultRepository(database).markDeleted(vaultId, {origin:'server-local',actorId:null}, 20);
+  const cleanup = new ServerMaintenance(new MaintenanceRepository(database), filesystem).cleanupDeleted();
+  const read = await handle(new Request(`http://local/v1/objects/chunk/${objectId}`));
+  expect(read.status).toBe(410); expect((await body(read)).code).toBe('VAULT_DELETED');
+  release();
+  const result = await upload;
+  expect(result.status).toBe(410); expect((await body(result)).code).toBe('VAULT_DELETED');
+  await cleanup;
+  expect((await filesystem.list()).keys).toEqual([]);
+  expect((await handle(putRequest(frame(),'retry'))).status).toBe(410);
+  database.close();
+});
+
+test('download missing-storage race after deletion returns terminal deletion', async () => {
+  const { handle, filesystem, database } = await setup();
+  await handle(putRequest(frame()));
+  let enter!: () => void, release!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const open = filesystem.open.bind(filesystem);
+  filesystem.open = async (...args) => { enter(); await gate; return open(...args); };
+  const downloading = handle(new Request(`http://local/v1/objects/chunk/${objectId}`));
+  await entered;
+  const { VaultRepository, MaintenanceRepository } = await import('@nanosync/server-metadata');
+  const { ServerMaintenance } = await import('../src/maintenance.ts');
+  new VaultRepository(database).markDeleted(vaultId, { origin: 'server-local', actorId: null }, 20);
+  await new ServerMaintenance(new MaintenanceRepository(database), filesystem).cleanupDeleted();
+  release();
+  const response = await downloading;
+  expect(response.status).toBe(410);
+  expect((await body(response)).code).toBe('VAULT_DELETED');
+  database.close();
+});

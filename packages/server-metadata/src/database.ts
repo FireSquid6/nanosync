@@ -510,7 +510,7 @@ function verifyIntegrity(database: Database): void {
       "audit_events_time",
       "device_identity_immutable",
       "device_transition_valid",
-      "device_last_admin",
+      ...(pragmaNumber(database, "user_version") < 6 ? ["device_last_admin"] : []),
       "password_session_digest_immutable",
       "audit_event_immutable",
       "enrollment_identity_immutable",
@@ -548,6 +548,11 @@ function verifyIntegrity(database: Database): void {
     if (["vault_name_unique", "device_name_unique", "vault_identity_immutable"].some(name => !present.includes(name)))
       throw new MetadataError("CORRUPT_SCHEMA", "Multi-vault schema is incomplete");
   }
+  if (pragmaNumber(database, "user_version") >= 6) {
+    const present = executeAll<{ name: string }>(database, "SELECT name FROM sqlite_schema WHERE type IN ('table','trigger')", []).map(row => row.name);
+    if (["vault_creations", "vault_deletions", "vault_creation_immutable", "deletion_identity_immutable", "deletion_terminal", "deletion_durable"].some(name => !present.includes(name))) throw new MetadataError("CORRUPT_SCHEMA", "Owner schema is incomplete");
+  }
+
 }
 
 function validateSidecars(filename: string): void {

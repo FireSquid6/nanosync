@@ -5,13 +5,14 @@
   "bin": { "nanosync": "./src/main.ts" },
   "scripts": { "typecheck": "tsc -p tsconfig.json --noEmit" },
   "dependencies": {
-    "@nanosync/protocol": "workspace:*",
-    "@nanosync/sync-core": "workspace:*",
+    "@inquirer/prompts": "^8.8.0",
     "@nanosync/client-local": "workspace:*",
     "@nanosync/linux-client": "workspace:*",
+    "@nanosync/protocol": "workspace:*",
     "@nanosync/server-core": "workspace:*",
     "@nanosync/server-metadata": "workspace:*",
     "@nanosync/server-object-storage": "workspace:*",
+    "@nanosync/sync-core": "workspace:*",
     "commander": "^14.0.2"
   }
 }

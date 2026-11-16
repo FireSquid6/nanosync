@@ -1,3 +1,4 @@
+import { VaultRepository } from "./vault-repository.ts";
 import type { ObjectCatalogRow, RevisionRow } from "./schema.ts";
 import { MAX_SQLITE_TIMESTAMP_MS } from "./schema.ts";
 import {
@@ -76,6 +77,21 @@ export interface RetentionReport {
 
 export class MaintenanceRepository {
   constructor(private readonly db: ServerMetadataDatabase) {}
+  deletedVaults() { return new VaultRepository(this.db).deletions(); }
+
+  finishDeletion(vaultId: string): void {
+    this.db.writeTransaction(tx => {
+      if (!tx.get("SELECT 1 FROM vault_deletions WHERE vault_id=?", [vaultId])) throw new Error("Vault is not deleted");
+      const legacy = this.legacyVault(vaultId);
+      tx.run("UPDATE server_state SET name=NULL,current_head_revision_id=NULL,current_sequence=0 WHERE vault_id=?", [vaultId]);
+      for (const table of ["revision_parents", "revision_objects", "revisions", "upload_sessions", "recovery_wraps", "object_catalog", "vault_creations"]) {
+        tx.run(`DELETE FROM ${table} WHERE vault_id=?`, [vaultId]);
+      }
+      for (const op of ["put-object-v1", "advance-head-v1"]) tx.run("DELETE FROM idempotency_records WHERE operation=?", [legacy ? op : `${op}.${vaultId}`]);
+      tx.run("UPDATE vault_deletions SET cleanup_state='complete' WHERE vault_id=? AND cleanup_state='pending'", [vaultId]);
+    });
+  }
+
   legacyVault(vaultId: string): boolean {
     return !!this.db.get("SELECT 1 FROM server_state WHERE vault_id=? AND singleton=1", [vaultId]);
   }

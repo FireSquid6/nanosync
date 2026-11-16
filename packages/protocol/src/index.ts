@@ -6,3 +6,4 @@ export * from "./protocol-errors.ts";
 export * from "./versions.ts";
 export * from "./bootstrap.ts";
 export * from "./auth.ts";
+export * from "./owner.ts";

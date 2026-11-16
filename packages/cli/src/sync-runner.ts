@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { ClientLocal } from "@nanosync/client-local";
 import { applyNewFiles, hydrateFile, LinuxScanner, LinuxWatcher, type ScanOptions, type ScanPlan } from "@nanosync/linux-client";
-import { decryptManifest, HttpRemote, IntegrityError, mergeManifests, verifyReferenceSetMac, type ManifestV1, type RemoteOptions } from "@nanosync/sync-core";
+import { decryptManifest, HttpRemote, IntegrityError, RemoteError, mergeManifests, verifyReferenceSetMac, type ManifestV1, type RemoteOptions } from "@nanosync/sync-core";
 import { parseDeviceId, parseVaultId, type RevisionEnvelope, type VisibleObjectReference } from "@nanosync/protocol";
 import { acquireSyncLock } from "./sync-lock.ts";
 import { privateDirectory } from "./security.ts";
@@ -9,6 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { resolve, sep } from "node:path";
 
 // Synchronization orchestration belongs to the CLI process; no background service or IPC is created.
+const MAX_ANCESTRY_NODES = 16_384;
 type Verified = { manifest: ManifestV1; revision: RevisionEnvelope; sequence: number | null };
 export interface SyncOptions {
   clientDirectory: string;
@@ -42,6 +43,8 @@ export class SyncRunner {
   private watcher?: LinuxWatcher;
   private active?: Promise<{ revisionId: string; sequence: number }>;
   private stopped = false;
+  private stopping?: Promise<void>;
+  private readonly cancellation = new AbortController();
 
   private constructor(options: SyncOptions, unlock: () => void) {
     this.unlock = unlock;
@@ -55,7 +58,7 @@ export class SyncRunner {
     try {
       this.scanner = new LinuxScanner(options.syncDirectory, this.local, options.scan);
       this.remote = new HttpRemote({ baseUrl: options.baseUrl, token: options.token, vaultId: this.vault,
-        fetch: options.fetch ?? fetch, journal: this.local });
+        fetch: options.fetch ?? fetch, journal: this.local, signal: this.cancellation.signal });
     } catch (error) {
       this.local.close();
       this.key.fill(0);
@@ -74,16 +77,18 @@ export class SyncRunner {
     catch (error) { unlock(); throw error; }
   }
 
-  async stop(): Promise<void> {
-    if (this.stopped) return;
-    this.stopped = true;
-    try {
-      this.watcher?.close();
-      await this.active?.catch(() => {});
-    } finally {
-      try { this.local.close(); }
-      finally { this.key.fill(0); this.unlock(); }
-    }
+  stop(): Promise<void> {
+    return this.stopping ??= (async () => {
+      this.stopped = true;
+      this.cancellation.abort();
+      try {
+        this.watcher?.close();
+        await this.active?.catch(() => {});
+      } finally {
+        try { this.local.close(); }
+        finally { this.key.fill(0); this.unlock(); }
+      }
+    })();
   }
 
   syncOnce(): Promise<{ revisionId: string; sequence: number }> {
@@ -115,29 +120,45 @@ export class SyncRunner {
 
   /** Foreground loop: watcher events are hints; periodic full passes catch missed notifications. */
   async watch(signal: AbortSignal, onSuccess: (head: { revisionId: string; sequence: number }) => void,
-    onError: (error: unknown) => void): Promise<void> {
-    let lastPoll = 0;
-    while (!signal.aborted && !this.stopped) {
-      const now = Date.now();
-      let shouldSync = now - lastPoll >= this.pollMs;
-      if (this.watcher) {
-        try { shouldSync = this.watcher.ready(now) || shouldSync; }
-        catch (error) { if (shouldSync) onError(error); }
-      }
-      if (shouldSync) {
-        lastPoll = Date.now();
-        try {
-          const head = await this.syncOnce();
-          if (!signal.aborted && !this.stopped) {
-            if (!this.watcher) { this.watcher = new LinuxWatcher(this.scanner); this.watcher.start(); }
-            onSuccess(head);
+    onError: (error: unknown) => void,
+    timing = { now: Date.now, wait: (signal: AbortSignal) => delay(250, undefined, { signal }) }): Promise<void> {
+    const abort = () => { void this.stop(); };
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+    try {
+      let lastPoll = -Infinity;
+      while (!signal.aborted && !this.stopped) {
+        const now = timing.now();
+        let shouldSync = now - lastPoll >= this.pollMs;
+        if (this.watcher) {
+          try { shouldSync = this.watcher.ready(now) || shouldSync; }
+          catch (error) { if (shouldSync) onError(error); }
+        }
+        if (shouldSync) {
+          lastPoll = timing.now();
+          try {
+            const head = await this.syncOnce();
+            if (!signal.aborted && !this.stopped) {
+              if (!this.watcher) { this.watcher = new LinuxWatcher(this.scanner); this.watcher.start(); }
+              onSuccess(head);
+            }
+          } catch (error) {
+            if (signal.aborted || this.stopped) break;
+            onError(error);
+            if (error instanceof RemoteError && error.code === "VAULT_DELETED") {
+              this.watcher?.close();
+              throw error;
+            }
           }
-        } catch (error) { onError(error); }
+        }
+        if (!signal.aborted && !this.stopped) {
+          try { await timing.wait(signal); }
+          catch (error) { if (!signal.aborted) throw error; }
+        }
       }
-      if (!signal.aborted && !this.stopped) {
-        try { await delay(250, undefined, { signal }); }
-        catch (error) { if (!signal.aborted) throw error; }
-      }
+    } finally {
+      signal.removeEventListener("abort", abort);
+      if (signal.aborted) await this.stop();
     }
   }
 
@@ -218,6 +239,7 @@ export class SyncRunner {
     }
     if (response.status !== "staleHead" || !response.currentRevisionId) throw new Error(`proposal not accepted: ${response.status}`);
     const local = await this.verified(request.proposedRevision.revisionId);
+    if (!this.local.reconciliation()) this.local.beginReconciliation(this.local.head("applied").revisionId!, request.proposedRevision.revisionId);
     this.local.discardStaleProposal(request.proposedRevision.revisionId);
     return { stale: await this.verified(response.currentRevisionId), local };
   }
@@ -242,6 +264,7 @@ export class SyncRunner {
     }
     if (result.status !== "staleHead" || !result.currentRevisionId) throw new Error(`publication failed: ${result.status}`);
     const local = await this.verified(plan.manifest.revisionId);
+    this.local.beginReconciliation(previous.manifest.revisionId, plan.manifest.revisionId);
     this.local.discardStaleProposal(plan.manifest.revisionId);
     return { stale: await this.verified(result.currentRevisionId), local };
   }
@@ -281,7 +304,6 @@ export class SyncRunner {
     // A frequently edited vault can accumulate far more than 64 revisions
     // while a device is offline. Bound hostile graph traversal without making
     // ordinary long-running histories unsynchronizable.
-    const maxAncestryNodes = 16_384;
     if (base.sequence === null || head.sequence === null || head.sequence <= base.sequence)
       throw new Error("remote head does not advance applied sequence");
     const seen = new Set<string>();
@@ -292,7 +314,7 @@ export class SyncRunner {
       }
       if (acceptedOnly && node.sequence === null) return null;
       if (seen.has(node.manifest.revisionId)) return null;
-      if (seen.size >= maxAncestryNodes) throw new Error("remote ancestry traversal limit exceeded");
+      if (seen.size >= MAX_ANCESTRY_NODES) throw new Error("remote ancestry traversal limit exceeded");
       seen.add(node.manifest.revisionId);
       for (const id of node.manifest.parents) {
         const parent = await this.verified(id);
@@ -318,7 +340,7 @@ export class SyncRunner {
 
   private async reconcile(base: Verified, local: Verified, current: Verified): Promise<Verified> {
     let concurrentStales = 0, steps = 0;
-    while (steps++ < 64) {
+    while (steps++ < MAX_ANCESTRY_NODES) {
       const path = await this.remotePath(base, current, true);
       const child = path[0]!;
       if (!local.manifest.parents.includes(base.manifest.revisionId) || !child.manifest.parents.includes(base.manifest.revisionId))
@@ -340,6 +362,8 @@ export class SyncRunner {
 
   private async run(): Promise<void> {
     await this.remote.capabilities();
+    // Check availability before replaying journals or applying local filesystem work.
+    await this.remote.head();
     await this.recoverHydration();
     // A partially applied filesystem is never scanned or overwritten.
     for (const pending of this.local.pendingApplies()) {
@@ -351,6 +375,29 @@ export class SyncRunner {
     const applied = this.local.head("applied");
     const base = applied.revisionId ? await this.verified(applied.revisionId) : null;
     if (base && base.sequence !== applied.sequence) throw new Error("applied sequence mismatch");
+    const reconciliation = this.local.reconciliation();
+    if (reconciliation) {
+      if (proposed && !stale && this.local.proposal()?.state === "accepted" && applied.revisionId === proposed.manifest.revisionId) {
+        this.local.finishReconciliation();
+      } else {
+        if (applied.revisionId !== reconciliation.baseRevision) throw new Error("reconciliation base changed");
+        const original = await this.verified(reconciliation.localRevision);
+        const originalBase = await this.verified(reconciliation.baseRevision);
+        const root = original.manifest.entries.find(entry => entry.parentId === null)!;
+        const committed = this.local.entry(root.id)?.revision === original.manifest.revisionId;
+        const scan = await this.scanner.plan(committed ? original.manifest : originalBase.manifest,
+          committed ? randomUUID() : original.manifest.revisionId, this.device, this.key, original.manifest);
+        if (!sameTree(scan.manifest, original.manifest)) throw new Error("local edits changed after frozen proposal");
+        if (!committed) scan.commit();
+        if (!proposed || stale) {
+          const head = stale ?? await this.verified((await this.remote.head()).revisionId!);
+          proposed = await this.reconcile(originalBase, original, head);
+        }
+        await applyNewFiles(this.scanner.root, this.local, this.remote, proposed.manifest, proposed.sequence!, this.key);
+        this.local.finishReconciliation();
+      }
+      return this.run();
+    }
     const restore = this.local.restoreProposal();
     if (restore && proposed && !stale) {
       if (base?.manifest.revisionId !== restore.baseRevision && applied.revisionId !== restore.revision) throw new Error("restore base changed during recovery");
@@ -383,15 +430,6 @@ export class SyncRunner {
         this.local.clearProposal();
       }
       proposed = null;
-    }
-    if (stale && proposed) {
-      if (!base) throw new Error("cannot merge without applied base");
-      const scan = await this.scanner.plan(base.manifest, proposed.manifest.revisionId, this.device, this.key, proposed.manifest);
-      if (!sameTree(scan.manifest, proposed.manifest)) throw new Error("local edits changed after frozen proposal");
-      scan.commit();
-      proposed = await this.reconcile(base, proposed, stale);
-      await applyNewFiles(this.scanner.root, this.local, this.remote, proposed.manifest, proposed.sequence!, this.key);
-      this.local.clearProposal();
     }
     const head = await this.remote.head();
     this.local.recordHead("observed", head);
@@ -434,13 +472,10 @@ export class SyncRunner {
       }
       return;
     }
-    let next = await this.publish(scan, prior);
+    const next = await this.publish(scan, prior);
     if (!next.stale && next.local) { await this.finishLocal(scan, next.local); return; }
-    scan.commit();
     if (!next.stale || !next.local) throw new Error("missing stale merge inputs");
-    const resolved = await this.reconcile(prior, next.local, next.stale);
-    await applyNewFiles(this.scanner.root, this.local, this.remote, resolved.manifest, resolved.sequence!, this.key);
-    this.local.clearProposal();
+    return this.run();
   }
 
 }

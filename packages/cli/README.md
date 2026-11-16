@@ -1,44 +1,74 @@
-# `@nanosync/cli` — Bun server, account and foreground sync commands
+# `@nanosync/cli` — explicit server and client commands
 
-This package provides server initialization/runtime, server-wide device enrollment, independent encrypted vaults, administration, and foreground Linux synchronization. `sync` and `sync --watch` coordinate `@nanosync/sync-core`, `@nanosync/client-local`, and `@nanosync/linux-client` inside the CLI process. There is no separate service, local IPC, or automatic startup setup.
-
-Install dependencies with `bun install` at the repository root. Run `bun packages/cli/src/main.ts --help` or link the `nanosync` executable. Commands emit JSON. Successful commands exit 0; pending enrollment and authorization failures exit 3; other command errors exit 2 and report structured `{error,state,exitCode}` on stderr.
-
-Typical setup (commands prompt on `/dev/tty` for passwords and recovery secrets):
+Install workspace dependencies with `bun install`. Run `bun packages/cli/src/main.ts --help`.
+This is a breaking command/state redesign: no legacy aliases, bootstrap command, credential migration, `--env`, `--sync-dir` or `--continuous`.
 
 ```sh
 nanosync server init --server-dir "$HOME/nanosync-server"
-nanosync server run --server-dir "$HOME/nanosync-server"
-# In another terminal:
-nanosync enroll --url http://127.0.0.1:7337 --name desktop
-# On the server, after the enrollment request appears:
-nanosync approve desktop --server-dir "$HOME/nanosync-server"
-# Retry enroll if the bounded wait expired; it resumes the pending request.
-nanosync vault create --name documents
-nanosync setup --path "$HOME/Sync" --vault documents
-nanosync sync --path "$HOME/Sync"
-nanosync sync --watch --path "$HOME/Sync" # optional foreground watcher
+# Provision locally while the runtime is stopped; save the recovery secret.
+nanosync server vaults create --server-dir "$HOME/nanosync-server" --name documents
+nanosync server run --server-dir "$HOME/nanosync-server" --web-ui
+# In another terminal/on the client:
+nanosync client connections add --url https://sync.example.com --alias home
+# On the server, compare the verification code and use the exact printed UUID:
+nanosync server devices approve --device-id UUID
+# Deliver the creation recovery secret offline to the client:
+mkdir -p "$HOME/Sync"
+nanosync client vaults connect --server home --vault documents --path "$HOME/Sync"
+nanosync client sync --path "$HOME/Sync"
+nanosync client sync --watch --path "$HOME/Sync"
 ```
 
-The default global private state is `~/.nanosync/` (override with `--client-dir`). `setup` creates a secret-free `.nanosync` marker in the selected directory and a private connection record and replica journal under the global state. `sync` finds the nearest marker from the current directory or `--path`; each connection has its own journal and lock, even for two directories connected to the same vault. A copied marker cannot reuse the original connection: use `setup --repair copy --confirm-nonempty --path NEW_ROOT` to create an independent replica, or `setup --repair move --path NEW_ROOT` after the original root no longer exists to preserve its journal. Nested/overlapping sync roots are rejected. Setup does not transfer files; for a nonempty directory, review its contents and pass `--confirm-nonempty`. The first sync merges existing local content with authenticated remote history. `vault list` and `vault rename VAULT --name NEW_NAME` manage names; connections remain bound to immutable vault UUIDs. Remote deletion is unavailable.
+## Commands and selection
 
-## Secrets, backup, and network boundary
+- `server init`, `server run`: owner password initialization and foreground runtime. Run supports `--host`, `--port`, `--acknowledge-exposure`, `--web-ui`, `--external-origin`, and `--trusted-proxy` (exact peer IP).
+- `server devices view|approve|deny|revoke`: local owner operations. Mutations use `--device-id UUID`, never display names. Revocation requires ordinary confirmation or `--yes`; it prevents access, not erasure of retained data/keys.
+- `server vaults view|create|rename|delete`: creation uses `--name` and optional protected `--recovery-output FILE`. Rename uses `--vault UUID --name NAME`. Delete requires exact name entry interactively, or `--vault UUID --confirm-delete SAME_UUID --non-interactive` in scripts. Neither `--yes` nor `--force` substitutes.
+- `server admin storage|retention-dry-run|gc-dry-run|scan|diagnostics`: local aggregate reports/maintenance, requiring the runtime to be stopped because report setup initializes/recovers object storage. GC remains dry-run; scan processes a bounded batch.
+- `client connections add|remove|view`: add uses `--url`, `--alias`, `--device-name`, `--wait-ms`, `--fresh`, `--password-file`. Alias is unique local selection vocabulary, independent of the owner-visible device name (hostname offered by default). Remove uses `--server ALIAS_OR_ID` and optional `--force`; it never remotely revokes. View omits credentials.
+- `client vaults connect|disconnect|view`: connect uses `--server ALIAS_OR_ID`, `--vault NAME_OR_UUID`, `--path DIRECTORY`, `--confirm-nonempty`, `--recovery-file`. Interactive server/vault choices use maintained selection prompts. Path defaults to CWD. Recovery is requested only when the key is absent. Binding transfers no files. Multiple independent nonoverlapping directory replicas are allowed. Disconnect uses `--path` (CWD default) and optional `--force`, preserving files and remote data.
+- `client sync`: nearest binding at CWD or an ancestor; explicit `--path` and foreground `--watch`. Deleted vaults return `VAULT_DELETED`, stop syncing, and preserve files and cached keys. Disconnect the obsolete binding; reconnect to a separately provisioned vault deliberately.
 
-`vault create` generates a different master key and recovery secret for each vault. It displays the secret on a terminal and requires exact confirmation before remote creation. Store it offline. An interrupted creation leaves an owner-only `vault-creation.json` checkpoint containing the **plaintext vault master key and recovery secret**; retry the same server and vault name to finish, then the checkpoint is removed. Protect the global state, its keys, and backups accordingly. For unattended creation supply an owner-only, previously nonexistent `--recovery-output FILE` outside sync roots; its contents are the deliberate recovery-secret delivery. Keep it offline. A lost key can be recovered during `setup` with the vault's secret; device approval by itself never distributes keys.
+All server commands require `--server-dir DIRECTORY` or prompt for it; **no implicit server directory**. Every command accepts `--json --non-interactive --yes`. Non-terminal execution and `--non-interactive` never prompt. All selections have non-secret flags. `--yes` is only an ordinary confirmation, never permission to abandon unsynced work or bypass locks. Client state defaults to `~/.nanosync` (`--client-dir DIRECTORY`). Private state directories must be owned real directories with mode 0700.
 
-For automation, use `server init --env` with `NANOSYNC_PASSWORD`, and `enroll --env` with `NANOSYNC_SERVER`, `NANOSYNC_PASSWORD`, and `NANOSYNC_DEVICE_NAME` (a pending enrollment resumes without requiring the password). `setup --env` requires `--server`, `--vault`, `--path` when selection is ambiguous; supply `NANOSYNC_RECOVERY_SECRET` only when the local vault key is missing. Use `--wait-ms 0` to avoid waiting for approval and retry enrollment later. Use `--recovery-output` for automated vault creation; never pass secrets in command-line arguments. Back up metadata and immutable objects together while stopped, not by copying a live SQLite database; see the operations guide. The pepper invalidates sessions if lost.
+Removal refuses attached bindings unless `--force` is explicit. Disconnect checks pending journals and a full, no-follow filesystem inventory/content hash against the last applied state, including edits not yet scanned by sync. Unsynced work requires explicit `--force`; synchronized plaintext can be disconnected without force. Forced operations discard pending sync state and preserve local files. All affected replica locks are acquired in UUID order before mutation. A contended lock leaves every binding intact. A process-identity registry gate serializes bind/repair/disconnect/server removal and sync lock handoff, preventing new bindings from racing credential removal. Force/yes never bypass either gate or a live replica lock. If a bound directory is absent, `client vaults disconnect --path ORIGINAL_PATH --force` or forced server removal can discard its saved binding. Existing replacement directories or symlinks still require a matching valid marker and are not silently accepted.
 
-The server defaults to `127.0.0.1:7337`. Non-loopback exposure requires `--host HOST --acknowledge-exposure` and an external TLS/VPN boundary; the server has no built-in transport encryption. Use HTTPS via a trusted proxy for all routes or a VPN. Never expose bare HTTP to an untrusted network. The integrity scanner runs on server startup; offline GC is not run by the server.
+Sync requests have a 30-second deadline covering the response body. Stopping the runner or interrupting watch mode cancels in-flight requests before releasing the replica lock. Offline reconciliation uses the same 16,384-node bound as history traversal and durably records the original local branch before changing inventory; interrupted merges resume without scanning intermediate merge content as local edits.
 
-## Devices and administration
+## Enrollment, interruption and retry
 
-Enroll each device once per server with a unique name. The pending request is persisted for retries. On the server, use `nanosync approve NAME --server-dir DIR` (or `nanosync devices --server-dir DIR` to list); a locally approved device has access to all vaults, but needs each vault's recovery secret or previously stored key to decrypt it. A device name can be reused after revocation. Restrict backups of registration tokens and keys. Legacy `bootstrap`, `client.json`, `--sync-dir`, and `--continuous` remain for compatibility with existing tests and deployments, but new setups should use the separate commands above.
+Pending requests are independently persisted in protected files keyed by canonical server URL **before submission**. Retry the same URL/alias to resume without a password or identity change, including after Ctrl-C (exit 130) or lost responses. Approved credentials are fsynced before pending state is removed. Existing connections return safe summaries rather than re-enrolling. Successful enrollment suggests `client vaults connect`, never automatic binding/sync.
 
-Admin commands (`admin storage`, `retention-dry-run`, `gc-dry-run`, `scan`, `diagnostics`) use an approved administrator client. Reports are aggregate-only; scans check at most 100 objects per invocation. GC commands are dry-run only; no live GC command exists. See [Clients and Operations](../../docs/clients-and-operations.md) for maintenance and backup procedures.
+The CLI always prints `nanosync server devices approve --device-id UUID` and the request verification code to stderr. The approval command intentionally omits the unknown server directory, so it prompts on the server. The code is public comparison material, not authorization. An admin URL appears only when capability discovery advertises an enabled UI **and** a trustworthy configured URL; otherwise no link is invented.
 
-## Foreground sync
+Interactive enrollment waits until terminal status, interruption or 24-hour request expiry. Scripts default to submit-and-exit; `--wait-ms 0` explicitly does this, and a finite nonnegative integer waits that many milliseconds. Transient network failures, HTTP 429 and 5xx retry with 250ms exponential backoff capped at 5 seconds within the wait window. Temporary outages retain pending state. Denied/expired outcomes are retained and explained; only explicit `--fresh` replaces a terminal request. `connections view` reports the last observed terminal state (or local expiry); it does not contact servers to refresh approval status.
 
-The one-shot command recovers interrupted work, reconciles encrypted revisions (including a pre-existing nonempty directory), and exits after a successful authenticated pass. The watcher first synchronizes, then debounces activity and periodically rescans/retries failures. SIGINT/SIGTERM stops it after any in-flight pass. Concurrent runs of the same connection are refused; independent connections may sync concurrently. There is no local IPC or CLI status/history/restore/conflict/eviction command.
+Every enrollment HTTP exchange (including initial password login and `--fresh` status checks) has a 10-second timeout and is cancellable with Ctrl-C. Finite positive waits also bound in-flight requests by the remaining wait budget; persisted request expiry is always an upper bound. `--wait-ms 0` performs bounded discovery/submission without polling or retrying. Timeouts after pending state exists retain that identity and return pending/expired as appropriate. A login timeout before any identity is persisted returns `REQUEST_TIMEOUT` (exit 5); retry requires the password again. Initial login interruption returns `INTERRUPTED` (130) immediately, without waiting for the password exchange to finish. Retry backoff and polling sleeps are also interruptible. HTML/empty HTTP 429/5xx proxy responses follow the same retry policy as JSON errors.
+
+## Stable machine contract (version 1)
+
+With `--json`, stdout contains one result document: `{ "ok": true, "code": "OK", "data": ... }`. Pending uses code `PENDING_APPROVAL`; terminal enrollment uses `ENROLLMENT_DENIED` or `ENROLLMENT_EXPIRED`. These are successful workflow observations, not thrown errors. Progress, approval instructions, warnings and errors use stderr. Watch progress also uses stderr, leaving a single final stdout result.
+
+Errors are `{ "ok": false, "code": "CODE", "message": "actionable explanation", "exitCode": N }` on stderr, with no stdout result. Parse codes, not human messages. Local codes include `INPUT_REQUIRED`, `INVALID_INPUT`, `CONFLICT`, `NOT_FOUND`, `CANCELLED`, `CONNECTION_IN_USE`, `OPERATION_FAILED`, `INTERRUPTED`; server protocol codes (including `VAULT_DELETED`, `UNAUTHORIZED`, `FORBIDDEN`) pass through. Help remains text even with `--json`.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Completed (including safe existing connection summary) / help |
+| 2 | Invalid/missing input or local operation failure |
+| 3 | Enrollment pending, resumable |
+| 4 | Enrollment denied/expired; explicit fresh required |
+| 5 | Remote protocol/authorization/deleted-vault error |
+| 130 | Interrupted enrollment/prompt; pending identity retained |
+
+Connection summaries contain only server ID, alias, canonical URL, device ID, status. Pending summaries additionally contain device display name. Tokens, passwords, master keys and recovery secrets never appear in ordinary results.
+
+## Secrets and operational boundaries
+
+Owner password: hidden prompt, `NANOSYNC_PASSWORD`, or `--password-file FILE` on init/add. Recovery input: hidden prompt, `NANOSYNC_RECOVERY_SECRET`, or `--recovery-file FILE` on connect. Protected input files must be owned regular mode-0600 files; secret values are never accepted as arguments. `@inquirer/prompts` supplies input/password/selection/confirmation behavior; no readline/stty password handling.
+
+Server-local creation transiently handles plaintext key material (an intentional owner-machine exception). It saves encrypted-only receipts before delivery and publishes only after exact interactive acknowledgement or verified protected file delivery. Scripted receipts live in `owner-creations/`, keyed by the absolute recovery-output path; retain the same name and path when retrying, including after lost stdout. The receipt verifies the protected file against a secret digest, so a crash after file delivery resumes the original encrypted request without redelivery or duplicate creation. Missing/modified/insecure delivered files fail visibly; restore the original protected output before retrying. An interruption before file delivery can safely regenerate unpublished material. Keep receipts for idempotence; a new output path explicitly starts a new creation. Interactive `owner-creation.json` retains the last acknowledged/completed encrypted request: retrying its name returns the same vault, while a different name can start after completion. Initialization, local creation (including receipt replay/recovery delivery), and the serving runtime share a process-identity `.sync-owner` lock in the server root, never bypassed by yes/force. The runtime holds it until shutdown completes, so a second runtime or local creation fails actionably before touching receipts, recovery output, or ciphertext. Stop the runtime and retry the same creation name/output; existing recovery delivery and receipts are preserved. Startup/provisioning failures and shutdown release ownership; definitively dead process owners are recovered automatically. Metadata-only device view/approve/deny/revoke and vault view/rename/delete remain available while serving; use the browser for live vault creation. Receipts contain no plaintext recovery secrets or vault keys. Do not persist plaintext vault master keys on the server. Recovery is not retrievable later. Keep recovery output and all private state outside sync roots; back up secrets offline.
+
+Deletion immediately tombstones a vault; cleanup may still be pending. It destroys history, encrypted objects and wraps, regardless of offline clients' unsynced work. Recovery secrets cannot replace a server backup. Server backup must capture metadata and objects consistently while stopped. Runtime defaults to loopback; remote access needs external TLS and explicit exposure acknowledgement. Browser administration is opt-in with `server run --web-ui`; configure `--external-origin` to advertise a trustworthy link. Never run multiple serving runtimes against one server directory; stop the runtime for offline storage maintenance/provisioning. See [operations](../../docs/clients-and-operations.md) and [security](../../docs/security.md).
 
 ### Local ignore file
 
@@ -57,3 +87,28 @@ This is a deliberately limited gitignore-style format, **not** `.gitignore` inte
 Each device can use different rules. Ignored paths are opaque: local changes there are never published as deletions, and remote additions, changes and deletions under those paths never touch local files. A previously tracked ignored entry remains in the shared manifest unchanged when this device publishes other changes; another device without that rule can still update or delete it. Local state records previously ignored identities durably. A remote rename of an ignored tracked entry to an included path fails before apply rather than moving or overwriting the local copy. Removing an ignore rule does **not** automatically reconcile absent, changed or remote-only paths: sync fails visibly rather than guessing whether to upload a local edit or publish a deletion. Move or back up the local copy and reconcile deliberately before unignoring; restore the ignore rule to keep syncing unrelated paths in the meantime. Avoid excluding a parent directory that contains files you still wish to sync; there is no negation to re-include children.
 
 Continuous sync reloads this root file on watcher events and periodic full scans. Changing it during a scan or an in-progress apply aborts; for a persisted interrupted apply, restore the original rules until recovery completes. Do not edit ignore rules concurrently with sync. Ignoring existing remote data does not delete it from the server or reclaim storage. Included links, hardlinks and special files still fail safely.
+
+
+### Unattended provisioning and deletion
+
+```sh
+# Private 0700 parent; secret is read from this owned 0600 file, never argv.
+nanosync server init --server-dir /private/server --password-file /private/password --non-interactive --json
+nanosync server vaults create --server-dir /private/server --name docs \
+  --recovery-output /private/docs-recovery --non-interactive --json
+# Destruction: exact UUID confirmation is mandatory even with --yes/--force.
+nanosync server vaults delete --server-dir /private/server --vault UUID \
+  --confirm-delete UUID --non-interactive --json
+```
+
+Use `--wait-ms 0 --json --non-interactive` on connections add to submit and exit 3;
+resume the same URL/alias after approval to save credentials and exit 0. Do not treat
+pending as success or automatically pass `--fresh` on a denied/expired request.
+
+The embedded browser has separate password sessions, logout and expiry. Browser
+creation requires saving the displayed secret, acknowledging it, saving an encrypted
+receipt and reentering the secret to publish. Neither normal views nor APIs retrieve
+existing secrets. A compromised server can serve malicious JavaScript; browser-side
+encryption does not resist this. See [proxy setup](../../docs/clients-and-operations.md#reverse-proxy-example).
+For this breaking release, preserve old state and plaintext backups, use fresh
+server/client directories, and reconnect deliberately; there is no migration path.

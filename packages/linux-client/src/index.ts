@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   constants, closeSync, fstatSync, lstatSync, openSync, readSync, readdirSync,
-  realpathSync, watch, type FSWatcher, type Stats,
+  realpathSync, watch, type FSWatcher, type BigIntStats,
 } from "node:fs";
 import { resolve } from "node:path";
 import { CHUNK_SIZE, parseDeviceId, parseRevisionId, parseVaultId } from "@nanosync/protocol";
@@ -16,6 +16,11 @@ export { applyNewFiles, applyNewFiles as applyManifest } from "./apply.ts";
 export { hydrateFile } from "./hydration.ts";
 
 const FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+type Stats = BigIntStats;
+const lstat = (path: string) => lstatSync(path, { bigint: true });
+const fstat = (fd: number) => fstatSync(fd, { bigint: true });
+type Content = { size: number; sha256: string; chunks: { objectId: string; length: number }[] };
+type CachedContent = { stamp: string; context: string; content: Content };
 type Identity = { entryId: string; device: string; inode: string };
 type Found = { path: string; kind: "file" | "directory"; stat: Stats; identity: string };
 export interface ScanOptions { debounceMs?: number; stabilityMs?: number; maxBatch?: number; maxConcurrent?: number }
@@ -23,7 +28,7 @@ export interface ScanPlan {
   manifest: ManifestV1;
   /** A factory, not a one-shot iterator. Open and verify files again in manifest order for Step 9. */
   chunks(knownObjectIds?: ReadonlySet<string>): AsyncGenerator<EncryptedObject>;
-  /** Commit only after the caller has accepted/applied the revision, never on a failed upload. */
+  /** Commit after acceptance, or after durably journaling the uploaded local branch for reconciliation. */
   commit(): void;
   suppressed: string[];
 }
@@ -34,23 +39,23 @@ function validName(name: string): void {
       !Array.from(name).every(c => c.codePointAt(0)! <= 0xffff ? !/[\ud800-\udfff]/u.test(c) : true)) throw new Error(`unsafe filename: ${name}`);
 }
 function safeStat(stat: Stats, kind: "file" | "directory") {
-  if (stat.uid !== process.getuid!() || stat.isSymbolicLink() || stat.nlink !== (kind === "file" ? 1 : stat.nlink) ||
+  if (stat.uid !== BigInt(process.getuid!()) || stat.isSymbolicLink() || stat.nlink !== (kind === "file" ? 1n : stat.nlink) ||
       !(kind === "file" ? stat.isFile() : stat.isDirectory()) || (kind === "file" && stat.size > MAX_FILE_BYTES)) throw new Error("unsafe filesystem entry");
 }
 function identity(stat: Stats) { return `${stat.dev}:${stat.ino}`; }
-function stamp(stat: Stats) { return `${identity(stat)}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.mode}`; }
+function stamp(stat: Stats) { return `${identity(stat)}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}:${stat.mode}`; }
 function same(a: Stats, b: Stats) { return stamp(a) === stamp(b); }
 function checkedRoot(root: string): string {
-  const path = resolve(root), stat = lstatSync(path);
+  const path = resolve(root), stat = lstat(path);
   safeStat(stat, "directory");
   if (realpathSync(path) !== path) throw new Error("root must not traverse a symlink");
   return path;
 }
 function openChecked(path: string, kind: "file" | "directory", expected?: Stats): number {
-  const before = lstatSync(path); safeStat(before, kind);
+  const before = lstat(path); safeStat(before, kind);
   if (expected && !same(before, expected)) throw new Error("file changed during scan");
   const fd = openSync(path, FLAGS | (kind === "directory" ? constants.O_DIRECTORY : 0));
-  try { const current = fstatSync(fd); safeStat(current, kind); if (!same(before, current)) throw new Error("file changed during scan"); return fd; }
+  try { const current = fstat(fd); safeStat(current, kind); if (!same(before, current)) throw new Error("file changed during scan"); return fd; }
   catch (error) { closeSync(fd); throw error; }
 }
 
@@ -72,12 +77,12 @@ function inventory(root: string, ignore: IgnoreRules): Found[] {
       ) throw new Error("ambiguous or overlong path");
       folded.add(name.toLowerCase());
       const target = `/proc/self/fd/${fd}/${name}`;
-      const st = lstatSync(target);
+      const st = lstat(target);
       if (st.isDirectory() && ignore.ignores(relative, true)) continue;
       if (st.isDirectory()) {
         const child = openChecked(target, "directory", st);
         try {
-          descend(child, relative, fstatSync(child));
+          descend(child, relative, fstat(child));
         } finally {
           closeSync(child);
         }
@@ -89,7 +94,7 @@ function inventory(root: string, ignore: IgnoreRules): Found[] {
     active.delete(key);
   }
   const fd = openChecked(root, "directory");
-  try { descend(fd, "", fstatSync(fd)); if (!same(fstatSync(fd), lstatSync(root))) throw new Error("root replaced during scan"); }
+  try { descend(fd, "", fstat(fd)); if (!same(fstat(fd), lstat(root))) throw new Error("root replaced during scan"); }
   finally { closeSync(fd); }
   return result;
 }
@@ -104,13 +109,13 @@ function openPath(root: string, path: string, expected: Stats): number {
       if (fd !== anchor) closeSync(fd); fd = next;
     }
     const file = openChecked(`/proc/self/fd/${fd}/${parts.at(-1)}`, "file", expected);
-    if (!same(fstatSync(anchor), lstatSync(root))) { closeSync(file); throw new Error("root replaced during scan"); }
+    if (!same(fstat(anchor), lstat(root))) { closeSync(file); throw new Error("root replaced during scan"); }
     return file;
   } finally { if (fd !== anchor) closeSync(fd); closeSync(anchor); }
 }
 
 async function* readChunks(root: string, file: Found): AsyncGenerator<Uint8Array> {
-  const fd = openPath(root, file.path, file.stat), hashSize = file.stat.size;
+  const fd = openPath(root, file.path, file.stat), hashSize = Number(file.stat.size);
   try {
     let position = 0;
     while (position < hashSize) {
@@ -121,7 +126,7 @@ async function* readChunks(root: string, file: Found): AsyncGenerator<Uint8Array
       }
       position += used; yield chunk;
     }
-    if (!same(fstatSync(fd), file.stat)) throw new Error("file changed during scan");
+    if (!same(fstat(fd), file.stat)) throw new Error("file changed during scan");
     checkedRoot(root);
   } finally { closeSync(fd); }
 }
@@ -129,6 +134,8 @@ async function* readChunks(root: string, file: Found): AsyncGenerator<Uint8Array
 export class LinuxScanner {
   readonly root: string;
   private readonly options: Required<ScanOptions>;
+  // shortcut: trust filesystem change stamps; use forced content verification for filesystems without reliable timestamps.
+  private contentCache = new Map<string, CachedContent>();
   constructor(root: string, private readonly local: ClientLocal, options: ScanOptions = {}) {
     if (process.platform !== "linux") throw new Error("Linux scanner requires Linux");
     this.root = checkedRoot(root);
@@ -139,11 +146,40 @@ export class LinuxScanner {
   }
   rules() { checkedRoot(this.root); return new IgnoreRules(this.root); }
   snapshot() { const rules = this.rules(); return inventory(this.root, rules); }
+  /** Read-only full-content check against the last applied inventory, including unscanned edits. */
+  hasUnsyncedChanges(): boolean {
+    const rules = this.rules(), found = this.snapshot();
+    const entries = this.local.entries().filter(e => e.kind !== 'tombstone' && !rules.ignores(e.path, e.kind === 'directory'));
+    const prior = new Map(entries.map(e => [e.path, e]));
+    for (const file of found) {
+      if (!file.path) continue; // Root identity/metadata changes do not constitute user work.
+      const old = prior.get(file.path);
+      if (!old || old.kind !== file.kind || old.hydration === 'evicted') return true;
+      if (file.kind === 'file') {
+        if (old.executable === null || old.executable === undefined || !!(file.stat.mode & 0o100n) !== !!old.executable) return true;
+        const fd = openPath(this.root, file.path, file.stat);
+        try {
+          const hash = createHash('sha256'), buffer = Buffer.allocUnsafe(65536);
+          let position = 0;
+          while (position < Number(file.stat.size)) {
+            const n = readSync(fd, buffer, 0, Math.min(buffer.length, Number(file.stat.size) - position), position);
+            if (!n) throw new Error('file shortened during dirty check');
+            hash.update(buffer.subarray(0, n)); position += n;
+          }
+          if (!same(fstat(fd), file.stat)) throw new Error('file changed during dirty check');
+          if (hash.digest('hex') !== old.fingerprint) return true;
+        } finally { closeSync(fd); }
+      }
+    }
+    const paths = new Set(found.map(f => f.path));
+    return entries.some(e => e.path && e.hydration !== 'evicted' && !paths.has(e.path));
+  }
   async plan(priorInput: ManifestV1, revisionId: string, deviceId: string, master: Uint8Array, identityHints?: ManifestV1): Promise<ScanPlan> {
     const prior = parseManifest(priorInput), revision = parseRevisionId(revisionId), device = parseDeviceId(deviceId);
     parseVaultId(prior.vaultId);
     if (revision === prior.revisionId || !(master instanceof Uint8Array) || master.length !== 32) throw new Error("invalid scan context");
     const key = master.slice();
+    const context = `${prior.vaultId}:${createHash("sha256").update(key).digest("hex")}`;
     const rules = this.rules();
     const localEntries = this.local.entries();
     this.local.markIgnored(localEntries.filter(e => e.path && rules.ignores(e.path, e.kind === "directory")).map(e => e.id));
@@ -203,12 +239,19 @@ export class LinuxScanner {
     const entries: ManifestEntry[] = [], updates: Entry[] = [], identities: Identity[] = [], suppressed: string[] = [];
     const planned = new Map<string, Found>();
     const operationId = randomUUID();
-    const fileResults = new Map<string, { size: number; sha256: string; chunks: { objectId: string; length: number }[] }>();
+    const fileResults = new Map<string, Content>();
+    const nextCache = new Map<string, CachedContent>();
     let cursor = 0;
     await Promise.all(Array.from({ length: Math.min(this.options.maxConcurrent, files.length) }, async () => {
       while (cursor < files.length) {
         const file = files[cursor++]!;
         if (file.kind !== "file") continue;
+        const cached = this.contentCache.get(file.path);
+        if (cached?.stamp === stamp(file.stat) && cached.context === context) {
+          fileResults.set(file.path, cached.content);
+          nextCache.set(file.path, cached);
+          continue;
+        }
         const hash = createHash("sha256");
         const chunks = [];
         for await (const bytes of readChunks(this.root, file)) {
@@ -216,7 +259,9 @@ export class LinuxScanner {
           const encrypted = await encryptChunk(bytes, key, prior.vaultId);
           chunks.push({ objectId: encrypted.reference.objectId, length: bytes.length });
         }
-        fileResults.set(file.path, { size: file.stat.size, sha256: hash.digest("hex"), chunks });
+        const content = { size: Number(file.stat.size), sha256: hash.digest("hex"), chunks };
+        fileResults.set(file.path, content);
+        nextCache.set(file.path, { stamp: stamp(file.stat), context, content });
       }
     }));
     const after = this.snapshot();
@@ -236,12 +281,13 @@ export class LinuxScanner {
         name: file.path ? file.path.slice(parentPath ? parentPath.length + 1 : 0) : "", kind: file.kind };
       if (old.get(id)?.conflict) entry.conflict = old.get(id)!.conflict;
       if (file.kind === "file") {
-        Object.assign(entry, { ...fileResults.get(file.path)!, executable: !!(file.stat.mode & 0o100) });
-        planned.set(file.path, file);
+        const content = fileResults.get(file.path)!;
+        Object.assign(entry, { ...content, chunks: content.chunks.map(chunk => ({ ...chunk })), executable: !!(file.stat.mode & 0o100n) });
+        planned.set(id, file);
         if (this.local.matchesSuppression(file.path, entry.sha256!)) suppressed.push(file.path);
       }
       entries.push(entry);
-      updates.push({ id, path: file.path, kind: file.kind, fingerprint: entry.sha256 ?? null, hydration: "downloaded", revision });
+      updates.push({ id, path: file.path, kind: file.kind, fingerprint: entry.sha256 ?? null, executable: entry.kind === "file" ? (entry.executable ? 1 : 0) : null, hydration: "downloaded", revision });
       const [dev, ino] = file.identity.split(":"); identities.push({ entryId: id, device: dev!, inode: ino! });
     }
     // Evicted objects are present in the manifest but deliberately absent on disk.
@@ -319,6 +365,7 @@ export class LinuxScanner {
       creatingDeviceId: device,
       entries,
     });
+    this.contentCache = nextCache;
     const scanner = this;
     return { manifest, suppressed, commit: () => {
       const current = scanner.snapshot();
@@ -334,13 +381,21 @@ export class LinuxScanner {
         const yielded = new Set<string>();
         for (const entry of manifest.entries) {
           if (entry.kind !== "file") continue;
-          const path = [...planned].find(([p]) => assigned.get(p) === entry.id)?.[0];
-          if (path === undefined) continue;
-          const file = planned.get(path)!, digest = createHash("sha256"); let index = 0;
+          const file = planned.get(entry.id);
+          if (!file) continue;
+          if (entry.chunks!.every(chunk => knownObjectIds.has(chunk.objectId) || yielded.has(chunk.objectId))) {
+            const fd = openPath(scanner.root, file.path, file.stat);
+            try { if (!same(fstat(fd), file.stat)) throw new Error("file changed before publication"); }
+            finally { closeSync(fd); }
+            continue;
+          }
+          const digest = createHash("sha256"); let index = 0;
           for await (const bytes of readChunks(scanner.root, file)) {
             digest.update(bytes);
+            const expected = entry.chunks![index++];
+            if (expected && (knownObjectIds.has(expected.objectId) || yielded.has(expected.objectId))) continue;
             const encrypted = await encryptChunk(bytes, key, manifest.vaultId);
-            if (encrypted.reference.objectId !== entry.chunks![index++]?.objectId) throw new Error("file changed before publication");
+            if (encrypted.reference.objectId !== expected?.objectId) throw new Error("file changed before publication");
             if (!knownObjectIds.has(encrypted.reference.objectId) && !yielded.has(encrypted.reference.objectId)) {
               yielded.add(encrypted.reference.objectId); yield encrypted;
             }

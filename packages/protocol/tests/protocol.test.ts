@@ -176,11 +176,20 @@ describe("other protocol messages", () => {
 
   test("parses strict capabilities", () => {
     const capabilities = {
+      webAdministration: { enabled: false },
       protocolVersions: [1], revisionFormatVersions: [1], objectFormatVersions: [1],
       objectTypes: ["chunk", "manifest", "revision-private"],
       limits: { maximumObjectCiphertextBytes: 1, maximumReferencesPerRevision: 1, maximumParents: 1, maximumPresenceQuery: 1, maximumPageSize: 1, maximumJsonMetadataBytes: 1, maximumIdempotencyKeyLength: 1, chunkSizeBytes: 4194304 },
     };
     const parsed = parseCapabilityResponse(capabilities);
+    expect(parsed.webAdministration).toEqual({enabled:false});
+    expect(parseCapabilityResponse({...capabilities, webAdministration:{enabled:true,url:'https://sync.example/admin'}}).webAdministration.url).toBe('https://sync.example/admin');
+    for (const webAdministration of [
+      {enabled:'true'}, {enabled:false,url:'https://sync.example/admin'},
+      {enabled:true,url:'http://public.example/admin'}, {enabled:true,url:'https://user:pass@sync.example/admin'},
+      {enabled:true,url:'https://sync.example/admin?token=secret'}, {enabled:true,url:'https://sync.example/admin#secret'},
+      {enabled:true,url:'https://sync.example/other'}, {enabled:true,extra:true},
+    ]) expect(() => parseCapabilityResponse({...capabilities,webAdministration})).toThrow();
     (capabilities.objectTypes as string[])[0] = "changed";
     expect(parsed.objectTypes[0]).toBe("chunk");
     expect(() => parseCapabilityResponse({ ...capabilities, extra: true })).toThrow();

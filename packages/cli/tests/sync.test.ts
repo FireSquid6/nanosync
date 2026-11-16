@@ -1,13 +1,15 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, test, spyOn } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:net";
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, statSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ClientLocal } from "@nanosync/client-local";
 import { HttpRemote } from "@nanosync/sync-core";
 import { CHUNK_SIZE } from "@nanosync/protocol";
-import { bootstrapWorkflow, credentials, joinVault } from "../src/client.ts";
+import { bootstrapWorkflow, credentials, joinVault } from "./support/legacy-fixture.ts";
+import { createConnection } from "../src/connections.ts";
+import { privateDirectory, secureCreate } from "../src/security.ts";
 import { main } from "../src/main.ts";
 import { runServer } from "../src/server.ts";
 import { SyncRunner, type SyncOptions } from "../src/sync-runner.ts";
@@ -42,7 +44,7 @@ async function fixture() {
   await bootstrapWorkflow(firstDir, server.url, join(serverDir, "bootstrap.hex"), "sync test password", async value => { recovery = value; });
   const secondId = randomUUID();
   expect((await joinVault(secondDir, server.url, secondId, "sync test password")).status).toBe("pending");
-  expect(await main(["approve", secondId, "--client-dir", firstDir])).toBe(0);
+  expect(await main(["server", "devices", "approve", "--device-id", secondId, "--server-dir", serverDir])).toBe(0);
   expect((await joinVault(secondDir, server.url, secondId, undefined, recovery)).status).toBe("approved");
   const first = credentials(firstDir), second = credentials(secondDir);
   function options(creds: typeof first, clientDirectory: string, syncDirectory: string): SyncOptions {
@@ -50,8 +52,15 @@ async function fixture() {
       masterKey: Buffer.from(creds.masterKey, "hex"), baseUrl: creds.baseUrl, token: creds.token,
       pollMs: 10_000, scan: { debounceMs: 100, stabilityMs: 100 } };
   }
-  return { firstDir, secondDir, firstFiles, secondFiles, first, second,
-    a: options(first, firstDir, firstFiles), b: options(second, secondDir, secondFiles), url: server.url };
+  function register(root: string, files: string, creds: typeof first) {
+    const serverId = randomUUID();
+    secureCreate(join(privateDirectory(join(root, "servers")), `${serverId}.json`), JSON.stringify({version:1, serverId, baseUrl:creds.baseUrl.replace(/\/$/, ""), deviceId:creds.deviceId, name:"test", token:creds.token}));
+    secureCreate(join(privateDirectory(join(root, "keys")), `${serverId}-${creds.vaultId}.json`), JSON.stringify({version:1, serverId, vaultId:creds.vaultId, masterKey:creds.masterKey}));
+    const binding = createConnection(root, files, serverId, creds.vaultId, creds.deviceId);
+    return options(creds, privateDirectory(join(privateDirectory(join(root,"replicas")),binding.connectionId)), files);
+  }
+  return { serverDir, firstDir, secondDir, firstFiles, secondFiles, first, second,
+    a: register(firstDir, firstFiles, first), b: register(secondDir, secondFiles, second), url: server.url };
 }
 function start(options: SyncOptions) {
   const runner = SyncRunner.start(options);
@@ -62,20 +71,38 @@ async function stop(runner: SyncRunner) {
   await runner.stop();
   runners.splice(runners.indexOf(runner), 1);
 }
-async function waitFor(check: () => boolean, timeoutMs = 8_000): Promise<void> {
-  const until = Date.now() + timeoutMs;
-  while (!check()) {
-    if (Date.now() >= until) throw new Error("timed out waiting for synchronization");
-    await Bun.sleep(50);
-  }
+function controlledWatch(runner: SyncRunner, onSuccess: Parameters<SyncRunner["watch"]>[1], onError: Parameters<SyncRunner["watch"]>[2]) {
+  const controller = new AbortController();
+  let now = 10_000, paused = Promise.withResolvers<void>(), wake = Promise.withResolvers<void>();
+  const watching = runner.watch(controller.signal, onSuccess, onError, {
+    now: () => now,
+    wait: async signal => {
+      wake = Promise.withResolvers<void>();
+      const abort = () => wake.reject(signal.reason);
+      signal.addEventListener("abort", abort, { once: true });
+      paused.resolve();
+      try { signal.throwIfAborted(); await wake.promise; }
+      finally { signal.removeEventListener("abort", abort); }
+    },
+  });
+  return {
+    ready: () => paused.promise,
+    advance: async () => {
+      await paused.promise;
+      paused = Promise.withResolvers<void>();
+      now += 10_000; wake.resolve();
+      await paused.promise;
+    },
+    stop: async () => { controller.abort(); await watching; },
+  };
 }
 
 test("one-shot CLI sync converges enrolled devices, keeps rename identity, and rejects overlap", async () => {
   const e = await fixture();
-  expect(await main(["sync"])).toBe(2);
-  expect(await main(["sync", "--client-dir", e.firstDir, "--sync-dir", e.firstDir])).toBe(2);
-  expect(await main(["sync", "--client-dir", e.firstDir, "--sync-dir", e.firstFiles])).toBe(0);
-  expect(await main(["sync", "--client-dir", e.secondDir, "--sync-dir", e.secondFiles])).toBe(0);
+  expect(await main(["client", "sync"])).toBe(2);
+  expect(await main(["client", "sync", "--client-dir", e.firstDir, "--path", e.firstDir])).toBe(2);
+  expect(await main(["client", "sync", "--client-dir", e.firstDir, "--path", e.firstFiles])).toBe(0);
+  expect(await main(["client", "sync", "--client-dir", e.secondDir, "--path", e.secondFiles])).toBe(0);
   writeFileSync(join(e.firstFiles, "note"), "before", { mode: 0o600 });
   const uploaded = start(e.a);
   expect(() => start(e.a)).toThrow(/live process|sync ownership lock/);
@@ -89,8 +116,8 @@ test("one-shot CLI sync converges enrolled devices, keeps rename identity, and r
   const id = initial.manifest.entries.find(entry => entry.name === "note")?.id;
   expect(readFileSync(join(e.secondFiles, "note"), "utf8")).toBe("before");
   renameSync(join(e.firstFiles, "note"), join(e.firstFiles, "renamed"));
-  expect(await main(["sync", "--client-dir", e.firstDir, "--sync-dir", e.firstFiles])).toBe(0);
-  expect(await main(["sync", "--client-dir", e.secondDir, "--sync-dir", e.secondFiles])).toBe(0);
+  expect(await main(["client", "sync", "--client-dir", e.firstDir, "--path", e.firstFiles])).toBe(0);
+  expect(await main(["client", "sync", "--client-dir", e.secondDir, "--path", e.secondFiles])).toBe(0);
   const after = await remote.head();
   expect((await remote.manifest(after.revisionId!, e.a.masterKey)).manifest.entries.find(entry => entry.name === "renamed")?.id).toBe(id);
   expect(readFileSync(join(e.secondFiles, "renamed"), "utf8")).toBe("before");
@@ -99,9 +126,9 @@ test("one-shot CLI sync converges enrolled devices, keeps rename identity, and r
 test("first snapshot sync imports an existing local file without deleting it", async () => {
   const e = await fixture();
   writeFileSync(join(e.firstFiles, "existing"), "kept", { mode: 0o600 });
-  expect(await main(["sync", "--client-dir", e.firstDir, "--sync-dir", e.firstFiles])).toBe(0);
+  expect(await main(["client", "sync", "--client-dir", e.firstDir, "--path", e.firstFiles])).toBe(0);
   expect(readFileSync(join(e.firstFiles, "existing"), "utf8")).toBe("kept");
-  expect(await main(["sync", "--client-dir", e.secondDir, "--sync-dir", e.secondFiles])).toBe(0);
+  expect(await main(["client", "sync", "--client-dir", e.secondDir, "--path", e.secondFiles])).toBe(0);
   expect(readFileSync(join(e.secondFiles, "existing"), "utf8")).toBe("kept");
 });
 
@@ -234,19 +261,19 @@ test("remote rename of an ignored tracked file refuses apply before creating an 
   await b.syncOnce();
   await expect(a.syncOnce()).rejects.toThrow(/ignored entry moved/);
   expect(readFileSync(join(e.firstFiles, "tracked"), "utf8")).toBe("local original");
-  const local = new ClientLocal(e.firstDir, e.a.vaultId, e.a.deviceId);
+  const local = new ClientLocal(e.a.clientDirectory, e.a.vaultId, e.a.deviceId);
   try { expect(local.pendingApplies()).toEqual([]); } finally { local.close(); }
 });
 
 test("fresh client merges pre-existing local files with remote history", async () => {
   const e = await fixture();
   writeFileSync(join(e.firstFiles, "remote"), "uploaded", { mode: 0o600 });
-  expect(await main(["sync", "--client-dir", e.firstDir, "--sync-dir", e.firstFiles])).toBe(0);
+  expect(await main(["client", "sync", "--client-dir", e.firstDir, "--path", e.firstFiles])).toBe(0);
   writeFileSync(join(e.secondFiles, "local"), "must stay", { mode: 0o600 });
-  expect(await main(["sync", "--client-dir", e.secondDir, "--sync-dir", e.secondFiles])).toBe(0);
+  expect(await main(["client", "sync", "--client-dir", e.secondDir, "--path", e.secondFiles])).toBe(0);
   expect(readFileSync(join(e.secondFiles, "local"), "utf8")).toBe("must stay");
   expect(readFileSync(join(e.secondFiles, "remote"), "utf8")).toBe("uploaded");
-  const local = new ClientLocal(e.secondDir, e.b.vaultId, e.b.deviceId);
+  const local = new ClientLocal(e.b.clientDirectory, e.b.vaultId, e.b.deviceId);
   try { expect(local.head("applied").revisionId).not.toBeNull(); }
   finally { local.close(); }
 });
@@ -260,7 +287,7 @@ test("one-shot stale-head sync retains both concurrent edits and retries frozen 
   writeFileSync(join(e.secondFiles, "shared"), "offline");
   writeFileSync(join(e.firstFiles, "shared"), "online");
   await a.syncOnce(); await b.syncOnce(); await a.syncOnce();
-  const values = (dir: string) => readdirSync(dir).map(name => readFileSync(join(dir, name), "utf8")).sort();
+  const values = (dir: string) => readdirSync(dir).filter(name => name !== ".nanosync").map(name => readFileSync(join(dir, name), "utf8")).sort();
   expect(values(e.firstFiles)).toEqual(["offline", "online"]);
   expect(values(e.secondFiles)).toEqual(values(e.firstFiles));
   await stop(a); await stop(b);
@@ -286,7 +313,7 @@ test("one-shot stale-head sync retains both concurrent edits and retries frozen 
   expect(requests).toHaveLength(2);
   expect(requests[1]).toBe(requests[0]);
   await stop(resumed);
-  expect(await main(["sync", "--client-dir", e.secondDir, "--sync-dir", e.secondFiles])).toBe(0);
+  expect(await main(["client", "sync", "--client-dir", e.secondDir, "--path", e.secondFiles])).toBe(0);
   expect(readFileSync(join(e.secondFiles, "new"), "utf8")).toBe("published");
 });
 
@@ -307,7 +334,7 @@ test("one-shot delete/edit merge retains the deletion and edited conflict copy",
   const manifest = (await remote.manifest(merged.revisionId, e.a.masterKey)).manifest;
   expect(manifest.entries.find(entry => entry.id === original.id)?.kind).toBe("tombstone");
   expect(manifest.entries.some(entry => entry.kind === "file" && !!entry.conflict)).toBe(true);
-  const values = (dir: string) => readdirSync(dir).map(name => readFileSync(join(dir, name), "utf8"));
+  const values = (dir: string) => readdirSync(dir).filter(name => name !== ".nanosync").map(name => readFileSync(join(dir, name), "utf8"));
   expect(values(e.firstFiles)).toEqual(["edited"]);
   expect(values(e.secondFiles)).toEqual(values(e.firstFiles));
 });
@@ -351,63 +378,71 @@ test("restarted one-shot sync retries only the incomplete chunk", async () => {
   await resumed.syncOnce();
   await stop(resumed);
   expect(retry).toEqual([uploads[1]!]);
-  expect(await main(["sync", "--client-dir", e.secondDir, "--sync-dir", e.secondFiles])).toBe(0);
+  expect(await main(["client", "sync", "--client-dir", e.secondDir, "--path", e.secondFiles])).toBe(0);
   expect(readFileSync(join(e.secondFiles, "large"))).toEqual(data);
 });
 
-test("foreground continuous sync debounces changes and shuts down without retaining the owner lock", async () => {
+test("foreground continuous sync polls changes and shuts down without retaining the owner lock", async () => {
   const e = await fixture();
   const runner = start({ ...e.a, pollMs: 10_000 });
-  const controller = new AbortController();
   const heads: { revisionId: string; sequence: number }[] = [];
   const errors: unknown[] = [];
-  const watching = runner.watch(controller.signal, head => heads.push(head), error => errors.push(error));
+  const watching = controlledWatch(runner, head => heads.push(head), error => errors.push(error));
   try {
-    await waitFor(() => heads.length > 0);
+    await watching.ready();
     const initial = heads[0]!.sequence;
     writeFileSync(join(e.firstFiles, "activity"), "one", { mode: 0o600 });
     writeFileSync(join(e.firstFiles, "activity"), "two");
-    await waitFor(() => heads.some(head => head.sequence > initial));
+    await watching.advance();
     expect(heads.at(-1)!.sequence).toBe(initial + 1);
-    await Bun.sleep(1_100);
+    await watching.advance();
     expect(heads.at(-1)!.sequence).toBe(initial + 1);
     expect(errors).toEqual([]);
-  } finally { controller.abort(); await watching; await stop(runner); }
-  expect(await main(["sync", "--client-dir", e.firstDir, "--sync-dir", e.firstFiles])).toBe(0);
+  } finally { await watching.stop(); await stop(runner); }
+  expect(await main(["client", "sync", "--client-dir", e.firstDir, "--path", e.firstFiles])).toBe(0);
 });
 
 test("continuous sync reloads ignore rules and prunes new unsafe directories", async () => {
   const e = await fixture();
   const runner = start({ ...e.a, pollMs: 10_000 });
-  const controller = new AbortController();
   const heads: number[] = [], errors: unknown[] = [];
-  const watching = runner.watch(controller.signal, head => heads.push(head.sequence), error => errors.push(error));
+  const watching = controlledWatch(runner, head => heads.push(head.sequence), error => errors.push(error));
   try {
-    await waitFor(() => heads.length > 0);
+    await watching.ready();
     writeFileSync(join(e.firstFiles, ".nanosyncignore"), ".venv/\n", { mode: 0o600 });
     mkdirSync(join(e.firstFiles, ".venv"));
     symlinkSync("missing", join(e.firstFiles, ".venv", "link"));
     writeFileSync(join(e.firstFiles, "included"), "yes");
-    await waitFor(() => heads.some(sequence => sequence > 1));
+    await watching.advance();
+    expect(heads.some(sequence => sequence > 1)).toBe(true);
     expect(errors).toEqual([]);
     const remote = new HttpRemote({ baseUrl: e.url, token: e.a.token, fetch });
     const head = await remote.head();
     expect((await remote.manifest(head.revisionId!, e.a.masterKey)).manifest.entries.map(entry => entry.name))
       .toEqual(expect.arrayContaining(["included"]));
     expect((await remote.manifest(head.revisionId!, e.a.masterKey)).manifest.entries.some(entry => entry.name === ".venv")).toBe(false);
-  } finally { controller.abort(); await watching; await stop(runner); }
+  } finally { await watching.stop(); await stop(runner); }
 });
 
 test("continuous CLI command runs in the foreground and releases the lock on SIGTERM", async () => {
   const e = await fixture();
-  const lock = join(e.firstDir, ".sync-owner");
-  const running = main(["sync", "--continuous", "--client-dir", e.firstDir, "--sync-dir", e.firstFiles]);
+  const lock = join(e.a.clientDirectory, ".sync-owner");
+  const started = Promise.withResolvers<void>(), transport = globalThis.fetch;
+  const requests = spyOn(globalThis, "fetch").mockImplementation(Object.assign((input: RequestInfo | URL, init?: RequestInit) => {
+    started.resolve();
+    return transport(input, init);
+  }, { preconnect: transport.preconnect }));
+  const running = main(["client", "sync", "--watch", "--client-dir", e.firstDir, "--path", e.firstFiles]);
   try {
-    await waitFor(() => existsSync(lock));
-    expect(await main(["sync", "--client-dir", e.firstDir, "--sync-dir", e.firstFiles])).toBe(2);
+    await started.promise;
+    expect(existsSync(lock)).toBe(true);
+    expect(await main(["client", "sync", "--client-dir", e.firstDir, "--path", e.firstFiles])).toBe(2);
+    expect(await main(["client", "vaults", "disconnect", "--client-dir", e.firstDir, "--path", e.firstFiles, "--force", "--yes"])).toBe(2);
+    expect(await main(["client", "connections", "remove", "--client-dir", e.firstDir, "--server", "test", "--force", "--yes"])).toBe(2);
+    expect(existsSync(join(e.firstFiles, ".nanosync"))).toBe(true);
   } finally {
     process.emit("SIGTERM");
-    expect(await running).toBe(0);
+    try { expect(await running).toBe(0); } finally { requests.mockRestore(); }
   }
   expect(existsSync(lock)).toBe(false);
 });
@@ -419,15 +454,234 @@ test("continuous sync reports an offline failure then retries until connected", 
     if (offline) return Promise.reject(new TypeError("temporarily offline"));
     return fetch(input, init);
   } });
-  const controller = new AbortController();
   const errors: unknown[] = [];
   const heads: string[] = [];
-  const watching = runner.watch(controller.signal, head => heads.push(head.revisionId), error => errors.push(error));
+  const watching = controlledWatch(runner, head => heads.push(head.revisionId), error => errors.push(error));
   try {
-    await waitFor(() => errors.length > 0);
+    await watching.ready();
+    expect(errors).toHaveLength(1);
     expect(errors[0]).toBeInstanceOf(TypeError);
     offline = false;
-    await waitFor(() => heads.length > 0);
+    await watching.advance();
     expect(heads[0]).toBeTruthy();
-  } finally { controller.abort(); await watching; await stop(runner); }
+  } finally { await watching.stop(); await stop(runner); }
+});
+
+
+test("deleted vault stops watch without changing plaintext or stored keys", async () => {
+  const f = await fixture();
+  writeFileSync(join(f.firstFiles, "precious.txt"), "offline unsynced work");
+  const { ServerMetadataDatabase, VaultRepository, MaintenanceRepository } = await import('@nanosync/server-metadata');
+  const cleaned = Promise.withResolvers<void>(), finishDeletion = MaintenanceRepository.prototype.finishDeletion;
+  const cleanup = spyOn(MaintenanceRepository.prototype, 'finishDeletion').mockImplementation(function(this: InstanceType<typeof MaintenanceRepository>, id) {
+    finishDeletion.call(this, id); cleaned.resolve();
+  });
+  const db = new ServerMetadataDatabase(join(f.serverDir, 'metadata.sqlite'));
+  try { new VaultRepository(db).markDeleted(f.first.vaultId, {origin:'server-local',actorId:null}, Date.now()); }
+  finally { db.close(); }
+  const runner = start(f.a), controller = new AbortController();
+  const errors: unknown[] = [];
+  const outcome = await runner.watch(controller.signal, () => { throw Error('deleted sync succeeded'); }, error => errors.push(error))
+    .then(() => 'unexpected success', error => { expect(error).toMatchObject({code:'VAULT_DELETED'}); return 'stopped'; });
+  expect(outcome).toBe('stopped');
+  expect(errors).toHaveLength(1);
+  expect(errors[0]).toMatchObject({code:'VAULT_DELETED',status:410});
+  expect(readFileSync(join(f.firstFiles, 'precious.txt'),'utf8')).toBe('offline unsynced work');
+  expect(credentials(f.firstDir).masterKey).toBe(f.first.masterKey);
+  expect(Buffer.from(f.a.masterKey).toString('hex')).toBe(f.first.masterKey);
+  const inspection = new ServerMetadataDatabase(join(f.serverDir, 'metadata.sqlite'));
+  try {
+    await cleaned.promise;
+    expect(new VaultRepository(inspection).deletions()[0]?.cleanupState).toBe('complete');
+  } finally { inspection.close(); cleanup.mockRestore(); }
+  const { LocalFilesystem } = await import('@nanosync/server-object-storage');
+  expect((await new LocalFilesystem(join(f.serverDir, 'objects')).list()).keys).toEqual([]);
+});
+
+test('disconnect distinguishes synchronized plaintext from unscanned edits and preserves both', async () => {
+  const e = await fixture();
+  writeFileSync(join(e.firstFiles, 'saved'), 'published', {mode:0o600});
+  expect(await main(['client','sync','--client-dir',e.firstDir,'--path',e.firstFiles])).toBe(0);
+  writeFileSync(join(e.firstFiles, 'saved'), 'unscanned', {mode:0o600});
+  expect(await main(['client','vaults','disconnect','--client-dir',e.firstDir,'--path',e.firstFiles,'--yes'])).toBe(2);
+  expect(readFileSync(join(e.firstFiles, 'saved'),'utf8')).toBe('unscanned');
+  expect(existsSync(join(e.firstFiles,'.nanosync'))).toBe(true);
+  expect(await main(['client','sync','--client-dir',e.firstDir,'--path',e.firstFiles])).toBe(0);
+  expect(await main(['client','vaults','disconnect','--client-dir',e.firstDir,'--path',e.firstFiles])).toBe(0);
+  expect(readFileSync(join(e.firstFiles, 'saved'),'utf8')).toBe('unscanned');
+});
+
+test('forced multi-binding removal preflights every lock and registry contention preserves all bindings', async () => {
+  const e = await fixture();
+  const { records } = await import('../src/connections.ts');
+  const { acquireSyncLock } = await import('../src/sync-lock.ts');
+  const first = records(e.firstDir)[0]!;
+  const another = temp();
+  writeFileSync(join(another,'private-note'),'retained',{mode:0o600});
+  createConnection(e.firstDir, another, first.serverId, first.vaultId, first.deviceId, true);
+  const bindings = records(e.firstDir).sort((a,b) => a.connectionId.localeCompare(b.connectionId));
+  const last = bindings[1]!;
+  const release = acquireSyncLock(privateDirectory(join(privateDirectory(join(e.firstDir,'replicas')),last.connectionId)));
+  const remove = ['client','connections','remove','--client-dir',e.firstDir,'--server',first.serverId,'--force','--yes'];
+  try {
+    expect(await main(remove)).toBe(2);
+    expect(records(e.firstDir)).toHaveLength(2);
+    for (const c of bindings) expect(existsSync(join(c.root,'.nanosync'))).toBe(true);
+    expect(existsSync(join(e.firstDir,'servers',`${first.serverId}.json`))).toBe(true);
+  } finally { release(); }
+  const releaseRegistry = acquireSyncLock(privateDirectory(join(e.firstDir,'registry-lock')));
+  try {
+    expect(await main(remove)).toBe(2);
+    expect(records(e.firstDir)).toHaveLength(2);
+  } finally { releaseRegistry(); }
+  expect(await main(remove)).toBe(0);
+  expect(records(e.firstDir)).toHaveLength(0);
+  expect(readFileSync(join(another,'private-note'),'utf8')).toBe('retained');
+  expect(existsSync(join(e.firstDir,'servers',`${first.serverId}.json`))).toBe(false);
+  // Local forgetting does not revoke the remote approved-device credential.
+  expect((await fetch(e.url + '/v1/vaults',{headers:{authorization:`Bearer ${e.first.token}`}})).status).toBe(200);
+});
+
+test('connect revalidates the selected server after remote discovery races local removal', async () => {
+  const e = await fixture();
+  const { records } = await import('../src/connections.ts');
+  const binding = records(e.firstDir)[0]!, destination = temp();
+  const native = globalThis.fetch;
+  let removed = false;
+  globalThis.fetch = (async (input, init) => {
+    const response = await native(input, init);
+    if (!removed && String(input).endsWith('/v1/vaults')) {
+      removed = true;
+      expect(await main(['client','connections','remove','--client-dir',e.firstDir,'--server',binding.serverId,'--force'])).toBe(0);
+    }
+    return response;
+  }) as typeof fetch;
+  try {
+    expect(await main(['client','vaults','connect','--client-dir',e.firstDir,'--server',binding.serverId,'--vault',binding.vaultId,'--path',destination,'--non-interactive'])).toBe(2);
+    expect(removed).toBe(true);
+    expect(records(e.firstDir)).toHaveLength(0);
+    expect(existsSync(join(destination,'.nanosync'))).toBe(false);
+  } finally { globalThis.fetch = native; }
+});
+
+for (const [before, after] of [[0o600, 0o700], [0o700, 0o600]]) {
+  test(`disconnect requires force for unscanned executable change ${before} -> ${after}`, async () => {
+    const e = await fixture();
+    const path = join(e.firstFiles, 'script');
+    writeFileSync(path, '#!/bin/sh\necho saved\n', { mode: before });
+    expect(await main(['client','sync','--client-dir',e.firstDir,'--path',e.firstFiles])).toBe(0);
+    chmodSync(path, after!);
+    const disconnect = ['client','vaults','disconnect','--client-dir',e.firstDir,'--path',e.firstFiles];
+    expect(await main([...disconnect, '--yes'])).toBe(2);
+    expect(existsSync(join(e.firstFiles, '.nanosync'))).toBe(true);
+    expect(await main([...disconnect, '--force'])).toBe(0);
+    expect(readFileSync(path, 'utf8')).toBe('#!/bin/sh\necho saved\n');
+    expect(statSync(path).mode & 0o777).toBe(after!);
+  });
+}
+
+test("offline edits survive an interrupted merge across 65 remote revisions", async () => {
+  const e = await fixture();
+  const initial = start(e.b);
+  await initial.syncOnce(); await stop(initial);
+  const remote = new HttpRemote({ baseUrl: e.url, token: e.a.token, vaultId: e.a.vaultId, fetch });
+  let current = await remote.manifest((await remote.head()).revisionId!, e.a.masterKey);
+  const folder = randomUUID(), root = current.manifest.entries.find(entry => entry.parentId === null)!;
+  for (let i = 0; i < 65; i++) {
+    const manifest = { ...current.manifest, revisionId: randomUUID(), parents: [current.manifest.revisionId],
+      entries: [root, { id: folder, parentId: root.id, name: `remote-${i}`, kind: "directory" as const }] };
+    expect((await remote.publish(manifest, [], [], e.a.masterKey, current.manifest.revisionId, new Date().toISOString())).status).toBe("accepted");
+    current = await remote.manifest(manifest.revisionId, e.a.masterKey);
+  }
+  writeFileSync(join(e.secondFiles, "offline"), "local work", { mode: 0o600 });
+  let advances = 0;
+  const interrupted = start({ ...e.b, fetch: (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    if (new URL(request.url).pathname === "/v1/head/advance" && ++advances === 3)
+      return Promise.reject(new Error("interrupted reconciliation"));
+    return fetch(request);
+  } });
+  await expect(interrupted.syncOnce()).rejects.toThrow("interrupted reconciliation");
+  await stop(interrupted);
+  const pending = new ClientLocal(e.b.clientDirectory, e.b.vaultId, e.b.deviceId);
+  try { expect(pending.reconciliation()).not.toBeNull(); } finally { pending.close(); }
+  const resumed = start(e.b), head = await resumed.syncOnce();
+  expect(await resumed.syncOnce()).toEqual(head);
+  expect(readFileSync(join(e.secondFiles, "offline"), "utf8")).toBe("local work");
+  expect(statSync(join(e.secondFiles, "remote-64")).isDirectory()).toBe(true);
+  const finished = new ClientLocal(e.b.clientDirectory, e.b.vaultId, e.b.deviceId);
+  try { expect(finished.reconciliation()).toBeNull(); expect(finished.proposal()).toBeNull(); }
+  finally { finished.close(); }
+});
+
+test("merge recovery handles a lost acceptance followed by interrupted filesystem staging", async () => {
+  const e = await fixture(), a = start(e.a), initial = start(e.b);
+  await a.syncOnce(); await initial.syncOnce();
+  writeFileSync(join(e.firstFiles, "shared"), "base", { mode: 0o600 });
+  await a.syncOnce(); await initial.syncOnce(); await stop(initial);
+  writeFileSync(join(e.secondFiles, "shared"), "offline");
+  writeFileSync(join(e.firstFiles, "shared"), "online");
+  await a.syncOnce();
+  let lost = false, interrupted = false;
+  const transport: NonNullable<SyncOptions["fetch"]> = async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const pathname = new URL(request.url).pathname;
+    if (lost && !interrupted && pathname.startsWith("/v1/objects/chunk/")) {
+      interrupted = true; throw new Error("staging interrupted");
+    }
+    const response = await fetch(request);
+    if (!lost && pathname === "/v1/head/advance" && (await response.clone().json()).status === "accepted") {
+      lost = true; await response.arrayBuffer(); throw new Error("merge acceptance lost");
+    }
+    return response;
+  };
+  const first = start({ ...e.b, fetch: transport });
+  await expect(first.syncOnce()).rejects.toThrow("merge acceptance lost"); await stop(first);
+  const second = start({ ...e.b, fetch: transport });
+  await expect(second.syncOnce()).rejects.toThrow("staging interrupted"); await stop(second);
+  const pending = new ClientLocal(e.b.clientDirectory, e.b.vaultId, e.b.deviceId);
+  try { expect(pending.pendingApplies()).toHaveLength(1); expect(pending.reconciliation()).not.toBeNull(); }
+  finally { pending.close(); }
+  await start(e.b).syncOnce();
+  expect(readdirSync(e.secondFiles).filter(name => name !== ".nanosync").map(name => readFileSync(join(e.secondFiles, name), "utf8")).sort())
+    .toEqual(["offline", "online"]);
+  const finished = new ClientLocal(e.b.clientDirectory, e.b.vaultId, e.b.deviceId);
+  try { expect(finished.reconciliation()).toBeNull(); expect(finished.pendingApplies()).toEqual([]); expect(finished.proposal()).toBeNull(); }
+  finally { finished.close(); }
+});
+
+test("abort and stop cancel stalled sync requests and release ownership", async () => {
+  const e = await fixture();
+  for (const action of ["abort", "stop"] as const) {
+    const started = Promise.withResolvers<Request>();
+    const runner = start({ ...e.a, fetch: input => {
+      const request = input as Request; started.resolve(request);
+      return new Promise<Response>((_resolve, reject) => {
+        request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true });
+      });
+    } });
+    const controller = new AbortController(), errors: unknown[] = [];
+    const watching = runner.watch(controller.signal, () => { throw new Error("unexpected success"); }, error => errors.push(error));
+    const request = await started.promise;
+    if (action === "abort") controller.abort(); else await runner.stop();
+    await watching; await stop(runner);
+    expect(request.signal.aborted).toBe(true);
+    expect(errors).toEqual([]);
+    expect(existsSync(join(e.a.clientDirectory, ".sync-owner"))).toBe(false);
+  }
+});
+
+test('synchronized executable metadata permits clean disconnect for publisher and downloaded replica', async () => {
+  const e = await fixture();
+  const path = join(e.firstFiles, 'script');
+  writeFileSync(path, '#!/bin/sh\n', { mode: 0o600 });
+  expect(await main(['client','sync','--client-dir',e.firstDir,'--path',e.firstFiles])).toBe(0);
+  chmodSync(path, 0o700);
+  expect(await main(['client','sync','--client-dir',e.firstDir,'--path',e.firstFiles])).toBe(0);
+  expect(await main(['client','sync','--client-dir',e.secondDir,'--path',e.secondFiles])).toBe(0);
+  for (const [client, root] of [[e.firstDir, e.firstFiles], [e.secondDir, e.secondFiles]]) {
+    expect(await main(['client','vaults','disconnect','--client-dir',client!,'--path',root!])).toBe(0);
+    expect(statSync(join(root!, 'script')).mode & 0o100).toBe(0o100);
+    expect(readFileSync(join(root!, 'script'), 'utf8')).toBe('#!/bin/sh\n');
+  }
 });

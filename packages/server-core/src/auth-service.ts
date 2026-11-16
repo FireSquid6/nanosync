@@ -18,6 +18,8 @@ export class AuthenticationService {
   private readonly clock: () => number;
   private readonly random: RandomBytes;
   private readonly password: PasswordHasher;
+  private activePasswords = 0;
+  private passwordAttempts: number[] = [];
   constructor(readonly repository: AuthenticationRepository, options: { pepper: Uint8Array; clock?: () => number; random?: RandomBytes; password?: PasswordHasher }) {
     if (!(options.pepper instanceof Uint8Array) || options.pepper.length < 32 || options.pepper.length > 64) throw new TypeError("credential pepper must contain 32..64 bytes");
     this.pepper = Uint8Array.from(options.pepper);
@@ -31,12 +33,13 @@ export class AuthenticationService {
     const now = this.now();
     const locked = this.repository.lockoutRemaining(now);
     if (locked > 0) { this.repository.loginFailed(now, true); throw rateLimit(locked); }
+    this.admitPassword(now);
     const bytes = new TextEncoder().encode(password);
     try {
       let verifier: PasswordVerifierRecord | null = null;
       try { verifier = this.repository.passwordVerifier(); } catch { /* Public authentication failure is deliberately generic. */ }
       let accepted = false;
-      try { accepted = !!verifier && await this.password.verify!(bytes, verifier); } catch { accepted = false; }
+      try { accepted = !!verifier && await this.password.verify!(bytes, verifier); } catch (error) { if (error instanceof ApiError && error.status === 429) throw error; accepted = false; }
       if (!accepted || !verifier) {
         const remaining = this.repository.loginFailed(now);
         if (remaining > 0) throw rateLimit(remaining);
@@ -47,7 +50,33 @@ export class AuthenticationService {
       const result = this.repository.loginSucceeded(digest, now, verifier, upgrade);
       tokenBytes.fill(0);
       return json({ protocolVersion: PROTOCOL_VERSION, status: "authenticated", sessionToken: token, expiresAtMs: result.expiresAtMs }, 200, { "cache-control": "no-store" });
-    } finally { bytes.fill(0); }
+    } finally { bytes.fill(0); this.activePasswords--; }
+  }
+
+  /** Owner-password verification without minting enrollment/device authority. */
+  async verifyOwnerPassword(password: string): Promise<void> {
+    const now = this.now();
+    const locked = this.repository.lockoutRemaining(now);
+    if (locked > 0) throw rateLimit(locked);
+    this.admitPassword(now);
+    const bytes = new TextEncoder().encode(password);
+    try {
+      let accepted = false;
+      try {
+        const verifier = this.repository.passwordVerifier();
+        accepted = !!verifier && await this.password.verify!(bytes, verifier);
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 429) throw error;
+        // Match the device password endpoint's generic authentication failure.
+      }
+      if (!accepted) {
+        const remaining = this.repository.loginFailed(now);
+        if (remaining > 0) throw rateLimit(remaining);
+        throw unauthorized();
+      }
+      const remaining = this.repository.lockoutRemaining(this.now());
+      if (remaining > 0) throw rateLimit(remaining);
+    } finally { bytes.fill(0); this.activePasswords--; }
   }
 
   isDesignatedInitialDevice(deviceId: DeviceId): boolean { return this.repository.isDesignatedInitialDevice(deviceId); }
@@ -78,6 +107,15 @@ export class AuthenticationService {
     return json({ protocolVersion: PROTOCOL_VERSION, recoveryWrap: this.repository.recoveryWrap(vaultId) }, 200, { "cache-control": "no-store" });
   }
 
+  private admitPassword(now: number): void {
+    // Reserve synchronously: neither endpoint may enqueue secrets behind Argon2 work.
+    if (this.activePasswords >= 2) throw rateLimit(1_000);
+    this.passwordAttempts = this.passwordAttempts.filter(time => now - time < 60_000);
+    if (this.passwordAttempts.length >= 5) throw rateLimit(this.passwordAttempts[0]! + 60_000 - now);
+    this.passwordAttempts.push(now);
+    this.activePasswords++;
+  }
+
   private now(): number { const value = this.clock(); if (!Number.isSafeInteger(value) || value < 0) throw new Error("Invalid clock"); return value; }
   private digest(bytes: Uint8Array): Uint8Array { return Uint8Array.from(createHmac("sha256", this.pepper).update(TOKEN_HMAC_LABEL).update(bytes).digest()); }
   private tokenDigest(token: string): Uint8Array { parseAuthToken(token); return this.digest(decodeCanonicalBase64Url(token, AUTH_TOKEN_BYTES)); }
@@ -98,6 +136,7 @@ export function mapAuthRepositoryError(error: unknown): never {
   if (error.code === "LOCKED") throw rateLimit(error.retryAfterMs ?? 1_000);
   if (error.code === "FORBIDDEN") throw new ApiError(403, "FORBIDDEN", error.message);
   if (error.code === "LIMIT") throw new ApiError(429, "RATE_LIMITED", error.message);
+  if (error.code === "VAULT_DELETED") throw new ApiError(410, "VAULT_DELETED", error.message);
   if (error.code === "CONFLICT") throw new ApiError(409, "CONFLICT", error.message);
   throw error;
 }

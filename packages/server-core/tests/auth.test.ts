@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AuthenticationRepository, BootstrapRepository, MaintenanceRepository, ObjectCatalogRepository, RevisionRepository, ServerMetadataDatabase, type PasswordVerifierRecord } from "@nanosync/server-metadata";
 import { LocalFilesystem } from "@nanosync/server-object-storage";
-import { AuthenticationService, createServerHandler, ServerMaintenance, type PasswordHasher } from "../src/index.ts";
+import { OwnerOperations, AuthenticationService, createServerHandler, ServerMaintenance, type PasswordHasher } from "../src/index.ts";
 import { Argon2idPasswordHasher } from "../src/index.ts";
 import { hashRaw } from "@node-rs/argon2";
+import { ApiError } from "../src/http.ts";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -32,7 +33,7 @@ async function setup(authorizeBootstrap: ((request: Request) => Promise<boolean>
   const auth = new AuthenticationService(new AuthenticationRepository(database), { pepper: new Uint8Array(32).fill(9), password, clock: () => now, random: () => new Uint8Array(32).fill(randomCounter++) });
   const catalog = new ObjectCatalogRepository(database), revisions = new RevisionRepository(database);
   const handle = createServerHandler({ filesystem, catalog, revisions, bootstrap, authentication: auth, maintenance: new ServerMaintenance(new MaintenanceRepository(database), filesystem), clock: () => now, authorizeBootstrap: authorizeBootstrap ?? undefined });
-  return { database, handle, auth, setNow: (value: number) => { now = value; } };
+  return { database, filesystem, handle, auth, setNow: (value: number) => { now = value; } };
 }
 function post(path: string, body: unknown, token?: string, extraHeaders: Record<string, string> = {}): Request { return new Request(`http://local${path}`, { method: "POST", headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}), ...extraHeaders }, body: JSON.stringify(body) }); }
 async function json(response: Response): Promise<any> { return response.json(); }
@@ -169,15 +170,90 @@ describe("production authentication lifecycle", () => {
     }
   });
 
+  test("password bursts share admission across device and owner verification without queueing", async () => {
+    const { database } = await setup();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let calls = 0, now = 100;
+    const inputs: Uint8Array[] = [];
+    const controlled: PasswordHasher = { hash: async () => verifier(), verify: async bytes => {
+      calls++; inputs.push(bytes); await gate; return false;
+    } };
+    const service = new AuthenticationService(new AuthenticationRepository(database), {
+      pepper: new Uint8Array(32), password: controlled, clock: () => now,
+    });
+    const admitted = [service.login("wrong"), service.verifyOwnerPassword("wrong")];
+    const settled = Promise.allSettled(admitted);
+    try {
+      const burst = await Promise.allSettled(Array.from({ length: 40 }, (_, i) =>
+        i % 2 ? service.login("wrong") : service.verifyOwnerPassword("wrong")));
+      expect(calls).toBe(2);
+      for (const result of burst) {
+        expect(result.status).toBe("rejected");
+        if (result.status === "rejected") expect(result.reason).toMatchObject({
+          status: 429, code: "RATE_LIMITED", headers: { "retry-after": "1" },
+        });
+      }
+    } finally { release(); await settled; }
+    expect(calls).toBe(2);
+    expect(inputs.every(bytes => bytes.every(byte => byte === 0))).toBe(true);
+    // Only admitted attempts count as password failures; overload does not lock the account.
+    expect(new AuthenticationRepository(database).lockoutRemaining(now)).toBe(0);
+    for (let i = 0; i < 3; i++) await expect(service.verifyOwnerPassword("wrong")).rejects.toMatchObject({ status: i === 2 ? 429 : 401 });
+    now += 900_000;
+    await expect(service.login("wrong")).rejects.toMatchObject({ status: 401 });
+    expect(calls).toBe(6);
+  });
+
+  test("hasher saturation remains a retryable 429 rather than a password failure", async () => {
+    const { database } = await setup();
+    const busy = new ApiError(429, "RATE_LIMITED", "Busy", { "retry-after": "1" }, 1);
+    const service = new AuthenticationService(new AuthenticationRepository(database), {
+      pepper: new Uint8Array(32), password: { hash: async () => verifier(), verify: async () => { throw busy; } },
+    });
+    await expect(service.login("password")).rejects.toBe(busy);
+    await expect(service.verifyOwnerPassword("password")).rejects.toBe(busy);
+    expect(database.get("SELECT * FROM authentication_rate_limit")).toBeNull();
+  });
+
+  test("Argon2 overload rejects immediately and releases capacity after completion", async () => {
+    const hasher = new Argon2idPasswordHasher();
+    const bytes = new TextEncoder().encode("password");
+    const admitted = [hasher.hash(bytes), hasher.hash(bytes)];
+    try {
+      await expect(hasher.verify(bytes, verifier())).rejects.toMatchObject({ status: 429, code: "RATE_LIMITED" });
+      await expect(hasher.hash(bytes)).rejects.toMatchObject({ status: 429, code: "RATE_LIMITED" });
+    } finally { await Promise.all(admitted); }
+    expect(await hasher.verify(bytes, (await admitted[0])!)).toBe(true);
+  });
+
+  test("successful password attempts also share a rolling admission budget", async () => {
+    const { database } = await setup();
+    let calls = 0, now = 100;
+    const service = new AuthenticationService(new AuthenticationRepository(database), {
+      pepper: new Uint8Array(32), clock: () => now,
+      password: { hash: async () => verifier(), verify: async () => { calls++; return true; } },
+    });
+    for (let i = 0; i < 5; i++) await service.verifyOwnerPassword("correct");
+    await expect(service.login("correct")).rejects.toMatchObject({ status: 429, headers: { "retry-after": "60" } });
+    expect(calls).toBe(5);
+    now += 60_000;
+    expect((await service.login("correct")).status).toBe(200);
+    expect(calls).toBe(6);
+  });
+
   test("a concurrent successful verification cannot commit after failures establish lockout", async () => {
     const { database } = await setup();
     let release!: () => void, started!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const entered = new Promise<void>((resolve) => { started = resolve; });
     const controlled: PasswordHasher = { hash: async () => verifier(), verify: async (bytes) => { const value = new TextDecoder().decode(bytes); if (value === "correct password") { started(); await gate; return true; } return false; } };
-    const service = new AuthenticationService(new AuthenticationRepository(database), { pepper: new Uint8Array(32).fill(7), password: controlled, clock: () => 100, random: () => new Uint8Array(32).fill(8) });
+    let now = 100;
+    const service = new AuthenticationService(new AuthenticationRepository(database), { pepper: new Uint8Array(32).fill(7), password: controlled, clock: () => now, random: () => new Uint8Array(32).fill(8) });
     const successful = service.login("correct password"); await entered;
-    await Promise.allSettled(Array.from({ length: 5 }, () => service.login("wrong")));
+    for (let i = 0; i < 4; i++) await service.login("wrong").catch(() => undefined);
+    now += 60_000; // Admission rolls over before the persistent failure bucket.
+    await service.login("wrong").catch(() => undefined);
     release();
     await expect(successful).rejects.toMatchObject({ code: "LOCKED" });
     expect(database.get<{ count: number }>("SELECT count(*) AS count FROM password_sessions")?.count).toBe(0);
@@ -197,3 +273,41 @@ describe("production authentication lifecycle", () => {
     expect(() => repository.revoke(initialId as any, secondId as any, 23)).toThrow(expect.objectContaining({ code: "FORBIDDEN" }));
   });
 });
+
+ test('shared owner decisions use exact identities, immutable codes, and explicit provenance', async () => {
+  const { database, filesystem, handle } = await setup();
+  try {
+    const owner = new OwnerOperations(database, filesystem, () => 20);
+    const actor = { origin: 'browser' as const, actorId: 'owner-session' };
+    const token = await login(handle);
+    await handle(post('/v1/auth/enrollments', enrollment(secondId), token));
+    const pending = owner.pending(actor);
+    expect(pending[0]?.verificationCode).toContain(secondId.toUpperCase());
+    expect(pending[0]?.requestedAtMs).toBe(10);
+    expect(() => owner.decideEnrollment(actor, { protocolVersion: 1, deviceId: 'Phone', decision: 'approve' })).toThrow();
+    owner.decideEnrollment(actor, { protocolVersion: 1, deviceId: secondId, decision: 'deny' });
+    expect(owner.pending(actor)).toEqual([]);
+    expect((await json(await handle(new Request('http://local/v1/auth/enrollments/status', { headers: { authorization: `Bearer ${token}` } })))).status).toBe('denied');
+    owner.decideEnrollment(actor, { protocolVersion: 1, deviceId: secondId, decision: 'deny' });
+    expect(owner.recentActivity(actor)).toEqual([expect.objectContaining({ action: 'enrollment.denied', origin: 'browser', actorId: 'owner-session', targetId: secondId })]);
+    expect(database.get<{ count: number }>('SELECT count(*) AS count FROM devices')?.count).toBe(2);
+    const fresh = await login(handle);
+    expect((await handle(post('/v1/auth/enrollments', enrollment(backupAdminId), fresh))).status).toBe(202);
+    const code = owner.pending(actor)[0]?.verificationCode;
+    await handle(post('/v1/auth/enrollments', enrollment(backupAdminId), fresh));
+    expect(owner.pending(actor)[0]?.verificationCode).toBe(code);
+    owner.decideEnrollment({ origin: 'server-local', actorId: null }, { protocolVersion: 1, deviceId: backupAdminId, decision: 'approve' });
+    expect(owner.recentActivity(actor)[0]).toMatchObject({ action: 'enrollment.approved', origin: 'server-local', actorId: null, targetId: backupAdminId });
+  } finally { database.close(); }
+ });
+ test('owner revocation is not device self-revocation or a fabricated administrator', async () => {
+   const { database, filesystem, handle } = await setup();
+   try {
+     const token = await login(handle);
+     await handle(post('/v1/auth/enrollments', enrollment(initialId), token, { 'x-nanosync-bootstrap-authorization': bootstrapProof }));
+     const owner = new OwnerOperations(database, filesystem, () => 20);
+     owner.revoke({ origin: 'server-local', actorId: initialId }, initialId);
+     expect(owner.devices({ origin: 'server-local', actorId: null })[0]?.state).toBe('revoked');
+     expect(owner.recentActivity({ origin: 'server-local', actorId: null })[0]).toMatchObject({ origin: 'server-local', actorId: initialId, targetId: initialId });
+   } finally { database.close(); }
+ });
