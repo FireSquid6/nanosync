@@ -300,3 +300,24 @@ test('tombstone blocks requests while an upload writes late ciphertext and clean
   expect((await handle(putRequest(frame(),'retry'))).status).toBe(410);
   database.close();
 });
+
+test('download missing-storage race after deletion returns terminal deletion', async () => {
+  const { handle, filesystem, database } = await setup();
+  await handle(putRequest(frame()));
+  let enter!: () => void, release!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const open = filesystem.open.bind(filesystem);
+  filesystem.open = async (...args) => { enter(); await gate; return open(...args); };
+  const downloading = handle(new Request(`http://local/v1/objects/chunk/${objectId}`));
+  await entered;
+  const { VaultRepository, MaintenanceRepository } = await import('@nanosync/server-metadata');
+  const { ServerMaintenance } = await import('../src/maintenance.ts');
+  new VaultRepository(database).markDeleted(vaultId, { origin: 'server-local', actorId: null }, 20);
+  await new ServerMaintenance(new MaintenanceRepository(database), filesystem).cleanupDeleted();
+  release();
+  const response = await downloading;
+  expect(response.status).toBe(410);
+  expect((await body(response)).code).toBe('VAULT_DELETED');
+  database.close();
+});

@@ -58,8 +58,14 @@ export class RevisionService {
     if (!this.repositoryCall(() => this.options.revisions.parentIdsExist(context.vaultId, parents))) return json(invalid("PARENT_NOT_FOUND"));
     const missing = new Set<ObjectId>(this.repositoryCall(() => this.options.revisions.missingCatalogReferences(context.vaultId, request.proposedRevision)));
     const candidates = request.proposedRevision.references.filter((reference) => !missing.has(reference.objectId));
-    for (const id of await verifyReferenceStorage(this.options.filesystem, candidates,
-      this.options.revisions.legacyVault(context.vaultId) ? undefined : context.vaultId)) missing.add(id);
+    try {
+      for (const id of await verifyReferenceStorage(this.options.filesystem, candidates,
+        this.options.revisions.legacyVault(context.vaultId) ? undefined : context.vaultId)) missing.add(id);
+    } catch (error) {
+      this.repositoryCall(() => this.options.revisions.requireVault(context.vaultId));
+      throw error;
+    }
+    this.repositoryCall(() => this.options.revisions.requireVault(context.vaultId));
     if (missing.size) return json({ status: "missingObjects", objectIds: [...missing].sort() } satisfies AdvanceHeadResult);
 
     const result = this.repositoryCall(() => this.options.revisions.advance({

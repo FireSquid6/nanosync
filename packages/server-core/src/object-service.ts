@@ -142,6 +142,7 @@ export class ObjectService {
        opened = await this.options.filesystem.open(objectKey(objectType, objectId, this.storageVault(context.vaultId)), range ?? undefined);
     }
     catch (error) {
+      this.repositoryCall(() => this.options.catalog.requireVault(context.vaultId));
       if (error instanceof ObjectStorageError && error.code === "NOT_FOUND") {
         this.repositoryCall(() => this.options.catalog.markIntegrity(context.vaultId, objectId, "missing", this.clock()));
         throw new ApiError(503, "UNAVAILABLE", "Object is temporarily unavailable");

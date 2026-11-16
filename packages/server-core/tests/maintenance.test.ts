@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm, writeFile, chmod, mkdir, copyFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, chmod, mkdir, copyFile, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MaintenanceRepository, ServerMetadataDatabase, selectRetention } from "@nanosync/server-metadata";
@@ -281,4 +281,52 @@ test("permanent cleanup reclaims uncataloged ciphertext, survives restart, and i
     expect(new VaultRepository(db).deletions()[0]?.cleanupState).toBe('complete');
     expect(db.get<{name:null;current_sequence:number}>('SELECT name,current_sequence FROM server_state WHERE vault_id=?',[vault])).toEqual({name:null,current_sequence:0});
   } finally { db.close(); await rm(root,{recursive:true,force:true}); }
+});
+
+
+test("restart reclaims SIGKILL-interrupted staging before deletion completes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "nanosync-crashed-upload-"));
+  const storageRoot = join(root, "objects");
+  const dbPath = join(root, "metadata.sqlite");
+  let db = new ServerMetadataDatabase(dbPath);
+  const modulePath = new URL("../../server-object-storage/src/index.ts", import.meta.url).href;
+  const child = Bun.spawn([process.execPath, "--eval", `
+    import { LocalFilesystem } from ${JSON.stringify(modulePath)};
+    const storage = new LocalFilesystem(${JSON.stringify(storageRoot)});
+    const stream = new ReadableStream({ start(c) { c.enqueue(new Uint8Array(4096)); } });
+    void storage.putIfAbsent(${JSON.stringify(objectKey("chunk", "a".repeat(64)))}, stream, "0".repeat(64));
+    setInterval(() => {}, 1000);
+  `], { stdout: "pipe", stderr: "pipe" });
+  try {
+    let staged = false;
+    for (let attempt = 0; attempt < 300; attempt++) {
+      const names = await readdir(join(storageRoot, ".nanosync-tmp")).catch(() => []);
+      for (const name of names) {
+        if ((await stat(join(storageRoot, ".nanosync-tmp", name))).size === 4096) staged = true;
+      }
+      if (staged) break;
+      await Bun.sleep(10);
+    }
+    expect(staged).toBe(true);
+    await expect(new LocalFilesystem(storageRoot).list()).rejects.toMatchObject({ code: "UNSAFE_PATH" });
+    const activeNames = await readdir(join(storageRoot, ".nanosync-tmp"));
+    expect(activeNames).toHaveLength(1);
+    expect((await stat(join(storageRoot, ".nanosync-tmp", activeNames[0]!))).size).toBe(4096);
+    child.kill("SIGKILL");
+    await child.exited;
+    db.writeTransaction(tx => tx.run("INSERT INTO server_state(singleton,vault_id,current_head_revision_id,current_sequence) VALUES(1,?,NULL,0)", [vault]));
+    const { VaultRepository } = await import("@nanosync/server-metadata");
+    new VaultRepository(db).markDeleted(vault, { origin: "server-local", actorId: null }, 20);
+    db.close();
+    db = new ServerMetadataDatabase(dbPath);
+    const storage = new LocalFilesystem(storageRoot);
+    const metadata = new MaintenanceRepository(db);
+    await new ServerMaintenance(metadata, storage).cleanupDeleted();
+    expect(metadata.deletedVaults()[0]?.cleanupState).toBe("complete");
+    expect(await readdir(join(storageRoot, ".nanosync-tmp"))).toEqual([]);
+    expect((await storage.list()).keys).toEqual([]);
+  } finally {
+    child.kill("SIGKILL"); await child.exited;
+    db.close(); await rm(root, { recursive: true, force: true });
+  }
 });

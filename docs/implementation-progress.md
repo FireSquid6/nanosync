@@ -112,3 +112,35 @@ Changed paths:
 - `docs/implementation-progress.md`
 
 Surface confirmations, new CLI command routing and browser administration remain subsequent steps; this step does not expose a deletion HTTP endpoint or bypass their required confirmation/reauthentication workflows.
+
+## Permanent deletion review fixes (completed)
+
+### Public contracts / operational constraints
+
+- `LocalFilesystem` now reclaims abandoned ciphertext staging during asynchronous initialization, before any public storage operation resolves. Staging unlink and directory fsync failures reject visibly; deletion maintenance cannot report completion through a failed storage initialization. This includes old UUID-only staging files and the two-link staging/publication window interrupted by a crash.
+- New staging names include the writer PID. A process-wide active-path registry protects uploads across `LocalFilesystem` instances in the same runtime. A staging owner in another live process (including permission-denied liveness checks) causes initialization to fail with `UNSAFE_PATH`, rather than deleting active bytes or silently reporting reclamation. Continue to require exclusive server-runtime ownership of the directory. PID reuse is conservatively treated as a live owner: resolve exclusive ownership before manually removing that abandoned staging entry. UUID-only staging from the previous implementation is reclaimed under the existing exclusive-startup requirement.
+- Object download failures recheck vault admission before integrity marking/transient error mapping. Revision storage validation rechecks admission on both success (including missing references) and failure. A tombstone therefore wins over deletion-induced storage absence: HTTP **410 `VAULT_DELETED`**, not 503 or HTTP 200 `missingObjects`. Ordinary live-vault missing-storage behavior is unchanged.
+
+### Evidence
+
+- Reproduced red through `createServerHandler`: paused download → tombstone/real cleanup → storage `NOT_FOUND` returned 503; paused revision stat → tombstone/cleanup → missing reference returned 200. Both now return 410; an additional paused `existsBatch` race also returns 410.
+- Reproduced red with a real subprocess streaming into `LocalFilesystem`: waited for 4096 on-disk ciphertext bytes, SIGKILLed the writer, reopened metadata/storage, and ran deletion maintenance. Previously cleanup completed with staging left behind; now staging is empty when cleanup becomes complete.
+- The subprocess regression also verifies a live external writer blocks storage initialization without removing its bytes. Storage regressions verify reopening during an active in-process upload preserves successful completion, and startup removes legacy staging plus interrupted publication hard links without damaging the published object.
+- `bun test packages/server-metadata packages/server-core packages/server-object-storage packages/sync-core`: **171 passed, 0 failed**.
+- `bun run typecheck`: **all eight packages passed**.
+- `bun test`: **255 passed, 0 failed**.
+- `git diff --check`: passed.
+
+### Review handoff
+
+Key functions: `LocalFilesystem.initialize/reclaimAbandonedStaging/putIfAbsent`, `ObjectService.get`, `RevisionService.advance`.
+
+Changed paths:
+- `packages/server-object-storage/src/index.ts`
+- `packages/server-object-storage/tests/local-filesystem.test.ts`
+- `packages/server-core/src/object-service.ts`
+- `packages/server-core/src/revision-service.ts`
+- `packages/server-core/tests/maintenance.test.ts`
+- `packages/server-core/tests/server.test.ts`
+- `packages/server-core/tests/revisions.test.ts`
+- `docs/implementation-progress.md`

@@ -97,6 +97,8 @@ export interface LocalFilesystemOptions {
 }
 
 const TEMP_DIRECTORY = ".nanosync-tmp";
+// Shared across instances so reopening storage never reclaims an in-process upload.
+const activeStagingPaths = new Set<string>();
 const DEFAULT_MAXIMUM_OBJECT_SIZE = 64 * 1024 * 1024 * 1024;
 const IO_CHUNK_SIZE = 64 * 1024;
 
@@ -140,11 +142,12 @@ export class LocalFilesystem implements Filesystem {
       return this.verifyExisting(key, destination, checksum, existing.size);
     }
 
-    const temporaryPath = join(this.tempDirectory, randomUUID());
+    const temporaryPath = join(this.tempDirectory, `${process.pid}-${randomUUID()}`);
     let temporary: FileHandle | undefined;
     const reader = source.getReader();
     let size = 0;
     let sourceComplete = false;
+    activeStagingPaths.add(temporaryPath);
     try {
       temporary = await openFile(
         temporaryPath,
@@ -213,9 +216,13 @@ export class LocalFilesystem implements Filesystem {
       }
     } finally {
       if (temporary) await temporary.close().catch(() => undefined);
-      await unlink(temporaryPath).catch((error: unknown) => {
-        if (!hasCode(error, "ENOENT")) throw error;
-      });
+      try {
+        await unlink(temporaryPath).catch((error: unknown) => {
+          if (!hasCode(error, "ENOENT")) throw error;
+        });
+      } finally {
+        activeStagingPaths.delete(temporaryPath);
+      }
       if (!sourceComplete) cancelReaderWithoutWaiting(reader);
       reader.releaseLock();
     }
@@ -339,6 +346,41 @@ export class LocalFilesystem implements Filesystem {
     const tempStats = await lstat(this.tempDirectory);
     if (tempStats.isSymbolicLink()) throw symlinkError(TEMP_DIRECTORY);
     validateDirectory(tempStats, TEMP_DIRECTORY);
+    await this.reclaimAbandonedStaging();
+  }
+
+  private async reclaimAbandonedStaging(): Promise<void> {
+    const entries = await opendir(this.tempDirectory);
+    for await (const entry of entries) {
+      const path = join(this.tempDirectory, entry.name);
+      if (activeStagingPaths.has(path)) continue;
+      // Older staging names have no owner; server startup requires exclusive
+      // runtime ownership. New names also protect uploads in another live process.
+      const match = /^(?:(\d+)-)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.exec(entry.name);
+      if (!match) throw new ObjectStorageError("UNSAFE_PATH", "Unrecognized staging entry");
+      const pid = match[1] === undefined ? undefined : Number(match[1]);
+      if (pid !== undefined && pid !== process.pid) {
+        if (!Number.isSafeInteger(pid) || pid < 1) throw new ObjectStorageError("UNSAFE_PATH", "Invalid staging owner");
+        let alive = true;
+        try { process.kill(pid, 0); }
+        catch (error) {
+          if (hasCode(error, "ESRCH")) alive = false;
+          else if (!hasCode(error, "EPERM")) throw error;
+        }
+        if (alive) throw new ObjectStorageError("UNSAFE_PATH",
+          "Staging belongs to another live process; object storage requires exclusive runtime ownership");
+      }
+      try {
+        const stats = await lstat(path);
+        // A crash between link and unlink leaves two links. Removing staging
+        // restores the published object's normal single-link invariant.
+        validateObject(stats, entry.name, true);
+        await unlink(path);
+      } catch (error) {
+        if (!hasCode(error, "ENOENT")) throw error;
+      }
+    }
+    await syncDirectory(this.tempDirectory);
   }
 
   private async ensureParents(parts: string[], key: string): Promise<void> {

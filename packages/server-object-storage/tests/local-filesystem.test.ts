@@ -350,3 +350,43 @@ describe("LocalFilesystem", () => {
     await expect(hardLinkFilesystem.existsBatch(["object"])).rejects.toMatchObject({ code: "UNSAFE_PATH" });
   });
 });
+
+
+test("opening another storage instance preserves an active staged upload", async () => {
+  const { root, filesystem } = await create();
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  const uploading = filesystem.putIfAbsent("chunks/active", new ReadableStream({
+    start(value) { controller = value; controller.enqueue(encoder.encode("hello")); },
+  }), helloChecksum);
+  try {
+    let staged = false;
+    for (let attempt = 0; attempt < 300; attempt++) {
+      const names = await readdir(join(root, ".nanosync-tmp")).catch(() => []);
+      for (const name of names) {
+        if ((await lstat(join(root, ".nanosync-tmp", name))).size === 5) staged = true;
+      }
+      if (staged) break;
+      await Bun.sleep(10);
+    }
+    expect(staged).toBe(true);
+    expect((await new LocalFilesystem(root).list()).keys).toEqual([]);
+    expect(await readdir(join(root, ".nanosync-tmp"))).toHaveLength(1);
+  } finally {
+    controller.close();
+  }
+  expect((await uploading).status).toBe("stored");
+  expect(await text((await filesystem.open("chunks/active")).stream)).toBe("hello");
+});
+
+test("restart reclaims legacy staging and an interrupted publication hard link", async () => {
+  const { root, filesystem } = await create();
+  await filesystem.putIfAbsent("chunks/published", stream("hello"), helloChecksum);
+  const staging = join(root, ".nanosync-tmp");
+  await writeFile(join(staging, "12345678-1234-4234-9234-123456789abc"), "abandoned", { mode: 0o600 });
+  await link(join(root, "chunks/published"), join(staging, "22345678-1234-4234-9234-123456789abc"));
+  const reopened = new LocalFilesystem(root);
+  expect((await reopened.list()).keys).toEqual(["chunks/published"]);
+  expect(await readdir(staging)).toEqual([]);
+  expect(await text((await reopened.open("chunks/published")).stream)).toBe("hello");
+  expect((await lstat(join(root, "chunks/published"))).nlink).toBe(1);
+});

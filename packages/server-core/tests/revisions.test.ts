@@ -298,3 +298,30 @@ test('publication paused in storage cannot commit after tombstone and reclamatio
   expect((await env.filesystem.list()).keys).toEqual([]);
   env.database.close();
 });
+
+test.each(['stat', 'existsBatch'] as const)('publication %s missing-storage race after deletion returns terminal deletion', async method => {
+  const env = await setup(); await bootstrap(env);
+  const next = await proposal(env, 51, [genesisId]);
+  let enter!: () => void, release!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const filesystem = withStat(env.filesystem, env.filesystem.stat.bind(env.filesystem));
+  if (method === 'stat') filesystem.stat = async key => {
+    enter(); await gate; return env.filesystem.stat(key);
+  };
+  else filesystem.existsBatch = async keys => {
+    enter(); await gate; return env.filesystem.existsBatch(keys);
+  };
+  const handle = handlerWith(env, filesystem);
+  const publishing = handle(request(next, genesisId, 'deleted-missing-storage'));
+  await entered;
+  const { VaultRepository, MaintenanceRepository } = await import('@nanosync/server-metadata');
+  const { ServerMaintenance } = await import('../src/maintenance.ts');
+  new VaultRepository(env.database).markDeleted(vaultId, { origin: 'server-local', actorId: null }, 2000);
+  await new ServerMaintenance(new MaintenanceRepository(env.database), env.filesystem).cleanupDeleted();
+  release();
+  const response = await publishing;
+  expect(response.status).toBe(410);
+  expect((await body(response)).code).toBe('VAULT_DELETED');
+  env.database.close();
+});
