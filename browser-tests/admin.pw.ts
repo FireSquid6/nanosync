@@ -10,6 +10,7 @@ const executable = process.env.NANOSYNC_TEST_BINARY
 // between sections of the old single-page dashboard.
 async function expectAdminPage(page: Page, section: "Clients" | "Vaults" | "Activity") {
   await expect(page).toHaveURL(url + "/admin/" + section.toLowerCase());
+  await expect(page).toHaveTitle(section + " · Nanosync administration");
   for (const [name, visible] of [
     ["Clients", section === "Clients"],
     ["Pending requests", section === "Clients"],
@@ -27,6 +28,7 @@ async function navigate(page: Page, section: "Clients" | "Vaults" | "Activity") 
   await page.getByRole("navigation", { name: "Administration" })
     .getByRole("link", { name: section, exact: true }).click();
   await expectAdminPage(page, section);
+  await expect(page.locator(".admin-page")).toBeFocused();
 }
 
 // Isolate server state and password-verification quotas between workflows.
@@ -74,6 +76,10 @@ test.afterEach(async () => {
   rmSync(directory, { recursive: true, force: true });
 });
 test("protected deep link survives login, refresh and browser history", async ({ page }) => {
+  let sessionLoads = 0;
+  page.on("request", request => {
+    if (request.method() === "GET" && request.url().endsWith("/admin/api/session")) sessionLoads++;
+  });
   await page.goto(url + "/admin/vaults");
   await expect(page).toHaveURL(/\/admin\/login(?:\?.*)?$/);
   await expect(page.getByRole("button", { name: "Log in", exact: true })).toBeVisible();
@@ -89,6 +95,7 @@ test("protected deep link survives login, refresh and browser history", async ({
   await navigate(page, "Activity");
   await page.reload();
   await expectAdminPage(page, "Activity");
+  const loadsBeforeHistory = sessionLoads;
   await page.goBack();
   await expectAdminPage(page, "Clients");
   await page.goBack();
@@ -97,10 +104,12 @@ test("protected deep link survives login, refresh and browser history", async ({
   await expectAdminPage(page, "Clients");
   await page.goForward();
   await expectAdminPage(page, "Activity");
+  expect(sessionLoads).toBe(loadsBeforeHistory);
   await page.goto(url + "/admin");
   await expectAdminPage(page, "Clients");
   await page.getByRole("button", { name: "Log out" }).click();
   await expect(page).toHaveURL(url + "/admin/login");
+  await expect(page).toHaveTitle("Log in · Nanosync administration");
   await expect(page.getByRole("button", { name: "Log in", exact: true })).toBeVisible();
   await page.goto(url + "/admin/activity");
   await expect(page).toHaveURL(/\/admin\/login(?:\?.*)?$/);
@@ -142,6 +151,12 @@ test("real browser encrypted provisioning, refresh retry, rename, danger dialog,
   await navigate(page, "Vaults");
   await expect(page.getByLabel("Saved recovery secret")).toBeVisible();
   await expect(page.getByTestId("recovery-secret")).toHaveCount(0);
+  await page.getByRole("button", { name: "Log out", exact: true }).click();
+  await expect(page.getByLabel("Saved recovery secret")).toHaveCount(0);
+  await page.getByLabel("Owner password", { exact: true }).fill("browser-owner-password");
+  await page.getByRole("button", { name: "Log in", exact: true }).click();
+  await expectAdminPage(page, "Vaults");
+  await expect(page.getByLabel("Saved recovery secret")).toBeVisible();
   await page.reload();
   await expectAdminPage(page, "Vaults");
   await page.getByLabel("Saved recovery secret").fill("wrong");

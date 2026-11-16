@@ -1,32 +1,20 @@
-import { Navigate, Route, Routes } from "react-router-dom";
-import { AdminLayout } from "./components/AdminLayout";
-import { ActivityPage } from "./pages/ActivityPage";
-import { ClientsPage } from "./pages/ClientsPage";
-import { LoginPage } from "./pages/LoginPage";
-import { VaultsPage } from "./pages/VaultsPage";
+import { Outlet, useLoaderData } from "react-router-dom";
 import { AdminProvider, useAdmin } from "./state/AdminContext";
+import type { loadAdmin } from "./state/bootstrap";
 
 export function App() {
-  return <AdminProvider><AdminRoutes /></AdminProvider>;
+  const initial = useLoaderData<typeof loadAdmin>();
+  return <AdminProvider initial={initial}><AdminShell /></AdminProvider>;
 }
 
-function AdminRoutes() {
+function AdminShell() {
   const { error } = useAdmin();
   return (
     <main className="nv-root" data-nv-theme="light">
       <div className="admin nv-stack">
         <h1>Nanosync administration</h1>
         {error && <p role="alert">{error}</p>}
-        <Routes>
-          <Route path="login" element={<LoginPage />} />
-          <Route element={<AdminLayout />}>
-            <Route index element={<Navigate to="/clients" replace />} />
-            <Route path="clients" element={<ClientsPage />} />
-            <Route path="vaults" element={<VaultsPage />} />
-            <Route path="activity" element={<ActivityPage />} />
-          </Route>
-          <Route path="*" element={<p>Page not found.</p>} />
-        </Routes>
+        <Outlet />
       </div>
     </main>
   );

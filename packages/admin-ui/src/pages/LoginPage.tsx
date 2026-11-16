@@ -5,9 +5,8 @@ import { formData } from "../forms";
 import { useAdmin } from "../state/AdminContext";
 
 export function LoginPage() {
-  const { ready, authenticated, login, run, busy } = useAdmin();
+  const { authenticated, login, run, busy } = useAdmin();
   const location = useLocation();
-  if (!ready) return <p>Loading…</p>;
   if (authenticated) {
     const destination: unknown = location.state?.from;
     return <Navigate replace to={typeof destination === "string" && ["/clients", "/vaults", "/activity"].includes(destination) ? destination : "/clients"} />;
@@ -18,6 +17,7 @@ export function LoginPage() {
       event.currentTarget.reset();
       void run(() => login(String(fields.get("password"))));
     }}>
+      <title>Log in · Nanosync administration</title>
       <h2>Log in</h2>
       <TextField label="Owner password" name="password" type="password" autoComplete="current-password" required />
       <Button type="submit" disabled={busy}>Log in</Button>

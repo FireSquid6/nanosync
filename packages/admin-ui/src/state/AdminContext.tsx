@@ -1,8 +1,8 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, useContext, useState, type ReactNode } from "react";
 import { ApiError, request, type Activity, type Device, type Vault } from "../api";
+import { loadAdminData, type AdminBootstrap } from "./bootstrap";
 
 type AdminState = {
-  ready: boolean;
   authenticated: boolean;
   busy: boolean;
   error: string;
@@ -19,15 +19,14 @@ type AdminState = {
 };
 const AdminContext = createContext<AdminState | null>(null);
 
-export function AdminProvider({ children }: { children: ReactNode }) {
-  const [csrf, setCsrf] = useState("");
-  const [ready, setReady] = useState(false);
+export function AdminProvider({ children, initial }: { children: ReactNode; initial: AdminBootstrap }) {
+  const [csrf, setCsrf] = useState(initial.csrf);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [devices, setDevices] = useState<Device[]>([]);
-  const [pending, setPending] = useState<Device[]>([]);
-  const [vaults, setVaults] = useState<Vault[]>([]);
-  const [activity, setActivity] = useState<Activity[]>([]);
+  const [error, setError] = useState(initial.error);
+  const [devices, setDevices] = useState(initial.devices);
+  const [pending, setPending] = useState(initial.pending);
+  const [vaults, setVaults] = useState(initial.vaults);
+  const [activity, setActivity] = useState(initial.activity);
 
   async function api<T = unknown>(path: string, method = "GET", body?: unknown, token = csrf) {
     try {
@@ -38,15 +37,16 @@ export function AdminProvider({ children }: { children: ReactNode }) {
     }
   }
   async function refresh(token = csrf) {
-    const [d, v, a] = await Promise.all([
-      api<{ devices: Device[]; enrollments: Device[] }>("devices", "GET", undefined, token),
-      api<{ vaults: Vault[] }>("vaults", "GET", undefined, token),
-      api<{ activity: Activity[] }>("activity", "GET", undefined, token),
-    ]);
-    setDevices(d.devices);
-    setPending(d.enrollments);
-    setVaults(v.vaults);
-    setActivity(a.activity);
+    try {
+      const data = await loadAdminData(token);
+      setDevices(data.devices);
+      setPending(data.pending);
+      setVaults(data.vaults);
+      setActivity(data.activity);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) setCsrf("");
+      throw error;
+    }
   }
   async function run(work: () => Promise<void>) {
     setBusy(true);
@@ -72,22 +72,8 @@ export function AdminProvider({ children }: { children: ReactNode }) {
     setVaults([]);
     setActivity([]);
   }
-  useEffect(() => {
-    void run(async () => {
-      try {
-        const session = await api<{ csrfToken: string }>("session");
-        await refresh(session.csrfToken);
-        setCsrf(session.csrfToken);
-      } catch (error) {
-        if (!(error instanceof ApiError && error.status === 401)) throw error;
-      } finally {
-        setReady(true);
-      }
-    });
-  }, []);
-
   return (
-    <AdminContext.Provider value={{ ready, authenticated: !!csrf, busy, error, clearError: () => setError(""), devices, pending, vaults, activity, api, run, refresh, login, logout }}>
+    <AdminContext.Provider value={{ authenticated: !!csrf, busy, error, clearError: () => setError(""), devices, pending, vaults, activity, api, run, refresh, login, logout }}>
       {children}
     </AdminContext.Provider>
   );

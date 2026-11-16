@@ -1,13 +1,12 @@
-import { useEffect, useRef } from "react";
+import { useCallback } from "react";
 import { Navigate, NavLink, Outlet, useLocation } from "react-router-dom";
 import { Button } from "../paper/Button";
 import { useAdmin } from "../state/AdminContext";
 import { CreationProvider } from "../state/CreationContext";
 
 export function AdminLayout() {
-  const { ready, authenticated } = useAdmin();
+  const { authenticated } = useAdmin();
   const location = useLocation();
-  if (!ready) return <p>Loading…</p>;
   if (!authenticated) return <Navigate to="/login" replace state={{ from: location.pathname }} />;
   return <CreationProvider><AuthenticatedLayout /></CreationProvider>;
 }
@@ -15,13 +14,12 @@ export function AdminLayout() {
 function AuthenticatedLayout() {
   const { busy, refresh, logout, run } = useAdmin();
   const { pathname } = useLocation();
-  const content = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    content.current?.focus();
-    const page = pathname === "/vaults" ? "Vaults" : pathname === "/activity" ? "Activity" : "Clients";
-    document.title = `${page} · Nanosync administration`;
+  const focusPage = useCallback((element: HTMLDivElement | null) => {
+    element?.focus();
   }, [pathname]);
+  const page = pathname === "/vaults" ? "Vaults" : pathname === "/activity" ? "Activity" : "Clients";
   return <>
+    <title>{`${page} · Nanosync administration`}</title>
     <div className="admin-toolbar">
       <nav className="admin-navigation" aria-label="Administration">
         <NavLink to="/clients">Clients</NavLink>
@@ -33,7 +31,7 @@ function AuthenticatedLayout() {
         <Button disabled={busy} onClick={() => void run(logout)}>Log out</Button>
       </div>
     </div>
-    <div className="nv-stack admin-page" tabIndex={-1} ref={content}>
+    <div className="nv-stack admin-page" tabIndex={-1} ref={focusPage}>
       <Outlet />
     </div>
   </>;

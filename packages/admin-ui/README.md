@@ -12,9 +12,13 @@ The React Router pages are `/admin/clients` (pending and allowed clients),
 `/admin` opens Clients; protected deep links return to their destination after
 `/admin/login`. Links, browser history, and refresh work on each page.
 
-`src/main.tsx` only mounts the app. `src/App.tsx` defines routes; `src/pages/`
-contains page views, `src/components/` contains the shared layout, confirmations,
-and recovery forms, and `src/state/` owns session/data and vault-creation state.
+`src/main.tsx` only mounts the app. `src/router.tsx` defines routes and runs the
+initial session/data loader before `src/App.tsx` mounts its providers and shell.
+`src/pages/` contains page views, `src/components/` contains the shared layout,
+confirmations and recovery forms, and `src/state/` owns session/data and
+vault-creation state. Subsequent data changes happen in explicit event handlers;
+encrypted receipts use a lazy state initializer. Page titles are declarative and
+navigation focus uses a callback ref, with no application effect hooks.
 `src/api.ts` handles HTTP transport and shared response types. Creation state
 survives page navigation; logout clears unpublished plaintext secret material,
 while acknowledged encrypted receipts remain resumable.
