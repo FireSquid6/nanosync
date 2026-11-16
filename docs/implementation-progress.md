@@ -364,3 +364,28 @@ Changed paths:
 - `docs/implementation-progress.md`
 
 Continue to require exclusive server-runtime ownership for offline provisioning/storage operations, as in prior steps. Browser frontend/Paper UI delivery remains outside this local-workflow slice.
+
+## Binding/provisioning durability review fix (completed)
+
+### Public contracts
+
+- An interrupted protected recovery delivery is not considered delivered merely because its bytes match the encrypted receipt's digest. Before promoting a prepared receipt, provisioning reopens the output with the existing no-follow/owner/mode/link-count/size checks, reads and fsyncs that same descriptor, and fsyncs the validated private parent directory. Either fsync failure rejects before receipt promotion or vault publication. Digest mismatch still refuses publication. No plaintext provisioning persistence is added.
+- `secureRead(path, limit, durable = false)` retains its existing default behavior; the explicit durable mode flushes the protected file descriptor and its private parent before returning the read bytes. Prepared recovery replay is its only new caller.
+
+### Evidence
+
+- Reproduced the reviewer finding through public `main` CLI workflows with real temporary server directories and filesystem-fsync fault injection. Both file-fsync and parent-fsync failures left matching output bytes; before the fix a retry incorrectly returned success and published a vault.
+- Both regressions now prove initial delivery failure and retry failure publish zero vaults, then restoring fsync permits retry with the unchanged recovery secret and exactly one vault; subsequent retry returns the same vault UUID.
+- `bun test packages/cli/tests/local-safety.test.ts`: **3 passed, 0 failed**, 46 assertions.
+- `bun test packages/cli`: **58 passed, 0 failed**, 589 assertions, including real PTY integration.
+- `bun run typecheck`: **all eight packages passed**.
+- `bun test`: **279 passed, 0 failed**, 2008 assertions; no unhandled errors.
+- `git diff --check`: passed.
+
+### Review handoff
+
+Exact changed paths:
+- `packages/cli/src/security.ts` — `secureRead` durable descriptor/parent flush option.
+- `packages/cli/src/local-provision.ts` — `provisionLocalVault` prepared-receipt replay durability gate.
+- `packages/cli/tests/local-safety.test.ts` — public CLI file/parent fsync failure-and-retry regressions.
+- `docs/implementation-progress.md` — contracts and verification evidence.

@@ -32,9 +32,10 @@ export async function provisionLocalVault(directory: string, name: string, deliv
       } else receipt = saved;
     }
     // A prepared receipt never reached server mutation. If delivery was interrupted
-    // before a file appeared, regenerate safely. If it appeared, verify it before replay.
+    // before a file appeared, regenerate safely. If it appeared, verify and flush
+    // its protected descriptor and parent before treating interrupted delivery as durable.
     if (receipt && output && existsSync(output)) {
-      if (digest(secureRead(output, 4096).toString('utf8').trimEnd()) !== receipt.recoveryDigest) throw new Error('Recovery output differs from creation receipt; no vault published');
+      if (digest(secureRead(output, 4096, receipt.phase === 'prepared').toString('utf8').trimEnd()) !== receipt.recoveryDigest) throw new Error('Recovery output differs from creation receipt; no vault published');
       if (receipt.phase === 'prepared') save({...receipt, phase:'delivered'});
     } else if (receipt?.phase === 'prepared') receipt = undefined;
     else if (receipt && output) throw new Error('Delivered recovery output is missing; restore it before retrying');

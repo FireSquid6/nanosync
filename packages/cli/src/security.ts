@@ -10,13 +10,19 @@ export function privateDirectory(path: string): string {
     throw new Error("directory must be owned, real, and mode 0700");
   return absolute;
 }
-export function secureRead(path: string, limit = 4096): Buffer {
+/** When durable, flush the same protected descriptor read here and its private parent before returning. */
+export function secureRead(path: string, limit = 4096, durable = false): Buffer {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const st = fstatSync(fd);
     if (!st.isFile() || st.nlink !== 1 || st.uid !== process.getuid!() || st.mode & 0o177 || st.size > limit || st.size === 0)
       throw new Error("secret file must be owned, regular, mode 0600 and bounded");
-    return readFileSync(fd);
+    const value = readFileSync(fd);
+    if (durable) {
+      fsyncSync(fd);
+      syncPrivateDirectory(dirname(resolve(path)));
+    }
+    return value;
   } finally { closeSync(fd); }
 }
 export function secureCreate(path: string, value: string): void {

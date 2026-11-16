@@ -48,3 +48,52 @@ test('protected recovery delivery failure publishes nothing; retry and lost outp
     out.mockRestore(); err.mockRestore(); rmSync(dir,{recursive:true,force:true});
   }
 });
+
+for (const failedBoundary of ['file', 'parent'] as const) test(`retry must durably deliver recovery after ${failedBoundary} fsync failure before publishing`, async () => {
+  const fs = await import('node:fs');
+  const dir = mkdtempSync(join(tmpdir(), 'nanosync-fsync-'));
+  const output = join(dir, 'recovery');
+  const old = process.env.NANOSYNC_PASSWORD; process.env.NANOSYNC_PASSWORD = 'delivery-owner-password';
+  const out = spyOn(console, 'log').mockImplementation(() => {}), err = spyOn(console, 'error').mockImplementation(() => {});
+  const invoke = (args: string[]) => main([...args, '--server-dir', dir, '--json', '--non-interactive']);
+  const data = () => JSON.parse(String(out.mock.lastCall?.[0])).data;
+  const originalSync = fs.fsyncSync;
+  let sync: ReturnType<typeof spyOn> | undefined;
+  try {
+    expect(await invoke(['server', 'init'])).toBe(0);
+    let recoveryFileSynced = false;
+    sync = spyOn(fs, 'fsyncSync').mockImplementation((fd: number) => {
+      const target = fs.readlinkSync(`/proc/self/fd/${fd}`);
+      if (target === output) {
+        if (failedBoundary === 'file') throw new Error('injected recovery file fsync failure');
+        recoveryFileSynced = true;
+      }
+      if (failedBoundary === 'parent' && recoveryFileSynced && target === dir) {
+        recoveryFileSynced = false;
+        throw new Error('injected recovery parent fsync failure');
+      }
+      originalSync(fd);
+    });
+    const create = ['server', 'vaults', 'create', '--name', 'durable', '--recovery-output', output];
+    expect(await invoke(create)).toBe(2);
+    const secret = readFileSync(output, 'utf8');
+    expect(await invoke(['server', 'vaults', 'view'])).toBe(0);
+    expect(data().vaults).toHaveLength(0);
+    // Matching bytes left by the failed delivery are not proof of durability.
+    expect(await invoke(create)).toBe(2);
+    expect(await invoke(['server', 'vaults', 'view'])).toBe(0);
+    expect(data().vaults).toHaveLength(0);
+    sync.mockRestore(); sync = undefined;
+    expect(await invoke(create)).toBe(0);
+    const id = data().vaultId;
+    expect(readFileSync(output, 'utf8')).toBe(secret);
+    expect(await invoke(create)).toBe(0);
+    expect(data().vaultId).toBe(id);
+    expect(await invoke(['server', 'vaults', 'view'])).toBe(0);
+    expect(data().vaults).toHaveLength(1);
+  } finally {
+    sync?.mockRestore(); out.mockRestore(); err.mockRestore();
+    if (old === undefined) delete process.env.NANOSYNC_PASSWORD; else process.env.NANOSYNC_PASSWORD = old;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
