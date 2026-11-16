@@ -19,8 +19,10 @@ bun install --frozen-lockfile
 bun run build:android
 ```
 
-The explicit Android development shells accept Google's Android SDK license and
-use pinned Nix SDK/tool binaries. The SDK is immutable: do not run `sdkmanager`
+All Android build/test dependencies come from this project's flake; no workstation
+profile changes or globally installed Android tools are required. The explicit
+Android development shells accept Google's Android SDK license and use pinned Nix
+SDK/tool binaries. The SDK is immutable: do not run `sdkmanager`
 installations into it. The lightweight `android-build` shell includes JDK 21,
 Gradle, Bun, API 37 and Build Tools 36.0.0. The full `android` shell additionally
 includes the emulator and API 31/36/37 Google APIs x86-64 images for validation.

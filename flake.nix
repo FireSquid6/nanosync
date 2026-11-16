@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     # The application pin lacks Android CLI Tools 23.0. Keep its package
-    # outputs unchanged and pin Android tools to the validated workstation set.
+    # outputs unchanged and pin Android tools to a validated project-local SDK set.
     nixpkgs-android.url = "github:NixOS/nixpkgs/d4f25a3e562008648d45bcf2d70bcc7422cad84e";
     bun2nix = {
       url = "github:nix-community/bun2nix";
