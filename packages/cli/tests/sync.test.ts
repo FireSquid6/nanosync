@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:net";
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, statSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ClientLocal } from "@nanosync/client-local";
@@ -536,4 +536,35 @@ test('connect revalidates the selected server after remote discovery races local
     expect(records(e.firstDir)).toHaveLength(0);
     expect(existsSync(join(destination,'.nanosync'))).toBe(false);
   } finally { globalThis.fetch = native; }
+});
+
+for (const [before, after] of [[0o600, 0o700], [0o700, 0o600]]) {
+  test(`disconnect requires force for unscanned executable change ${before} -> ${after}`, async () => {
+    const e = await fixture();
+    const path = join(e.firstFiles, 'script');
+    writeFileSync(path, '#!/bin/sh\necho saved\n', { mode: before });
+    expect(await main(['client','sync','--client-dir',e.firstDir,'--path',e.firstFiles])).toBe(0);
+    chmodSync(path, after!);
+    const disconnect = ['client','vaults','disconnect','--client-dir',e.firstDir,'--path',e.firstFiles];
+    expect(await main([...disconnect, '--yes'])).toBe(2);
+    expect(existsSync(join(e.firstFiles, '.nanosync'))).toBe(true);
+    expect(await main([...disconnect, '--force'])).toBe(0);
+    expect(readFileSync(path, 'utf8')).toBe('#!/bin/sh\necho saved\n');
+    expect(statSync(path).mode & 0o777).toBe(after!);
+  });
+}
+
+test('synchronized executable metadata permits clean disconnect for publisher and downloaded replica', async () => {
+  const e = await fixture();
+  const path = join(e.firstFiles, 'script');
+  writeFileSync(path, '#!/bin/sh\n', { mode: 0o600 });
+  expect(await main(['client','sync','--client-dir',e.firstDir,'--path',e.firstFiles])).toBe(0);
+  chmodSync(path, 0o700);
+  expect(await main(['client','sync','--client-dir',e.firstDir,'--path',e.firstFiles])).toBe(0);
+  expect(await main(['client','sync','--client-dir',e.secondDir,'--path',e.secondFiles])).toBe(0);
+  for (const [client, root] of [[e.firstDir, e.firstFiles], [e.secondDir, e.secondFiles]]) {
+    expect(await main(['client','vaults','disconnect','--client-dir',client!,'--path',root!])).toBe(0);
+    expect(statSync(join(root!, 'script')).mode & 0o100).toBe(0o100);
+    expect(readFileSync(join(root!, 'script'), 'utf8')).toBe('#!/bin/sh\n');
+  }
 });

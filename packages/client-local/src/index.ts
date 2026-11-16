@@ -34,7 +34,8 @@ const schema3 = `CREATE TABLE file_identity(entry_id TEXT PRIMARY KEY, device TE
 const schema4 = `CREATE TABLE hydration(id TEXT PRIMARY KEY, entry_id TEXT NOT NULL REFERENCES entries(id), revision TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence>0), direction TEXT NOT NULL CHECK(direction IN ('evict','download')), root_device TEXT NOT NULL, root_inode TEXT NOT NULL, file_device TEXT, file_inode TEXT, CHECK((direction='evict' AND file_device IS NOT NULL AND file_inode IS NOT NULL) OR (direction='download' AND file_device IS NULL AND file_inode IS NULL))) STRICT;`;
 const schema5 = `CREATE TABLE restores(singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision TEXT NOT NULL, base_revision TEXT NOT NULL) STRICT;`;
 const schema6 = `CREATE TABLE ignored_entries(entry_id TEXT PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE) STRICT;`;
-const migrations = [schema1, schema2, schema3, schema4, schema5, schema6];
+const schema7 = `ALTER TABLE entries ADD COLUMN executable INTEGER CHECK(executable IN (0,1));`;
+const migrations = [schema1, schema2, schema3, schema4, schema5, schema6, schema7];
 const schemaDigest = (db: Database) => hash(db.query<{ sql: string }, []>("SELECT sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY type,name").all().map(r => r.sql).join("\n"));
 let expectedSchema: string | undefined;
 function expectedDigest(): string {
@@ -69,7 +70,8 @@ function all<T>(db: Database, sql: string, ...params: (string | number)[]): T[] 
 function run(db: Database, sql: string, ...params: (string | number | Uint8Array | null)[]) { db.query(sql).run(...params); }
 
 export interface Head { revisionId: string | null; sequence: number }
-export interface Entry { id: string; path: string; kind: "file" | "directory" | "tombstone"; fingerprint: string | null; hydration: "downloaded" | "evicted"; revision: string | null }
+/** executable records applied manifest metadata (0/1); absent/null means unknown, not clean. */
+export interface Entry { executable?: 0 | 1 | null; id: string; path: string; kind: "file" | "directory" | "tombstone"; fingerprint: string | null; hydration: "downloaded" | "evicted"; revision: string | null }
 export interface Work { id: string; state: "pending" | "running" | "done" | "blocked" }
 export interface HydrationIntent { id: string; entryId: string; revision: string; sequence: number; direction: "evict" | "download"; rootDevice: string; rootInode: string; fileDevice: string | null; fileInode: string | null }
 export class ClientLocal implements ChunkJournal {
@@ -180,9 +182,9 @@ export class ClientLocal implements ChunkJournal {
     if (entry.revision) uuid(entry.revision);
     if (entry.fingerprint !== null) hex(entry.fingerprint);
     if (!["file","directory","tombstone"].includes(entry.kind) || !["downloaded","evicted"].includes(entry.hydration)) throw new Error("invalid entry");
-    this.write(() => run(this.db, `INSERT INTO entries VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,kind=excluded.kind,fingerprint=excluded.fingerprint,hydration=excluded.hydration,revision=excluded.revision`, entry.id, entry.path, entry.kind, entry.fingerprint, entry.hydration, entry.revision));
+    this.write(() => run(this.db, `INSERT INTO entries VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,kind=excluded.kind,fingerprint=excluded.fingerprint,hydration=excluded.hydration,revision=excluded.revision,executable=excluded.executable`, entry.id, entry.path, entry.kind, entry.fingerprint, entry.hydration, entry.revision, entry.executable ?? null));
   }
-  entry(id: string): Entry | null { uuid(id); return row<Entry>(this.db, "SELECT id,path,kind,fingerprint,hydration,revision FROM entries WHERE id=?", id); }
+  entry(id: string): Entry | null { uuid(id); return row<Entry>(this.db, "SELECT id,path,kind,fingerprint,hydration,revision,executable FROM entries WHERE id=?", id); }
   entries(): Entry[] { return all<Entry>(this.db, "SELECT * FROM entries ORDER BY path"); }
   identities(): { entryId: string; device: string; inode: string }[] {
     return all<{ entryId: string; device: string; inode: string }>(this.db, "SELECT entry_id entryId,device,inode FROM file_identity");
@@ -260,7 +262,7 @@ export class ClientLocal implements ChunkJournal {
         if (referenced) run(this.db, "UPDATE entries SET path=?,kind='tombstone',fingerprint=NULL,hydration='downloaded' WHERE id=?", `.retired-${old.id}`, old.id);
         else run(this.db, "DELETE FROM entries WHERE id=?", old.id);
       }
-      for (const entry of entries) run(this.db, `INSERT INTO entries VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,kind=excluded.kind,fingerprint=excluded.fingerprint,hydration=excluded.hydration,revision=excluded.revision`, entry.id, entry.path, entry.kind, entry.fingerprint, entry.hydration, entry.revision);
+      for (const entry of entries) run(this.db, `INSERT INTO entries VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,kind=excluded.kind,fingerprint=excluded.fingerprint,hydration=excluded.hydration,revision=excluded.revision,executable=excluded.executable`, entry.id, entry.path, entry.kind, entry.fingerprint, entry.hydration, entry.revision, entry.executable ?? null);
       for (const item of identities) run(this.db, "INSERT INTO file_identity VALUES(?,?,?)", item.entryId, item.device, item.inode);
     });
   }
@@ -335,7 +337,7 @@ export class ClientLocal implements ChunkJournal {
           run(this.db, "UPDATE entries SET path=?,kind='tombstone',fingerprint=NULL,hydration='downloaded' WHERE id=?", `.retired-${old.id}`, old.id);
         else run(this.db, "DELETE FROM entries WHERE id=?", old.id);
       }
-      for (const e of entries) run(this.db, "INSERT INTO entries VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,kind=excluded.kind,fingerprint=excluded.fingerprint,hydration=excluded.hydration,revision=excluded.revision", e.id, e.path, e.kind, e.fingerprint, e.hydration, e.revision);
+      for (const e of entries) run(this.db, "INSERT INTO entries VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,kind=excluded.kind,fingerprint=excluded.fingerprint,hydration=excluded.hydration,revision=excluded.revision,executable=excluded.executable", e.id, e.path, e.kind, e.fingerprint, e.hydration, e.revision, e.executable ?? null);
       for (const item of identities) run(this.db, "INSERT INTO file_identity VALUES(?,?,?)", item.entryId, item.device, item.inode);
       for (const e of entries) if (e.kind === "file" && e.hydration === "downloaded")
         run(this.db, "INSERT INTO suppression VALUES(?,?,?) ON CONFLICT(path) DO UPDATE SET fingerprint=excluded.fingerprint,operation_id=excluded.operation_id", e.path, e.fingerprint, id);

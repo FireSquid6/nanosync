@@ -389,3 +389,30 @@ Exact changed paths:
 - `packages/cli/src/local-provision.ts` — `provisionLocalVault` prepared-receipt replay durability gate.
 - `packages/cli/tests/local-safety.test.ts` — public CLI file/parent fsync failure-and-retry regressions.
 - `docs/implementation-progress.md` — contracts and verification evidence.
+
+## Binding executable-metadata review fix (completed)
+
+### Public contracts
+
+- `LinuxScanner.hasUnsyncedChanges` now compares the owner's executable bit, using the same `0o100` semantics as normal scanning, against applied manifest metadata retained in the replica journal. Both adding and removing execution permission require explicit force before disconnect if not synchronized; `--yes` does not authorize abandonment.
+- Client-local schema 7 adds nullable `Entry.executable` (0/1). Scan commits and manifest application persist it atomically with the existing entry state. Unknown metadata is conservatively dirty until synchronized, not inferred from current filesystem permissions. No remote access or file transfer is introduced into disconnection.
+
+### Evidence
+
+- Reproduced red through public CLI against real temporary servers: both 0600→0700 and 0700→0600 changes allowed disconnect without force. Regressions now verify refusal with `--yes`, retained binding markers, successful explicit forced disconnect, and preserved plaintext and modes.
+- Additional CLI regression verifies synchronized executable changes permit ordinary disconnect for both the publishing replica and a replica applying the downloaded manifest.
+- `bun test packages/client-local packages/cli/tests/sync.test.ts`: **31 passed, 0 failed**.
+- `bun test packages/cli`: **61 passed, 0 failed** on final rerun. Initial run had one existing PTY harness process-exit race (transcript already showed the expected acknowledgement refusal); no skips or harness changes made. Full-suite run also passed that test.
+- `bun run typecheck`: **all eight packages passed**.
+- `bun test`: **282 passed, 0 failed**, 2038 assertions.
+- `git diff --check`: passed.
+
+### Review handoff
+
+Exact changed paths / key functions:
+- `packages/client-local/src/index.ts` — schema 7, `Entry`, `upsertEntry`, `entry`, `recordScan`, `finishApply`.
+- `packages/client-local/tests/local.test.ts` — journal schema/version and unknown executable expectations.
+- `packages/linux-client/src/index.ts` — `LinuxScanner.hasUnsyncedChanges`, `plan` scan commit metadata.
+- `packages/linux-client/src/apply.ts` — applied manifest entry metadata.
+- `packages/cli/tests/sync.test.ts` — executable-only dirty/clean disconnect CLI regressions.
+- `docs/implementation-progress.md` — contracts and evidence.

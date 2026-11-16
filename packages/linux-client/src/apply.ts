@@ -265,7 +265,7 @@ function planApply(root: Root, local: ClientLocal, manifest: ManifestV1, sequenc
     if (e.kind === "file" && hydration === "downloaded" && (!prior || prior.hydration === "evicted" || prior.fingerprint !== e.sha256 ||
         root.at(prior.path) && !!(root.at(prior.path)!.mode & 0o100) !== e.executable))
       stages[e.id] = temp(plan, e.id, "new");
-    desired.push({ id: e.id, path, kind: e.kind, fingerprint: e.sha256 ?? null, hydration, revision: manifest.revisionId });
+    desired.push({ id: e.id, path, kind: e.kind, fingerprint: e.sha256 ?? null, executable: e.kind === "file" ? (e.executable ? 1 : 0) : null, hydration, revision: manifest.revisionId });
   }
   for (const entry of oldEntries) if (entry.path && ignore.ignores(entry.path, entry.kind === "directory")) desired.push(entry);
   const snapshot = scan(root, ignore);

@@ -149,6 +149,7 @@ export class LinuxScanner {
       const old = prior.get(file.path);
       if (!old || old.kind !== file.kind || old.hydration === 'evicted') return true;
       if (file.kind === 'file') {
+        if (old.executable === null || old.executable === undefined || !!(file.stat.mode & 0o100) !== !!old.executable) return true;
         const fd = openPath(this.root, file.path, file.stat);
         try {
           const hash = createHash('sha256'), buffer = Buffer.allocUnsafe(65536);
@@ -268,7 +269,7 @@ export class LinuxScanner {
         if (this.local.matchesSuppression(file.path, entry.sha256!)) suppressed.push(file.path);
       }
       entries.push(entry);
-      updates.push({ id, path: file.path, kind: file.kind, fingerprint: entry.sha256 ?? null, hydration: "downloaded", revision });
+      updates.push({ id, path: file.path, kind: file.kind, fingerprint: entry.sha256 ?? null, executable: entry.kind === "file" ? (entry.executable ? 1 : 0) : null, hydration: "downloaded", revision });
       const [dev, ino] = file.identity.split(":"); identities.push({ entryId: id, device: dev!, inode: ino! });
     }
     // Evicted objects are present in the manifest but deliberately absent on disk.
