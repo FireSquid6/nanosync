@@ -49,23 +49,60 @@ async function boundedBody(body: ReadableStream<Uint8Array> | null): Promise<Uin
   try {
     while (true) {
       const item = await reader.read(); if (item.done) break;
+      if (!(item.value instanceof Uint8Array)) throw new Error("HTTP stream must contain bytes");
       length += item.value.length; if (length > MAX_HTTP_BYTES) throw new Error("HTTP body too large");
-      parts.push(item.value);
+      parts.push(item.value.slice());
     }
   } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
   const result = new Uint8Array(length); let offset = 0;
   for (const part of parts) { result.set(part, offset); offset += part.length; }
   return result;
 }
+function checkedBytes(bytes: Uint8Array): Uint8Array {
+  if (bytes.byteLength > MAX_HTTP_BYTES) throw new Error("HTTP body too large");
+  return bytes.slice();
+}
+async function rawBody(body: BodyInit, headers: Headers): Promise<Uint8Array> {
+  if (typeof body === "string" || body instanceof URLSearchParams) {
+    const text = String(body);
+    if (text.length > MAX_HTTP_BYTES) throw new Error("HTTP body too large");
+    if (!headers.has("content-type")) headers.set("content-type", typeof body === "string" ? "text/plain;charset=UTF-8" : "application/x-www-form-urlencoded;charset=UTF-8");
+    return checkedBytes(new TextEncoder().encode(text));
+  }
+  if (body instanceof ArrayBuffer) return checkedBytes(new Uint8Array(body));
+  if (ArrayBuffer.isView(body)) return checkedBytes(new Uint8Array(body.buffer, body.byteOffset, body.byteLength));
+  if (body instanceof ReadableStream) return boundedBody(body);
+  if (body instanceof Blob) {
+    if (body.size > MAX_HTTP_BYTES) throw new Error("HTTP body too large");
+    if (body.type && !headers.has("content-type")) headers.set("content-type", body.type);
+    return checkedBytes(new Uint8Array(await body.arrayBuffer()));
+  }
+  throw new Error("unsupported native HTTP body");
+}
 export function nativeFetch(bridge: Bridge, baseUrl: string): (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> {
   const base = new URL(baseUrl);
   return async (input, init) => {
-    const request = new Request(input, init), url = new URL(request.url);
+    // Do not construct a Request here: pre-Chromium-105 WebViews cannot accept
+    // stream request bodies, and older Request implementations omit .body.
+    const request = typeof input === "object" && "url" in input ? input as Request : undefined;
+    const url = new URL(request ? request.url : String(input));
     if (url.origin !== base.origin || !url.pathname.startsWith("/v1/") || url.username || url.password || url.hash) throw new Error("HTTP outside scoped server");
-    const headers: Record<string, string> = {}; request.headers.forEach((v, k) => { headers[k] = v; });
-    const bytes = await boundedBody(request.body);
+    const normalizedHeaders = new Headers(init?.headers ?? request?.headers);
+    const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
+    let bytes: Uint8Array;
+    if (init?.body != null) bytes = await rawBody(init.body, normalizedHeaders);
+    else if (request?.body) bytes = await boundedBody(request.body);
+    else if (request && method !== "GET" && method !== "HEAD") {
+      // Compatibility fallback for trusted, protocol-bounded external Requests.
+      // Reject a declared oversize before allocation, then check actual bytes too.
+      const length = normalizedHeaders.get("content-length");
+      if (length !== null && (!/^\\d+$/.test(length) || Number(length) > MAX_HTTP_BYTES)) throw new Error("HTTP body too large");
+      bytes = checkedBytes(new Uint8Array(await request.arrayBuffer()));
+    } else bytes = new Uint8Array();
+    if ((method === "GET" || method === "HEAD") && bytes.length) throw new Error("GET/HEAD request cannot contain a body");
+    const headers: Record<string, string> = {}; normalizedHeaders.forEach((v, k) => { headers[k] = v; });
     const response = await bridge.call<{ status: number; headers: Record<string, string>; bodyBase64?: string }>("http", {
-      path: url.pathname + url.search, method: request.method, headers, ...(bytes.length ? { bodyBase64: toBase64(bytes) } : {}),
+      path: url.pathname + url.search, method, headers, ...(bytes.length ? { bodyBase64: toBase64(bytes) } : {}),
     });
     if (response.status >= 300 && response.status < 400) throw new Error("redirect refused");
     return new Response([204, 205, 304].includes(response.status) ? null : new Uint8Array(fromBase64(response.bodyBase64 ?? "")).buffer, { status: response.status, headers: response.headers });

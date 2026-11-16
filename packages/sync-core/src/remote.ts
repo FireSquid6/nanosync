@@ -189,7 +189,9 @@ export class HttpRemote {
     const headers = new Headers(init.headers);
     if (authenticated) headers.set("authorization", `Bearer ${this.options.token}`);
     if (authenticated && this.options.vaultId) headers.set("x-nanosync-vault-id", this.options.vaultId);
-    return this.options.fetch(new Request(`${this.base}${path}`, { ...init, headers }));
+    // Preserve raw BodyInit for transports on WebViews that cannot construct a
+    // streaming Request. Standard fetch accepts the same URL/init contract.
+    return this.options.fetch(`${this.base}${path}`, { ...init, headers });
   }
 
   private async body(response: Response, statuses: number[] = [200]): Promise<unknown> {

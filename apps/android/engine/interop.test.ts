@@ -241,3 +241,22 @@ test("ignore policy is revalidated before every commit and pinned across partial
   rmSync(join(e.androidFiles, ".nanosyncignore")); await resumed.run(e.context);
   for (const name of ["a", "b"]) expect(readFileSync(join(e.androidFiles, name), "utf8")).toBe("remote replacement");
 }, 30000);
+
+test("legacy Request without body streams still downloads and publishes through the real server", async () => {
+  const e = await fixture(); writeFileSync(join(e.cliFiles, "desktop"), "remote bytes"); await e.cli();
+  const ModernRequest = globalThis.Request;
+  class LegacyRequest extends ModernRequest {
+    constructor(input: RequestInfo | URL, init?: RequestInit) {
+      if (init?.body instanceof ReadableStream) throw new Error("legacy Request cannot accept streams");
+      super(input, init); Object.defineProperty(this, "body", { value: undefined });
+    }
+  }
+  globalThis.Request = LegacyRequest as typeof Request;
+  try {
+    await e.host.run(e.context);
+    expect(readFileSync(join(e.androidFiles, "desktop"), "utf8")).toBe("remote bytes");
+    writeFileSync(join(e.androidFiles, "phone"), new Uint8Array([0, 255, 128, 1]));
+    await e.host.run(e.context);
+  } finally { globalThis.Request = ModernRequest; }
+  await e.cli(); expect(readFileSync(join(e.cliFiles, "phone"))).toEqual(Buffer.from([0, 255, 128, 1]));
+}, 30000);

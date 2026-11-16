@@ -32,7 +32,8 @@ async function setup() {
     return { vaultId, deviceId, principalId: rootId };
   } });
   const calls: string[] = [];
-  const transport: RemoteOptions["fetch"] = async input => {
+  const transport: RemoteOptions["fetch"] = async (input, init) => {
+    input = new Request(input, init);
     const request = input as Request; calls.push(`${request.method} ${new URL(request.url).pathname}`);
     return handle(request);
   };
@@ -67,7 +68,8 @@ test("negotiates, authenticates, publishes immutable frames, replays a lost acce
   }] };
   // The manifest parser validates shape, while file SHA-256 is verified when reconstructing the file.
   let lost = false;
-  const dropping: RemoteOptions["fetch"] = async input => {
+  const dropping: RemoteOptions["fetch"] = async (input, init) => {
+    input = new Request(input, init);
     const response = await env.transport(input);
     if (!lost && new URL((input as Request).url).pathname === "/v1/head/advance") { lost = true; await response.arrayBuffer(); throw new TypeError("lost response"); }
     return response;
@@ -91,7 +93,8 @@ test("retries truncated frame at chunk boundary, journals only verified bytes, a
     put: async (_, ref, bytes) => { saved.set(ref.ciphertextChecksum, bytes); },
   };
   let truncated = false, reads = 0;
-  const dropping: RemoteOptions["fetch"] = async input => {
+  const dropping: RemoteOptions["fetch"] = async (input, init) => {
+    input = new Request(input, init);
     const response = await env.transport(input);
     if ((input as Request).method === "GET" && new URL((input as Request).url).pathname.includes("/objects/chunk/")) {
       reads++;
@@ -111,7 +114,8 @@ test("retries truncated frame at chunk boundary, journals only verified bytes, a
   saved.set(chunk.reference.ciphertextChecksum, new Uint8Array([4]));
   expect(await Array.fromAsync(client.downloadChunks([chunk.reference], master, vaultId))).toEqual([new Uint8Array([1, 2, 3])]);
   expect(reads).toBe(3);
-  const corrupted: RemoteOptions["fetch"] = async input => {
+  const corrupted: RemoteOptions["fetch"] = async (input, init) => {
+    input = new Request(input, init);
     const response = await env.transport(input);
     if ((input as Request).method === "GET") {
       const bytes = new Uint8Array(await response.arrayBuffer()); bytes[bytes.length - 1]! ^= 1;
@@ -174,7 +178,8 @@ test("download snapshots reference and master before negotiation and retains the
   const gate = new Promise<void>(resolve => { unblock = resolve; });
   const waiting = new Promise<void>(resolve => { started = resolve; });
   let gets = 0;
-  const transport: RemoteOptions["fetch"] = async input => {
+  const transport: RemoteOptions["fetch"] = async (input, init) => {
+    input = new Request(input, init);
     const pathname = new URL((input as Request).url).pathname;
     if (pathname === "/v1/capabilities") { started(); await gate; }
     if (pathname.startsWith("/v1/objects/chunk/") && (input as Request).method === "GET" && ++gets === 1)
@@ -209,7 +214,8 @@ test("presence sorts and batches IDs at the negotiated 1000 limit", async () => 
 
 test("rejects duplicate-key protocol errors instead of accepting ambiguous authorization state", async () => {
   const env = await setup();
-  const tampered: RemoteOptions["fetch"] = async input => {
+  const tampered: RemoteOptions["fetch"] = async (input, init) => {
+    input = new Request(input, init);
     if (new URL((input as Request).url).pathname === "/v1/head") return new Response(
       '{"protocolVersion":1,"code":"UNAUTHORIZED","code":"UNAVAILABLE","message":"Denied"}',
       { status: 401, headers: { "content-type": "application/json" } });
@@ -288,7 +294,8 @@ test("publishes file-order streamed frames with descending pseudorandom IDs with
 
 test("rejects an advertised idempotency key limit below 128-bit hex keys", async () => {
   const env = await setup();
-  const limited: RemoteOptions["fetch"] = async input => {
+  const limited: RemoteOptions["fetch"] = async (input, init) => {
+    input = new Request(input, init);
     const response = await env.transport(input);
     if (new URL((input as Request).url).pathname !== "/v1/capabilities") return response;
     const caps = await response.json(); caps.limits.maximumIdempotencyKeyLength = 31;
@@ -324,7 +331,8 @@ test("upload snapshots frame and reference before async negotiation and every re
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
   let first = true;
-  const transport: RemoteOptions["fetch"] = async input => {
+  const transport: RemoteOptions["fetch"] = async (input, init) => {
+    input = new Request(input, init);
     if (new URL((input as Request).url).pathname === "/v1/capabilities") await gate;
     if ((input as Request).method === "PUT" && first) {
       first = false;
@@ -338,4 +346,21 @@ test("upload snapshots frame and reference before async negotiation and every re
   release();
   expect(await uploading).toBe("stored");
   expect(await env.remote().download(original.reference, master, vaultId)).toEqual(new Uint8Array([9, 9]));
+});
+
+test("custom transports receive URL plus raw JSON and frame stream without Request construction", async () => {
+  const env = await setup();
+  const bodies: unknown[] = [];
+  const client = env.remote(async (input, init) => {
+    expect(typeof input).toBe("string");
+    expect(init?.headers).toBeInstanceOf(Headers);
+    if (init?.body !== undefined) bodies.push(init.body);
+    return env.transport(input, init);
+  });
+  await client.presence("chunk", ["a".repeat(64)]);
+  const object = await encryptChunk(new Uint8Array([0, 255, 7]), master, vaultId);
+  await client.upload(object, vaultId, "transport-regression");
+  expect(bodies.some(body => typeof body === "string")).toBe(true);
+  expect(bodies.some(body => body instanceof ReadableStream)).toBe(true);
+  expect(await client.download(object.reference, master, vaultId)).toEqual(new Uint8Array([0, 255, 7]));
 });

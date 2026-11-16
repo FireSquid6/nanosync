@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { install, type RunContext } from "./runtime.ts";
 import type { NativeHost } from "./bridge.ts";
 import type { Metadata } from "./journal.ts";
+// Native HTTP runs outside the WebView: its wire transport must not inherit a
+// simulated legacy WebView Request constructor installed by compatibility tests.
+const WireRequest = globalThis.Request;
 export class TestHost implements NativeHost {
   readonly target: { Nanosync?: unknown; NanosyncBridge?: { complete(id: string, result: unknown): void } } = {};
   readonly runtime: ReturnType<typeof install>;
@@ -59,7 +62,7 @@ export class TestHost implements NativeHost {
     const path = a.path === undefined ? "" : join(this.root, a.path), stage = a.id ? join(this.privateRoot, a.id) : "";
     switch (method) {
       case "http": {
-        const response = await this.http(new Request(this.baseUrl.replace(/\/$/, "") + a.path, { method: a.method, headers: a.headers, body: a.bodyBase64 ? Buffer.from(a.bodyBase64, "base64") : undefined }));
+        const response = await this.http(new WireRequest(this.baseUrl.replace(/\/$/, "") + a.path, { method: a.method, headers: a.headers, body: a.bodyBase64 ? Buffer.from(a.bodyBase64, "base64") : undefined }));
         return { status: response.status, headers: Object.fromEntries(response.headers), bodyBase64: Buffer.from(await response.arrayBuffer()).toString("base64") };
       }
       case "stat": return existsSync(path) ? this.metadata(a.path) : { missing: true };
