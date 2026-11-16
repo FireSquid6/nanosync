@@ -54,9 +54,9 @@ test("password-only server, local device approval, two isolated vaults and two r
   await initializeServerOwner(serverRoot, "correct horse battery staple");
   const running = await runServer({ directory: serverRoot, port: 7555, webUi:true });
   try {
-    expect(await enrollServer(clientRoot, running.url, "correct horse battery staple", "desktop", 1)).toMatchObject({status:"pending"});
+    expect(await enrollServer(clientRoot, running.url, "correct horse battery staple", "desktop", 0)).toMatchObject({status:"pending"});
     approveLocalDevice(serverRoot, (await import("../src/vault-client.ts")).pendingEnrollments(clientRoot)[0]!.deviceId);
-    expect(await enrollServer(clientRoot, running.url, undefined, "desktop", 1)).toMatchObject({status:"approved"});
+    expect(await enrollServer(clientRoot, running.url, undefined, "desktop", 0)).toMatchObject({status:"approved"});
     const [info] = servers(clientRoot);
     expect(info).toBeDefined();
     const owner = await browserOwner(running.url, "correct horse battery staple");

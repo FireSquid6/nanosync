@@ -293,3 +293,34 @@ Final verification after expiry-bound retries, documentation, locked cleanup and
 - `bun run typecheck`: **all eight packages passed**.
 - `bun test`: **265 passed, 0 failed**, 1877 assertions; no unhandled errors.
 - `git diff --check`: passed.
+
+## CLI enrollment network/cancellation review fixes (completed)
+
+### Public contracts
+
+- Initial password login now receives the enrollment cancellation signal. Ctrl-C during login returns `INTERRUPTED` / exit 130 promptly; it no longer suppresses termination until a stalled login finishes. No enrollment identity exists before successful login, so retry at that stage still needs the password.
+- All enrollment HTTP exchanges (including fresh-status validation and login) have a 10-second request timeout. Positive finite `--wait-ms` budgets additionally bound in-flight requests; persisted expiry caps discovery/submission/status requests even during interactive waits. Zero remains bounded submit-and-exit (no polling/retries), not a zero-duration network deadline. Timers are cleared after exchanges; polling/backoff sleeps observe cancellation immediately.
+- Post-persistence timeout/outage preserves the exact pending identity and returns pending, or durably records expiry when reached. Before persistence, timeout returns documented `REQUEST_TIMEOUT` / exit 5. Credentials are still saved before pending state is cleared.
+- HTTP error classification no longer depends on valid JSON: HTML/empty proxy failures retain their HTTP status and retry eligibility. Protocol JSON codes remain available; arbitrary proxy response bodies are not exposed.
+
+### Evidence
+
+- Reproduced all three reviewer findings red through the public CLI against a real HTTP listener: delayed login took ~806ms despite SIGINT; capability/submission exceeded finite waits by ~800ms; delayed status exceeded 1200ms by ~600ms; HTML 503 returned exit 2 without retry.
+- New real-network regressions cover prompt login cancellation, stalled capability/submission/status deadlines, request-expiry cancellation and durable terminal state, and both HTML and empty 503 retries. Resumable state comparisons verify identity/token preservation. Seven new tests pass.
+- Updated the existing multi-vault test's two 1ms calls to explicit zero submit-and-exit: they intentionally require submission even when login alone exceeds 1ms; genuinely bounded positive waits can no longer guarantee that.
+- `bun test packages/cli`: **51 passed, 0 failed**, 480 assertions.
+- `bun run typecheck`: **all eight packages passed**.
+- `bun test`: **272 passed, 0 failed**, 1899 assertions; no unhandled errors.
+- `git diff --check`: passed.
+
+### Review handoff
+
+Key functions: `api`, `login`, `enrollServer` (bounded exchange, retry, interruptible pause).
+
+Changed paths:
+- `packages/cli/src/client.ts`
+- `packages/cli/src/vault-client.ts`
+- `packages/cli/tests/enrollment-network.test.ts`
+- `packages/cli/tests/multi-vault.test.ts`
+- `packages/cli/README.md`
+- `docs/implementation-progress.md`

@@ -26,11 +26,21 @@ export async function api(url: string, path: string, init: RequestInit = {}, tok
     headers.set("content-type", "application/json");
   }
   const response = await fetch(`${baseUrl(url)}${path}`, { ...init, headers });
-  const result = await response.json() as Record<string, any>;
-  if (!response.ok) throw new RemoteError(response.status, String(result.code ?? "ERROR"), `server ${response.status}: ${String(result.code ?? "ERROR")}`);
-  return result;
+  if (!response.ok) {
+    // Reverse proxies need not return protocol JSON. Preserve HTTP classification
+    // even for HTML/empty error bodies, without exposing their contents.
+    let code = "ERROR";
+    try {
+      const result = await response.json();
+      if (result && typeof result.code === "string") code = result.code;
+    } catch (error) {
+      if (init.signal?.aborted) throw error;
+    }
+    throw new RemoteError(response.status, code, `server ${response.status}: ${code}`);
+  }
+  return await response.json();
 }
-export async function login(url: string, password: string): Promise<string> {
-  const result = await api(url, "/v1/auth/password", { method: "POST", body: JSON.stringify({ protocolVersion: 1, password }) });
+export async function login(url: string, password: string, signal?: AbortSignal): Promise<string> {
+  const result = await api(url, "/v1/auth/password", { method: "POST", body: JSON.stringify({ protocolVersion: 1, password }), signal });
   return parseAuthToken(result.sessionToken);
 }
