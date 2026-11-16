@@ -238,7 +238,20 @@ public final class SyncCoordinator implements UiActions {
         });
     }
 
-    @Override public void syncNow(String id, boolean override) { state.main.post(() -> state.start(id, true, override, null)); }
+    @Override public void syncNow(String id, boolean override) {
+        JSONObject requestedConfig = state.store.snapshot(), requestedVault = findVault(requestedConfig, id);
+        if (requestedVault == null) return;
+        String requestedPolicy = state.policyStamp(requestedConfig, requestedVault);
+        state.main.post(() -> {
+            JSONObject currentConfig = state.store.snapshot(), currentVault = findVault(currentConfig, id);
+            if (currentVault == null) return;
+            if (!requestedPolicy.equals(state.policyStamp(currentConfig, currentVault))) {
+                state.vaultState(id, vault -> vault.put("status", "Manual sync cancelled by settings change"));
+                return;
+            }
+            state.start(id, true, override, null);
+        });
+    }
     @Override public void settingsChanged() {
         JSONObject settings = state.store.snapshot();
         state.main.post(() -> {
@@ -366,17 +379,29 @@ public final class SyncCoordinator implements UiActions {
             JobLease lease = new JobLease(owner, onDrained); job = lease;
             JSONObject config = store.snapshot();
             refreshPolicies(config);
+            ArrayList<String> candidates = new ArrayList<>();
             JSONArray servers = config.optJSONArray("servers");
             for (int i = 0; i < servers.length(); i++) {
                 JSONArray vaults = servers.optJSONObject(i).optJSONArray("vaults");
                 for (int j = 0; j < vaults.length(); j++) {
                     JSONObject vault = vaults.optJSONObject(j);
-                    if (vault.optBoolean("background") && !vault.optBoolean("paused") && !vault.optString("masterKeyHex").isEmpty()) lease.pending.add(vault.optString("id"));
+                    if (vault.optBoolean("background") && !vault.optBoolean("paused") && !vault.optString("masterKeyHex").isEmpty()) candidates.add(vault.optString("id"));
                 }
             }
-            lease.deadline = () -> stopJob(lease);
+            lease.pending.addAll(candidates);
+            if (!candidates.isEmpty()) {
+                int offset = Math.floorMod(config.optInt("jobScanOffset"), candidates.size());
+                java.util.Collections.rotate(candidates, -offset);
+                int nextOffset = (offset + Math.min(4, candidates.size())) % candidates.size();
+                mutate(latest -> latest.put("jobScanOffset", nextOffset));
+            }
+            lease.deadline = () -> {
+                for (String id : lease.pending) vaultState(id, vault -> vault.put("error",
+                        "Scheduled sync time limit reached. Saved transfers are retained; open Nanosync for a longer sync."));
+                stopJob(lease);
+            };
             main.postDelayed(lease.deadline, Math.max(1, Math.min(120_000, budgetMillis)));
-            for (String id : new ArrayList<>(lease.pending)) start(id, false, false, null, lease);
+            for (String id : candidates) start(id, false, false, null, lease);
             checkJob(lease);
         }
         void skipped(JobLease lease, String id) {
@@ -555,7 +580,9 @@ public final class SyncCoordinator implements UiActions {
                             .put("runTimeouts", value.optInt("runTimeouts") + 1));
                     cancel(id, run);
                 };
-                main.postDelayed(run.deadline, environment.budgetMillis(vault.optInt("runTimeouts")));
+                long runBudget = environment.budgetMillis(vault.optInt("runTimeouts"));
+                if (lease != null) runBudget = Math.min(runBudget, 30_000L << Math.min(Math.max(0, run.previousYields), 2));
+                main.postDelayed(run.deadline, runBudget);
                 run.runtime.start();
             } catch (Exception e) {
                 Run run = runs.get(id);
@@ -595,9 +622,11 @@ public final class SyncCoordinator implements UiActions {
                 cleanupJournal(id); return;
             }
             if (run.cancelled && run.timedOut) {
-                vaultState(id, vault -> vault.put("running", false).put("status", "Timeout; retry queued"));
                 StartRequest retry = new StartRequest(run.manual, run.override, null, run.generation, run.job);
-                if (run.job == null && currentRequest(id, retry)) queued.put(id, retry);
+                boolean requeue = run.job == null && currentRequest(id, retry);
+                vaultState(id, vault -> vault.put("running", false).put("status", requeue ? "Timeout; retry queued"
+                        : vault.optBoolean("paused") ? "Paused" : run.job == null ? "Stopped; settings changed" : "Waiting for scheduled retry"));
+                if (requeue) queued.put(id, retry);
                 return;
             }
             if (run.cancelled) {

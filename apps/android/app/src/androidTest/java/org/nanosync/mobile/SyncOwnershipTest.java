@@ -106,6 +106,22 @@ public final class SyncOwnershipTest {
         }
     }
 
+    @Test public void scheduledJobYieldsFourStalledVaultsBeforeServingFifth() throws Exception {
+        try (Fixture f = new Fixture(5, 100)) {
+            java.util.concurrent.atomic.AtomicBoolean completed = new java.util.concurrent.atomic.AtomicBoolean();
+            f.coordinator.startJob(new Object(), 60_000, () -> completed.set(true));
+            await(() -> f.runs.size() == 4 && f.runs.values().stream().allMatch(run -> run.cancelled));
+            assertFalse(f.runs.containsKey(f.ids.get(4))); assertFalse(completed.get());
+            for (FakeRun run : new ArrayList<>(f.runs.values())) run.drain();
+            await(() -> f.runs.containsKey(f.ids.get(4)));
+            f.runs.get(f.ids.get(4)).listener.onFinished(new JSONObject().put("revisionId", UUID.randomUUID().toString())
+                    .put("sequence", 1).put("pendingUploads", 0).put("pendingDownloads", 0));
+            await(completed::get);
+            assertTrue(f.vault(4).optBoolean("initialSyncComplete"));
+            assertFalse(f.vault(0).optBoolean("initialSyncComplete"));
+        }
+    }
+
     @Test public void stoppingJobCancelsOnlyItsOwnEnabledUnpausedRuns() throws Exception {
         try (Fixture f = new Fixture(4, 60_000)) {
             f.store.mutate(config -> { try {
