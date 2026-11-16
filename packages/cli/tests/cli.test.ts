@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { main } from "../src/main.ts";
 import { runServer } from "../src/server.ts";
 import { secureInstall, secureRead } from "../src/security.ts";
-import { api, bootstrapWorkflow, enroll, login, saveCredentials, joinVault } from "../src/client.ts";
+import { api, login } from "../src/client.ts";
+import { bootstrapWorkflow, enroll, saveCredentials, joinVault } from "./support/legacy-fixture.ts";
 import { encryptManifest, generateRecoverySecret, generateVaultMasterKey, wrapMasterKey, referenceSetMac, displayRecoverySecret } from "@nanosync/sync-core";
 import { parsePersistedRevisionEnvelope } from "@nanosync/protocol";
 
@@ -20,15 +21,15 @@ test("CLI help lists foreground sync and rejects removed local service commands"
   try {
     expect(await main(["--help"])).toBe(0);
     const help = stdout.mock.calls.flat().join("");
-    for (const name of ["server", "bootstrap", "enroll", "sync", "devices", "approve", "revoke", "admin"]) {
+    for (const name of ["server", "client"]) {
       expect(help).toContain(name);
     }
-    expect(await main(["sync", "--help"])).toBe(0);
-    expect(stdout.mock.calls.flat().join("")).toContain("--continuous");
+    expect(await main(["client", "sync", "--help"])).toBe(0);
+    expect(stdout.mock.calls.flat().join("")).toContain("--watch");
     for (const name of ["daemon", "status", "pause", "resume", "history", "restore", "resolve", "conflicts", "doctor", "evict", "download"]) {
       expect(help).not.toMatch(new RegExp(`^\\s+${name}\\s`, "m"));
       expect(await main([name])).toBe(2);
-      expect(JSON.parse(String(stderr.mock.lastCall?.[0]))).toMatchObject({ state: "unknown", exitCode: 2 });
+      expect(JSON.parse(String(stderr.mock.lastCall?.[0]))).toMatchObject({ ok: false, exitCode: 2 });
     }
   } finally { stdout.mockRestore(); stderr.mockRestore(); }
 });
@@ -39,7 +40,7 @@ test("Commander help and validation preserve structured errors across repeated m
   try {
     expect(await main(["server", "run", "--help"])).toBe(0);
     expect(stdout.mock.calls.flat().join("")).toContain("--acknowledge-exposure");
-    expect(await main(["enroll", "--help"])).toBe(0);
+    expect(await main(["client", "connections", "add", "--help"])).toBe(0);
     expect(stdout.mock.calls.flat().join("")).toContain("--client-dir");
     expect(await main(["help"])).toBe(0);
     for (const args of [
@@ -48,13 +49,13 @@ test("Commander help and validation preserve structured errors across repeated m
       ["admin", "scan", "--client-dir"], ["approve"], ["revoke", "one", "two"]
     ]) {
       expect(await main(args)).toBe(2);
-      expect(JSON.parse(String(stderr.mock.lastCall?.[0]))).toMatchObject({ state: "unknown", exitCode: 2 });
+      expect(JSON.parse(String(stderr.mock.lastCall?.[0]))).toMatchObject({ ok: false, exitCode: 2 });
     }
     const prior = process.env.NANOSYNC_PASSWORD;
     process.env.NANOSYNC_PASSWORD = "owner-password-for-tests";
     try {
-      expect(await main(["--server-dir", directory(), "server", "init", "--env", "--json"])).toBe(0);
-      expect(await main(["server", "--server-dir", directory(), "init", "--env"])).toBe(0);
+      expect(await main(["--server-dir", directory(), "server", "init", "--json"])).toBe(0);
+      expect(await main(["server", "--server-dir", directory(), "init"])).toBe(0);
     } finally { if (prior === undefined) delete process.env.NANOSYNC_PASSWORD; else process.env.NANOSYNC_PASSWORD = prior; }
     expect(await main(["--bogus", "devices"])).toBe(2);
   } finally { stdout.mockRestore(); stderr.mockRestore(); }
@@ -65,10 +66,10 @@ test("server init provisions owner-only secrets and refuses overwrite", async ()
   const prior = process.env.NANOSYNC_PASSWORD;
   process.env.NANOSYNC_PASSWORD = "owner-password-for-tests";
   try {
-  expect(await main(["server", "init", "--server-dir", root, "--env"])).toBe(0);
+  expect(await main(["server", "init", "--server-dir", root])).toBe(0);
   expect(secureRead(join(root, "pepper.hex"))).toHaveLength(64);
-  expect(secureRead(join(root, "bootstrap.hex"))).toHaveLength(64);
-  expect(await main(["server", "init", "--server-dir", root, "--env"])).toBe(2);
+  expect(existsSync(join(root, "bootstrap.hex"))).toBe(false);
+  expect(await main(["server", "init", "--server-dir", root])).toBe(2);
   } finally { if (prior === undefined) delete process.env.NANOSYNC_PASSWORD; else process.env.NANOSYNC_PASSWORD = prior; }
 });
 
@@ -168,7 +169,7 @@ test("runtime server accepts encrypted genesis, approves second device, and revo
     const adminDir = directory();
     saveCredentials(adminDir, { baseUrl: url, vaultId, deviceId, token: adminToken, masterKey: Buffer.from(master).toString("hex") });
     for (const command of ["storage", "retention-dry-run", "gc-dry-run", "scan", "diagnostics"]) {
-      expect(await main(["admin", command, "--client-dir", adminDir, "--json"])).toBe(0);
+      expect(await main(["server", "admin", command, "--server-dir", root, "--json"])).toBe(0);
     }
     expect(await main(["admin", "collect", "--client-dir", adminDir])).toBe(2);
     const second = randomUUID(), secondDir = directory();
@@ -186,15 +187,15 @@ test("runtime server accepts encrypted genesis, approves second device, and revo
     const pending = JSON.parse(secureRead(join(secondDir, "enrollment.json")).toString("utf8"));
     expect((await joinVault(secondDir, url, second, undefined)).status).toBe("pending");
     expect(JSON.parse(secureRead(join(secondDir, "enrollment.json")).toString("utf8"))).toEqual(pending);
-    expect(await main(["devices", "--client-dir", adminDir])).toBe(0);
+    expect(await main(["server", "devices", "view", "--server-dir", root])).toBe(0);
     expect((await api(url, "/v1/admin/enrollments", {}, adminToken)).enrollments).toHaveLength(1);
-    expect(await main(["approve", second, "--client-dir", adminDir])).toBe(0);
+    expect(await main(["server", "devices", "approve", "--device-id", second, "--server-dir", root])).toBe(0);
     expect((await joinVault(secondDir, url, second, undefined, await displayRecoverySecret(recovery))).status).toBe("approved");
     const other = JSON.parse(secureRead(join(secondDir, "client.json")).toString("utf8"));
     expect((await api(url, "/v1/head", {}, other.token)).sequence).toBe(1);
-    expect(await main(["admin", "storage", "--client-dir", secondDir])).toBe(3);
-    expect(await main(["revoke", second, "--client-dir", adminDir])).toBe(0);
-    expect(await main(["admin", "storage", "--client-dir", secondDir])).toBe(3);
+    expect(await main(["admin", "storage", "--client-dir", secondDir])).toBe(2);
+    expect(await main(["server", "devices", "revoke", "--device-id", second, "--server-dir", root, "--yes"])).toBe(0);
+    expect(await main(["admin", "storage", "--client-dir", secondDir])).toBe(2);
     await expect(api(url, "/v1/head", {}, other.token)).rejects.toThrow(/401/);
   } finally { await server.stop(); }
 });

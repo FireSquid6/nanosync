@@ -1,4 +1,4 @@
-import { constants, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import { constants, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 
@@ -44,4 +44,12 @@ export function provisionSecret(path: string): string {
   const value = secureRead(path, 64).toString("utf8");
   if (!/^[0-9a-f]{64}$/.test(value)) throw new Error("secret file must contain 32 hex-encoded random bytes");
   return value;
+}
+
+/** Atomically update an already protected state file; fsync content and directory. */
+export function secureReplace(path: string, value: string): void {
+  secureRead(path, 1_000_000);
+  const stage = `${path}.${randomBytes(16).toString("hex")}.stage`;
+  secureCreate(stage, value);
+  renameSync(stage, path); syncPrivateDirectory(dirname(resolve(path)));
 }

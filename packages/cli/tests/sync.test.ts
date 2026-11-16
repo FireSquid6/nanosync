@@ -7,7 +7,9 @@ import { join } from "node:path";
 import { ClientLocal } from "@nanosync/client-local";
 import { HttpRemote } from "@nanosync/sync-core";
 import { CHUNK_SIZE } from "@nanosync/protocol";
-import { bootstrapWorkflow, credentials, joinVault } from "../src/client.ts";
+import { bootstrapWorkflow, credentials, joinVault } from "./support/legacy-fixture.ts";
+import { createConnection } from "../src/connections.ts";
+import { privateDirectory, secureCreate } from "../src/security.ts";
 import { main } from "../src/main.ts";
 import { runServer } from "../src/server.ts";
 import { SyncRunner, type SyncOptions } from "../src/sync-runner.ts";
@@ -42,7 +44,7 @@ async function fixture() {
   await bootstrapWorkflow(firstDir, server.url, join(serverDir, "bootstrap.hex"), "sync test password", async value => { recovery = value; });
   const secondId = randomUUID();
   expect((await joinVault(secondDir, server.url, secondId, "sync test password")).status).toBe("pending");
-  expect(await main(["approve", secondId, "--client-dir", firstDir])).toBe(0);
+  expect(await main(["server", "devices", "approve", "--device-id", secondId, "--server-dir", serverDir])).toBe(0);
   expect((await joinVault(secondDir, server.url, secondId, undefined, recovery)).status).toBe("approved");
   const first = credentials(firstDir), second = credentials(secondDir);
   function options(creds: typeof first, clientDirectory: string, syncDirectory: string): SyncOptions {
@@ -50,8 +52,15 @@ async function fixture() {
       masterKey: Buffer.from(creds.masterKey, "hex"), baseUrl: creds.baseUrl, token: creds.token,
       pollMs: 10_000, scan: { debounceMs: 100, stabilityMs: 100 } };
   }
+  function register(root: string, files: string, creds: typeof first) {
+    const serverId = randomUUID();
+    secureCreate(join(privateDirectory(join(root, "servers")), `${serverId}.json`), JSON.stringify({version:1, serverId, baseUrl:creds.baseUrl.replace(/\/$/, ""), deviceId:creds.deviceId, name:"test", token:creds.token}));
+    secureCreate(join(privateDirectory(join(root, "keys")), `${serverId}-${creds.vaultId}.json`), JSON.stringify({version:1, serverId, vaultId:creds.vaultId, masterKey:creds.masterKey}));
+    const binding = createConnection(root, files, serverId, creds.vaultId, creds.deviceId);
+    return options(creds, privateDirectory(join(privateDirectory(join(root,"replicas")),binding.connectionId)), files);
+  }
   return { serverDir, firstDir, secondDir, firstFiles, secondFiles, first, second,
-    a: options(first, firstDir, firstFiles), b: options(second, secondDir, secondFiles), url: server.url };
+    a: register(firstDir, firstFiles, first), b: register(secondDir, secondFiles, second), url: server.url };
 }
 function start(options: SyncOptions) {
   const runner = SyncRunner.start(options);
@@ -72,10 +81,10 @@ async function waitFor(check: () => boolean, timeoutMs = 8_000): Promise<void> {
 
 test("one-shot CLI sync converges enrolled devices, keeps rename identity, and rejects overlap", async () => {
   const e = await fixture();
-  expect(await main(["sync"])).toBe(2);
-  expect(await main(["sync", "--client-dir", e.firstDir, "--sync-dir", e.firstDir])).toBe(2);
-  expect(await main(["sync", "--client-dir", e.firstDir, "--sync-dir", e.firstFiles])).toBe(0);
-  expect(await main(["sync", "--client-dir", e.secondDir, "--sync-dir", e.secondFiles])).toBe(0);
+  expect(await main(["client", "sync"])).toBe(2);
+  expect(await main(["client", "sync", "--client-dir", e.firstDir, "--path", e.firstDir])).toBe(2);
+  expect(await main(["client", "sync", "--client-dir", e.firstDir, "--path", e.firstFiles])).toBe(0);
+  expect(await main(["client", "sync", "--client-dir", e.secondDir, "--path", e.secondFiles])).toBe(0);
   writeFileSync(join(e.firstFiles, "note"), "before", { mode: 0o600 });
   const uploaded = start(e.a);
   expect(() => start(e.a)).toThrow(/live process|sync ownership lock/);
@@ -89,8 +98,8 @@ test("one-shot CLI sync converges enrolled devices, keeps rename identity, and r
   const id = initial.manifest.entries.find(entry => entry.name === "note")?.id;
   expect(readFileSync(join(e.secondFiles, "note"), "utf8")).toBe("before");
   renameSync(join(e.firstFiles, "note"), join(e.firstFiles, "renamed"));
-  expect(await main(["sync", "--client-dir", e.firstDir, "--sync-dir", e.firstFiles])).toBe(0);
-  expect(await main(["sync", "--client-dir", e.secondDir, "--sync-dir", e.secondFiles])).toBe(0);
+  expect(await main(["client", "sync", "--client-dir", e.firstDir, "--path", e.firstFiles])).toBe(0);
+  expect(await main(["client", "sync", "--client-dir", e.secondDir, "--path", e.secondFiles])).toBe(0);
   const after = await remote.head();
   expect((await remote.manifest(after.revisionId!, e.a.masterKey)).manifest.entries.find(entry => entry.name === "renamed")?.id).toBe(id);
   expect(readFileSync(join(e.secondFiles, "renamed"), "utf8")).toBe("before");
@@ -99,9 +108,9 @@ test("one-shot CLI sync converges enrolled devices, keeps rename identity, and r
 test("first snapshot sync imports an existing local file without deleting it", async () => {
   const e = await fixture();
   writeFileSync(join(e.firstFiles, "existing"), "kept", { mode: 0o600 });
-  expect(await main(["sync", "--client-dir", e.firstDir, "--sync-dir", e.firstFiles])).toBe(0);
+  expect(await main(["client", "sync", "--client-dir", e.firstDir, "--path", e.firstFiles])).toBe(0);
   expect(readFileSync(join(e.firstFiles, "existing"), "utf8")).toBe("kept");
-  expect(await main(["sync", "--client-dir", e.secondDir, "--sync-dir", e.secondFiles])).toBe(0);
+  expect(await main(["client", "sync", "--client-dir", e.secondDir, "--path", e.secondFiles])).toBe(0);
   expect(readFileSync(join(e.secondFiles, "existing"), "utf8")).toBe("kept");
 });
 
@@ -234,19 +243,19 @@ test("remote rename of an ignored tracked file refuses apply before creating an 
   await b.syncOnce();
   await expect(a.syncOnce()).rejects.toThrow(/ignored entry moved/);
   expect(readFileSync(join(e.firstFiles, "tracked"), "utf8")).toBe("local original");
-  const local = new ClientLocal(e.firstDir, e.a.vaultId, e.a.deviceId);
+  const local = new ClientLocal(e.a.clientDirectory, e.a.vaultId, e.a.deviceId);
   try { expect(local.pendingApplies()).toEqual([]); } finally { local.close(); }
 });
 
 test("fresh client merges pre-existing local files with remote history", async () => {
   const e = await fixture();
   writeFileSync(join(e.firstFiles, "remote"), "uploaded", { mode: 0o600 });
-  expect(await main(["sync", "--client-dir", e.firstDir, "--sync-dir", e.firstFiles])).toBe(0);
+  expect(await main(["client", "sync", "--client-dir", e.firstDir, "--path", e.firstFiles])).toBe(0);
   writeFileSync(join(e.secondFiles, "local"), "must stay", { mode: 0o600 });
-  expect(await main(["sync", "--client-dir", e.secondDir, "--sync-dir", e.secondFiles])).toBe(0);
+  expect(await main(["client", "sync", "--client-dir", e.secondDir, "--path", e.secondFiles])).toBe(0);
   expect(readFileSync(join(e.secondFiles, "local"), "utf8")).toBe("must stay");
   expect(readFileSync(join(e.secondFiles, "remote"), "utf8")).toBe("uploaded");
-  const local = new ClientLocal(e.secondDir, e.b.vaultId, e.b.deviceId);
+  const local = new ClientLocal(e.b.clientDirectory, e.b.vaultId, e.b.deviceId);
   try { expect(local.head("applied").revisionId).not.toBeNull(); }
   finally { local.close(); }
 });
@@ -260,7 +269,7 @@ test("one-shot stale-head sync retains both concurrent edits and retries frozen 
   writeFileSync(join(e.secondFiles, "shared"), "offline");
   writeFileSync(join(e.firstFiles, "shared"), "online");
   await a.syncOnce(); await b.syncOnce(); await a.syncOnce();
-  const values = (dir: string) => readdirSync(dir).map(name => readFileSync(join(dir, name), "utf8")).sort();
+  const values = (dir: string) => readdirSync(dir).filter(name => name !== ".nanosync").map(name => readFileSync(join(dir, name), "utf8")).sort();
   expect(values(e.firstFiles)).toEqual(["offline", "online"]);
   expect(values(e.secondFiles)).toEqual(values(e.firstFiles));
   await stop(a); await stop(b);
@@ -286,7 +295,7 @@ test("one-shot stale-head sync retains both concurrent edits and retries frozen 
   expect(requests).toHaveLength(2);
   expect(requests[1]).toBe(requests[0]);
   await stop(resumed);
-  expect(await main(["sync", "--client-dir", e.secondDir, "--sync-dir", e.secondFiles])).toBe(0);
+  expect(await main(["client", "sync", "--client-dir", e.secondDir, "--path", e.secondFiles])).toBe(0);
   expect(readFileSync(join(e.secondFiles, "new"), "utf8")).toBe("published");
 });
 
@@ -307,7 +316,7 @@ test("one-shot delete/edit merge retains the deletion and edited conflict copy",
   const manifest = (await remote.manifest(merged.revisionId, e.a.masterKey)).manifest;
   expect(manifest.entries.find(entry => entry.id === original.id)?.kind).toBe("tombstone");
   expect(manifest.entries.some(entry => entry.kind === "file" && !!entry.conflict)).toBe(true);
-  const values = (dir: string) => readdirSync(dir).map(name => readFileSync(join(dir, name), "utf8"));
+  const values = (dir: string) => readdirSync(dir).filter(name => name !== ".nanosync").map(name => readFileSync(join(dir, name), "utf8"));
   expect(values(e.firstFiles)).toEqual(["edited"]);
   expect(values(e.secondFiles)).toEqual(values(e.firstFiles));
 });
@@ -351,7 +360,7 @@ test("restarted one-shot sync retries only the incomplete chunk", async () => {
   await resumed.syncOnce();
   await stop(resumed);
   expect(retry).toEqual([uploads[1]!]);
-  expect(await main(["sync", "--client-dir", e.secondDir, "--sync-dir", e.secondFiles])).toBe(0);
+  expect(await main(["client", "sync", "--client-dir", e.secondDir, "--path", e.secondFiles])).toBe(0);
   expect(readFileSync(join(e.secondFiles, "large"))).toEqual(data);
 });
 
@@ -373,7 +382,7 @@ test("foreground continuous sync debounces changes and shuts down without retain
     expect(heads.at(-1)!.sequence).toBe(initial + 1);
     expect(errors).toEqual([]);
   } finally { controller.abort(); await watching; await stop(runner); }
-  expect(await main(["sync", "--client-dir", e.firstDir, "--sync-dir", e.firstFiles])).toBe(0);
+  expect(await main(["client", "sync", "--client-dir", e.firstDir, "--path", e.firstFiles])).toBe(0);
 });
 
 test("continuous sync reloads ignore rules and prunes new unsafe directories", async () => {
@@ -400,11 +409,14 @@ test("continuous sync reloads ignore rules and prunes new unsafe directories", a
 
 test("continuous CLI command runs in the foreground and releases the lock on SIGTERM", async () => {
   const e = await fixture();
-  const lock = join(e.firstDir, ".sync-owner");
-  const running = main(["sync", "--continuous", "--client-dir", e.firstDir, "--sync-dir", e.firstFiles]);
+  const lock = join(e.a.clientDirectory, ".sync-owner");
+  const running = main(["client", "sync", "--watch", "--client-dir", e.firstDir, "--path", e.firstFiles]);
   try {
     await waitFor(() => existsSync(lock));
-    expect(await main(["sync", "--client-dir", e.firstDir, "--sync-dir", e.firstFiles])).toBe(2);
+    expect(await main(["client", "sync", "--client-dir", e.firstDir, "--path", e.firstFiles])).toBe(2);
+    expect(await main(["client", "vaults", "disconnect", "--client-dir", e.firstDir, "--path", e.firstFiles, "--force", "--yes"])).toBe(2);
+    expect(await main(["client", "connections", "remove", "--client-dir", e.firstDir, "--server", "test", "--force", "--yes"])).toBe(2);
+    expect(existsSync(join(e.firstFiles, ".nanosync"))).toBe(true);
   } finally {
     process.emit("SIGTERM");
     expect(await running).toBe(0);

@@ -227,3 +227,69 @@ Final verification for this step:
 - `bun run typecheck`: **all eight packages passed**.
 - `bun test`: **261 passed, 0 failed**, no unhandled errors.
 - `git diff --check`: passed.
+
+## Explicit server/client CLI and resumable enrollment (completed)
+
+### Public contracts / integration
+
+- Replaced the entire command surface with `server init|run`, `server devices view|approve|deny|revoke`, `server vaults view|create|rename|delete`, `server admin` reports; `client connections add|remove|view`, `client vaults connect|disconnect|view`, and `client sync`. No legacy aliases or production bootstrap/legacy credential workflow remains. Historical protocol setup helpers moved to `packages/cli/tests/support/legacy-fixture.ts` solely to retain regression coverage.
+- Installed maintained `@inquirer/prompts` **with Bun**, locally in the CLI workspace. Input/password/select/confirm use that library; no production readline/stty implementation. Server directory omission prompts only on an interactive terminal. Non-terminal/`--non-interactive` missing selections fail `INPUT_REQUIRED`; server directories are never silently defaulted. All commands support `--json`, `--non-interactive`, ordinary `--yes`; all nonsecret selections have flags. Secrets use environment/protected files/hidden prompts.
+- Stable version-1 JSON contract documented in `packages/cli/README.md`: stdout `{ok:true,code,data}`; stderr errors `{ok:false,code,message,exitCode}`. Exit 0 completed/help, 2 local/input failure, 3 `PENDING_APPROVAL`, 4 `ENROLLMENT_DENIED|ENROLLMENT_EXPIRED`, 5 remote protocol error (codes retained, including `VAULT_DELETED`), 130 interruption. Progress/warnings/instructions/watch events are stderr-only. No normal results contain credentials/recovery material.
+- `enrollServer` persists request identity/token/fingerprint in protected `pending/<sha256(canonicalURL)>.json` **before submission**, independent per canonical server. Unique local aliases select connections; hostname-default device names remain owner-visible, separate identities. Resume needs no password, lost responses replay the same request, and existing connections return safe summaries. Terminal states are retained until explicit `--fresh`. Approved credentials are fsynced before pending unlink; retry detects/finishes the save-before-clear interruption window.
+- Every enrollment attempt prints the exact `nanosync server devices approve --device-id UUID` plus request-bound verification code to stderr. Local approval/denial uses exact UUID owner authority/provenance and prints the matching code. Capability parsing gates admin links on enabled plus advertised trustworthy URL; no Host-derived fallback. Interactive waits are unbounded **up to request expiry**; scripts default to submit-and-exit; `--wait-ms 0`/finite supported. Transient submission/status/capability failures retry with exponential 250ms–5s backoff within the wait/expiry window. SIGINT aborts in-flight enrollment fetches and preserves pending state.
+- `withLocalOwner` adapts local owner operations and validates provisioned pepper rather than inventing a server. Runtime web options are wired through the new command tree. `localAdminReport` now awaits scan/storage initialization before closing metadata (a real closed-database scan regression surfaced during integration).
+- Server-local vault creation uses reserved owner genesis and portable encryption/MAC/wrap primitives. Recovery delivery/acknowledgement precedes mutation. Its protected `owner-creation.json` checkpoint stores **only encrypted creation request bytes**, not plaintext keys/secrets, and replays idempotently. Script output is a newly created protected file; normal JSON contains only identity/name. Deletion requires exact name interactively or exact UUID confirmation in scripts, warns about irrecoverability/backups/unsynced clients, and acknowledges tombstone + pending cleanup, never physical reclamation.
+- Client connect selects stored server/remote vault, defaults destination to CWD, asks recovery only for an absent local key, confirms nonempty files, and binds without transfer. Sync exclusively discovers a binding (CWD ancestor or `--path`), preserving independent replica journals/locks and terminal deleted-vault propagation. View surfaces omit secrets.
+- Remove/disconnect are functional, local-only and file-preserving. Removal refuses attached vaults without force. Forced operations acquire **all affected replica locks before mutation**, and neither yes nor force bypasses active locks. They warn about forgotten credentials versus remote revocation and discarded pending state.
+
+### Explicit next-slice details (step 5)
+
+- Disconnect is deliberately conservative: any user files or existing replica database require `--force`; refine to exact dirty-files/journal detection in the binding/removal safety step. Current commands do not silently discard potentially unsynced work.
+- Refine transactional/crash-safe multi-binding removal and key-cache lifecycle. Current removal preflights all locks and preserves files, but record/marker removal is not an all-or-nothing transaction across directories.
+- Refine provisioning recovery-delivery crash windows: acknowledged encrypted checkpoints replay safely. A crash after protected recovery file delivery but before checkpoint persistence makes **no server mutation**; retry currently requires explicit inspection/new unused output path. No claim of full provisioning UX/crash-window completion is made here.
+- Continue the existing exclusive-runtime storage requirement: stop a serving runtime for offline storage maintenance/provisioning. Browser/runtime operations share the runtime storage instance; local CLI adapters are separate offline storage owners. Browser frontend/Paper UI is a later step, unchanged here.
+
+### Evidence
+
+- Red observed for the absent explicit command tree/missing-directory contract; green after replacement.
+- Red observed for `connections view` incorrectly labeling a previously observed denial as pending; terminal status is now durably retained and displayed until explicit fresh.
+- New real-server CLI workflows cover lost enrollment response/resume without password, aliases versus device names, exact UUID/code instructions, capability-gated links, independent pending servers, denial/fresh identities, SIGINT/resume, safe existing summary, secret-free results, local owner recovery delivery, connect/no transfer, remove refusal/force, deletion confirmation, terminal deleted-vault sync, and retained local directories.
+- Real Python standard-library PTY subprocess test exercises actual Inquirer server-directory/password/confirmation prompts and verifies secret characters do not echo; no custom password handling or skipped terminal test.
+- Existing CLI sync tests now use the new command tree and independent binding journals. Foreground watch proves forced disconnect/removal (including yes) refuses a live sync lock and retains the marker.
+- `bun test packages/cli`: **44 passed, 0 failed** (includes workspace path matching client-local tests), 458 assertions.
+- `bun run typecheck`: **all eight packages passed**.
+- `bun test`: **265 passed, 0 failed**, 1877 assertions, no unhandled errors.
+- `git diff --check`: passed. Final rerun after documentation/expiry-bound retry refinement recorded below.
+
+### Review handoff
+
+Key functions/types: `main`, `CliError`, prompt adapters (`text/hidden/choose/acknowledge`), `enrollServer`, `PendingEnrollment`, `pendingEnrollments`, `connectionSummary`, `withLocalOwner`, `provisionLocalVault`, `disconnectConnections`, `secureReplace`, `localAdminReport`.
+
+Changed paths:
+- `bun.lock`
+- `packages/cli/package.json`
+- `packages/cli/README.md`
+- `packages/cli/src/main.ts`
+- `packages/cli/src/prompts.ts`
+- `packages/cli/src/client.ts`
+- `packages/cli/src/vault-client.ts`
+- `packages/cli/src/local-provision.ts`
+- `packages/cli/src/server.ts`
+- `packages/cli/src/connections.ts`
+- `packages/cli/src/security.ts`
+- `packages/cli/tests/command-tree.test.ts`
+- `packages/cli/tests/terminal.test.ts`
+- `packages/cli/tests/cli.test.ts`
+- `packages/cli/tests/multi-vault.test.ts`
+- `packages/cli/tests/sync.test.ts`
+- `packages/cli/tests/support/legacy-fixture.ts`
+- `docs/clients-and-operations.md`
+- `docs/implementation-progress.md`
+
+Final refinement: forced detachment discards known journal/cache files while replica ownership is held, and never recursively removes the lock directory after release (which could race a new lock owner). Empty private replica directories may remain for the next safety/cleanup slice. Server initialization provisions the pepper before durable owner initialization so a crash cannot leave an initialized account without its required pepper.
+
+Final verification after expiry-bound retries, documentation, locked cleanup and initialization ordering:
+- `bun test packages/cli`: **44 passed, 0 failed**, 458 assertions.
+- `bun run typecheck`: **all eight packages passed**.
+- `bun test`: **265 passed, 0 failed**, 1877 assertions; no unhandled errors.
+- `git diff --check`: passed.

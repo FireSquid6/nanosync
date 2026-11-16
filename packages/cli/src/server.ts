@@ -1,3 +1,4 @@
+import { parseDeviceId } from "@nanosync/protocol";
 import { timingSafeEqual, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { OwnerOperations, type AdminAssets, createServerConfig, startServer, AuthenticationService, PeriodicIntegrityScanner, ServerMaintenance, Argon2idPasswordHasher } from "@nanosync/server-core";
@@ -16,38 +17,25 @@ export async function initializeServerOwner(directory: string, password: string)
   } finally { bytes.fill(0); database.close(); }
 }
 /** The server's private metadata directory is the administrative authority. */
-export function approveLocalDevice(directory: string, name: string): string {
-  const root = privateDirectory(directory), db = new ServerMetadataDatabase(join(root, "metadata.sqlite"));
-  try {
-    const auth = new AuthenticationRepository(db);
-    const matches = auth.listPending(Date.now()).filter(item => item.displayName === name);
-    if (matches.length !== 1) throw new Error("pending device name is unavailable or ambiguous");
-    auth.approve(null, matches[0]!.deviceId, Date.now());
-    return matches[0]!.deviceId;
-  } finally { db.close(); }
-}
-export function localDevices(directory: string) {
+export function approveLocalDevice(directory: string, deviceId: string): string {
   const db = new ServerMetadataDatabase(join(privateDirectory(directory), "metadata.sqlite"));
-  try { return new AuthenticationRepository(db).listDevices(); } finally { db.close(); }
-}
-export function revokeLocalDevice(directory: string, name: string): string {
-  const root = privateDirectory(directory), db = new ServerMetadataDatabase(join(root, "metadata.sqlite"));
   try {
-    const auth = new AuthenticationRepository(db);
-    const matches = auth.listDevices().filter(item => item.state === "active" && (item.displayName === name || item.deviceId === name));
-    if (matches.length !== 1) throw new Error("active device name is unavailable or ambiguous");
-    auth.revoke(null, matches[0]!.deviceId, Date.now());
-    return matches[0]!.deviceId;
+    new AuthenticationRepository(db).approve({origin:"server-local", actorId:null}, parseDeviceId(deviceId), Date.now());
+    return deviceId;
   } finally { db.close(); }
 }
 export async function localAdminReport(directory: string, name: string): Promise<unknown> {
-  const root = privateDirectory(directory), db = new ServerMetadataDatabase(join(root, "metadata.sqlite"));
+  const root = privateDirectory(directory);
+  secureRead(join(root, "pepper.hex"), 64);
+  const db = new ServerMetadataDatabase(join(root, "metadata.sqlite"));
   try {
-    const maintenance = new ServerMaintenance(new MaintenanceRepository(db), new LocalFilesystem(join(root, "objects")));
+    const storage = new LocalFilesystem(join(root, "objects"));
+    await storage.existsBatch([]);
+    const maintenance = new ServerMaintenance(new MaintenanceRepository(db), storage);
     if (name === "storage") return maintenance.storageStatus();
     if (name === "retention-dry-run") return maintenance.retentionDryRun(Date.now());
     if (name === "gc-dry-run") return maintenance.gcDryRun(Date.now());
-    if (name === "scan") return maintenance.scanBatch(Date.now());
+    if (name === "scan") return await maintenance.scanBatch(Date.now());
     return { storage: maintenance.storageStatus(), retention: maintenance.retentionDryRun(Date.now()), gc: maintenance.gcDryRun(Date.now()) };
   } finally { db.close(); }
 }
@@ -127,4 +115,17 @@ export async function runServer(options: RunServerOptions): Promise<{ stop(): Pr
     database.close();
     throw error;
   }
+}
+
+export const localOwner = { origin: "server-local", actorId: null } as const;
+export async function withLocalOwner<T>(directory: string, operation: (owner: OwnerOperations) => T | Promise<T>): Promise<T> {
+  const root = privateDirectory(directory);
+  // Administration must not silently initialize a mistyped server directory.
+  secureRead(join(root, "pepper.hex"), 64);
+  const db = new ServerMetadataDatabase(join(root, "metadata.sqlite"));
+  try {
+    const storage = new LocalFilesystem(join(root, "objects"));
+    await storage.existsBatch([]);
+    return await operation(new OwnerOperations(db, storage));
+  } finally { db.close(); }
 }

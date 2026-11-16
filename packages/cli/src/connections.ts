@@ -1,5 +1,6 @@
+import { acquireSyncLock } from "./sync-lock.ts";
 import { randomUUID } from "node:crypto";
-import { constants, closeSync, existsSync, lstatSync, openSync, realpathSync, readdirSync, renameSync, writeFileSync, fsyncSync } from "node:fs";
+import { constants, closeSync, existsSync, lstatSync, openSync, realpathSync, readdirSync, renameSync, writeFileSync, fsyncSync, unlinkSync, rmSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { parseDeviceId, parseVaultId } from "@nanosync/protocol";
 import { privateDirectory, secureCreate, secureRead } from "./security.ts";
@@ -45,7 +46,7 @@ function record(global: string, connectionId: string): Connection {
   parseVaultId(value.vaultId); parseDeviceId(value.deviceId);
   return value;
 }
-function records(global: string): Connection[] {
+export function records(global: string): Connection[] {
   const directory = join(privateDirectory(global), "connections");
   if (!existsSync(directory)) return [];
   privateDirectory(directory);
@@ -148,4 +149,36 @@ function createFile(path: string, text: string): void {
   const fd = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
   try { writeFileSync(fd, text); fsyncSync(fd); } finally { closeSync(fd); }
   syncDirectory(dirname(path));
+}
+
+/** Conservative until a full filesystem/journal dirty check: any replica state or files needs force. */
+export function disconnectConnections(globalDirectory: string, connections: Connection[], force = false): void {
+  const global = privateDirectory(globalDirectory);
+  const releases: (() => void)[] = [];
+  const replicaPaths: string[] = [];
+  try {
+    for (const connection of connections) {
+      if (discoverConnection(global, connection.root).connectionId !== connection.connectionId) throw new Error("binding identity changed");
+      const replica = privateDirectory(join(privateDirectory(join(global, "replicas")), connection.connectionId));
+      releases.push(acquireSyncLock(replica));
+      replicaPaths.push(replica);
+      if (!force && (readdirSync(connection.root).some(name => name !== MARKER) || existsSync(join(replica, "local.sqlite"))))
+        throw new Error("possible unsynced work; use --force to explicitly discard pending synchronization state (files are preserved)");
+    }
+    for (const connection of connections) {
+      unlinkSync(join(connection.root, MARKER)); syncDirectory(connection.root);
+      unlinkSync(join(global, "connections", `${connection.connectionId}.json`));
+    }
+    if (connections.length) syncDirectory(join(global, "connections"));
+    // Discard known journal/cache files while ownership is still held. Never
+    // recursively remove the lock directory after release: a new owner may
+    // already have acquired it. Empty private replica directories may remain.
+    for (const replica of replicaPaths) {
+      for (const name of ["chunks", "local.sqlite", "local.sqlite-wal", "local.sqlite-shm", "local.sqlite-journal"]) {
+        const path = join(replica, name);
+        if (existsSync(path)) rmSync(path, {recursive:true});
+      }
+      syncDirectory(replica);
+    }
+  } finally { for (const release of releases.reverse()) release(); }
 }

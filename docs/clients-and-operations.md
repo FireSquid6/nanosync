@@ -93,9 +93,9 @@ Opening or editing through another application may require temporary copies or p
 
 ## CLI and foreground sync
 
-The CLI initializes an owner password locally (`server init`), enrolls server-wide devices (`enroll` and local `approve NAME --server-dir DIR`), creates/lists/renames vaults (`vault`), connects directories (`setup`), and synchronizes (`sync` or `sync --watch`). See [CLI workflow](../packages/cli/README.md) for the commands and safe automation options. `sync` searches upward from cwd or `--path` for a secret-free `.nanosync` marker; `--watch` runs in the foreground and periodically rescans/retries. Supply your own user service manager if needed.
+The CLI initializes an owner password locally (`server init`), enrolls server-wide devices (`client connections add` and local `server devices approve --device-id UUID --server-dir DIR`), provisions vaults (`server vaults view|create|rename|delete`), connects directories (`client vaults connect`), and synchronizes (`client sync` or `client sync --watch`). See [CLI workflow](../packages/cli/README.md) for the commands and safe automation options. `sync` searches upward from cwd or `--path` for a secret-free `.nanosync` marker; `--watch` runs in the foreground and periodically rescans/retries. Supply your own user service manager if needed.
 
-Each connection has its own global-state journal, cache, pending proposals, and lock. Keep sync roots separate from global private state and each other. Initial sync reconciles existing local files against the verified empty genesis even when another replica has already published remote data; it never treats untracked local files as implicit deletions. On each run, interrupted hydration/apply and frozen proposals resume before new edits. The CLI has no local IPC, status, history, restore, conflict-resolution, eviction, or download controls. Successful one-shot commands print `{revisionId,sequence}` and exit 0; pending enrollment exits 3; other failures report structured errors on stderr.
+Each connection has its own global-state journal, cache, pending proposals, and lock. Keep sync roots separate from global private state and each other. Initial sync reconciles existing local files against the verified empty genesis even when another replica has already published remote data; it never treats untracked local files as implicit deletions. On each run, interrupted hydration/apply and frozen proposals resume before new edits. The CLI has no local IPC, status, history, restore, conflict-resolution, eviction, or download controls. With `--json`, successful commands print `{ok:true,code,data}` and exit 0; pending enrollment exits 3, denied/expired enrollment exits 4, remote errors exit 5, local/input errors exit 2, and interruption exits 130. Errors are structured on stderr; see the CLI README for the stable contract.
 
 Integrators of other clients can use `sync-core`, `client-local`, and `linux-client` directly. The portable library APIs remain available for history, merge, restoration, conflicts and hydration; these are not separate CLI commands.
 
@@ -156,9 +156,9 @@ Administrative capabilities include:
 - Trigger integrity scans.
 - Export diagnostics that exclude secrets and plaintext names.
 
-Administration is CLI-only; local access to the server's private metadata directory authorizes name-based approval and revocation without a sync client, while legacy HTTP admin routes remain available for legacy administrators.
+Local access to the server's private metadata directory authorizes exact-UUID owner approval, denial, revocation and vault administration without a sync client. Browser owner administration is separately opt-in; existing device-admin HTTP routes retain their distinct authority and safeguards.
 
-With an approved administrator's client directory, run `nanosync admin storage`, `nanosync admin retention-dry-run`, `nanosync admin gc-dry-run`, `nanosync admin scan`, or `nanosync admin diagnostics` (optionally `--json`). Reports are aggregate-only: no keys, tokens, object IDs, or plaintext names. Each `admin scan` verifies at most 100 catalog entries; repeat until `done: true` (scan position resets on server restart). Retention reports reject more than 10,000 revisions rather than silently truncating. No live GC execution command exists.
+On the server, run `nanosync server admin storage`, `nanosync server admin retention-dry-run`, `nanosync server admin gc-dry-run`, `nanosync server admin scan`, or `nanosync server admin diagnostics`, supplying `--server-dir DIR` (or selecting it interactively), optionally `--json`. Reports are aggregate-only: no keys, tokens, object IDs, or plaintext names. Each `admin scan` verifies at most 100 catalog entries; repeat until `done: true` (scan position resets on server restart). Retention reports reject more than 10,000 revisions rather than silently truncating. No live GC execution command exists.
 
 ## Backup and restore
 
@@ -238,6 +238,4 @@ exposing the backend listener. The runtime accepts `webUi`, `externalOrigin`,
 `trustedProxyAddresses`, and an explicit `adminAssets` map; this backend step
 provides no default frontend bundle yet. A UI integrator supplies `/admin` and
 each asset explicitly as `{body,contentType}` entries on the existing listener.
-Client provisioning mutations have been removed; the legacy client CLI create/
-rename commands now fail until the subsequent command-tree redesign removes
-them. Use the shared owner operations/API for provisioning.
+Client provisioning mutations and legacy CLI aliases have been removed. Use `server vaults create|rename|delete` locally, or the owner browser API, for provisioning. The CLI no longer exposes a bootstrap workflow; historical protocol fixtures remain test-only.

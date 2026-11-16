@@ -55,7 +55,7 @@ test("password-only server, local device approval, two isolated vaults and two r
   const running = await runServer({ directory: serverRoot, port: 7555, webUi:true });
   try {
     expect(await enrollServer(clientRoot, running.url, "correct horse battery staple", "desktop", 1)).toMatchObject({status:"pending"});
-    approveLocalDevice(serverRoot, "desktop");
+    approveLocalDevice(serverRoot, (await import("../src/vault-client.ts")).pendingEnrollments(clientRoot)[0]!.deviceId);
     expect(await enrollServer(clientRoot, running.url, undefined, "desktop", 1)).toMatchObject({status:"approved"});
     const [info] = servers(clientRoot);
     expect(info).toBeDefined();
@@ -101,15 +101,15 @@ test("password-only server, local device approval, two isolated vaults and two r
     mkdirSync(join(first, "nested"), { mode: 0o700 });
     expect(discoverConnection(clientRoot, join(first, "nested"))).toEqual(connectionA);
     writeFileSync(join(first, "hello"), "world", { mode: 0o600 });
-    expect(await main(["sync", "--client-dir", clientRoot, "--path", first])).toBe(0);
-    expect(await main(["sync", "--client-dir", clientRoot, "--path", second])).toBe(0);
+    expect(await main(["client", "sync", "--client-dir", clientRoot, "--path", first])).toBe(0);
+    expect(await main(["client", "sync", "--client-dir", clientRoot, "--path", second])).toBe(0);
     expect(readFileSync(join(second, "hello"), "utf8")).toBe("world");
     writeFileSync(join(first, "from-first"), "one", { mode: 0o600 });
     writeFileSync(join(second, "from-second"), "two", { mode: 0o600 });
-    expect(await Promise.all([main(["sync", "--client-dir", clientRoot, "--path", first]),
-      main(["sync", "--client-dir", clientRoot, "--path", second])])).toEqual([0, 0]);
-    expect(await main(["sync", "--client-dir", clientRoot, "--path", first])).toBe(0);
-    expect(await main(["sync", "--client-dir", clientRoot, "--path", second])).toBe(0);
+    expect(await Promise.all([main(["client", "sync", "--client-dir", clientRoot, "--path", first]),
+      main(["client", "sync", "--client-dir", clientRoot, "--path", second])])).toEqual([0, 0]);
+    expect(await main(["client", "sync", "--client-dir", clientRoot, "--path", first])).toBe(0);
+    expect(await main(["client", "sync", "--client-dir", clientRoot, "--path", second])).toBe(0);
     expect(readFileSync(join(first, "from-second"), "utf8")).toBe("two");
     expect(readFileSync(join(second, "from-first"), "utf8")).toBe("one");
     expect(existsSync(join(second, ".nanosync"))).toBe(true);
@@ -130,28 +130,28 @@ test("CLI env workflow creates and selects named vaults without exposing secrets
   const previous = { ...process.env };
   try {
     process.env.NANOSYNC_PASSWORD = "test-owner-password";
-    expect(await main(["server","init","--env","--server-dir",serverRoot])).toBe(0);
+    expect(await main(["server","init","--server-dir",serverRoot])).toBe(0);
     const running = await runServer({directory:serverRoot,port:7556,webUi:true});
     try {
       process.env.NANOSYNC_SERVER = running.url;
       process.env.NANOSYNC_DEVICE_NAME = "desktop";
-      expect(await main(["enroll","--env","--wait-ms","0","--client-dir",root])).toBe(3);
-      expect(await main(["approve","desktop","--server-dir",serverRoot])).toBe(0);
-      expect(await main(["enroll","--env","--wait-ms","0","--client-dir",root])).toBe(0);
+      expect(await main(["client","connections","add","--alias","house","--url",running.url,"--device-name","desktop","--wait-ms","0","--client-dir",root])).toBe(3);
+      expect(await main(["server","devices","approve","--device-id",(await import("../src/vault-client.ts")).pendingEnrollments(root)[0]!.deviceId,"--server-dir",serverRoot])).toBe(0);
+      expect(await main(["client","connections","add","--alias","house","--url",running.url,"--device-name","desktop","--wait-ms","0","--client-dir",root])).toBe(0);
       // Provisioning belongs to the owner API; device CLI mutations are unavailable.
       expect(await main(["vault","create","--client-dir",root,"--name","notes","--recovery-output",recovery])).toBe(2);
       const owner = await browserOwner(running.url, process.env.NANOSYNC_PASSWORD!);
       const info = servers(root)[0]!;
       const created = await createOwnerVault(root, info, 'notes', owner, async secret => { writeFileSync(recovery, secret, {mode:0o600}); });
-      expect(await main(["vault","list","--client-dir",root])).toBe(0);
+      expect(await main(["server","vaults","view","--server-dir",serverRoot])).toBe(0);
       expect(await main(["vault","rename","notes","--client-dir",root,"--name","documents"])).toBe(2);
       await owner(`/vaults/${created.vaultId}/rename`, {name:"documents"});
       writeFileSync(join(files,"existing"),"safe",{mode:0o600});
-      expect(await main(["setup","--env","--client-dir",root,"--path",files,"--vault","documents"])).toBe(2);
-      expect(await main(["setup","--env","--client-dir",root,"--path",files,"--vault","documents","--confirm-nonempty"])).toBe(0);
-      expect(await main(["sync","--client-dir",root,"--path",files])).toBe(0);
+      expect(await main(["client","vaults","connect","--server","house","--client-dir",root,"--path",files,"--vault","documents"])).toBe(2);
+      expect(await main(["client","vaults","connect","--server","house","--client-dir",root,"--path",files,"--vault","documents","--confirm-nonempty"])).toBe(0);
+      expect(await main(["client", "sync","--client-dir",root,"--path",files])).toBe(0);
       expect(readFileSync(join(files,"existing"),"utf8")).toBe("safe");
-      expect(await main(["sync","--client-dir",root,"--path",join(files,"missing")])).toBe(2);
+      expect(await main(["client", "sync","--client-dir",root,"--path",join(files,"missing")])).toBe(2);
       expect(await main(["vault","create","--client-dir",root,"--name","notes"])).toBe(2); // No TTY or private output.
     } finally { await running.stop(); }
   } finally { process.env = previous; }

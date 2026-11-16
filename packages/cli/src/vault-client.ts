@@ -1,17 +1,15 @@
-import { randomBytes, randomUUID } from "node:crypto";
-import { existsSync, readdirSync, unlinkSync, openSync, closeSync, writeSync } from "node:fs";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { existsSync, readdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { isatty } from "node:tty";
-import { encryptManifest, generateRecoverySecret, generateVaultMasterKey, displayRecoverySecret, decodeRecoverySecret,
-  wrapMasterKey, unwrapMasterKey, referenceSetMac } from "@nanosync/sync-core";
-import { parsePersistedRevisionEnvelope, parseRecoveryWrap, parseVaultId, type RevisionEnvelope } from "@nanosync/protocol";
-import { api, baseUrl, enroll, login, secretPrompt } from "./client.ts";
-import { privateDirectory, secureCreate, secureRead } from "./security.ts";
+import { decodeRecoverySecret, unwrapMasterKey, RemoteError } from "@nanosync/sync-core";
+import { enrollmentVerificationCode, parseCapabilityResponse, parseDeviceId, parseAuthToken, decodeCanonicalBase64Url } from "@nanosync/protocol";
+import { api, baseUrl, login } from "./client.ts";
+import { privateDirectory, secureCreate, secureRead, secureReplace, syncPrivateDirectory } from "./security.ts";
+
+import { hidden as secretPrompt, CliError } from "./prompts.ts";
 
 export interface ServerRegistration { version: 1; serverId: string; baseUrl: string; deviceId: string; name: string; token: string }
 interface VaultKey { version: 1; serverId: string; vaultId: string; masterKey: string }
-interface VaultCreationCheckpoint { version: 1; serverId: string; name: string; vaultId: string; masterKey: string; secret: string;
-  request: { vaultId: string; name: string; recoveryWrap: unknown; genesisRevision: RevisionEnvelope; frame: string } }
 const dir = (root: string, leaf: string) => privateDirectory(join(privateDirectory(root), leaf));
 
 export function servers(root: string): ServerRegistration[] {
@@ -27,7 +25,7 @@ export function servers(root: string): ServerRegistration[] {
 export function server(root: string, choice?: string): ServerRegistration {
   const list = servers(root);
   const selected = choice ? list.filter(item => item.serverId === choice || item.name === choice || item.baseUrl === choice) : list;
-  if (selected.length !== 1) throw new Error(selected.length ? "server is ambiguous; select by ID" : "server not found; run nanosync enroll");
+  if (selected.length !== 1) throw new Error(selected.length ? "server is ambiguous; select by ID" : "server not found; run nanosync client connections add");
   return selected[0]!;
 }
 export function key(root: string, serverId: string, vaultId: string): Uint8Array | null {
@@ -48,80 +46,117 @@ function saveKey(root: string, info: ServerRegistration, vaultId: string, master
   secureCreate(path, JSON.stringify({ version: 1, serverId: info.serverId, vaultId, masterKey: Buffer.from(master).toString("hex") }));
 }
 
+export interface PendingEnrollment { url: string; token: string; deviceId: string; name: string; alias: string; fingerprint: string; serverId: string; expiresAtMs: number; status?: string }
+export function pendingEnrollments(root: string): PendingEnrollment[] {
+  return readdirSync(dir(root, "pending")).map(file => {
+    if (!/^[a-f0-9]{64}\.json$/.test(file)) throw new Error("unexpected pending enrollment file");
+    const value = JSON.parse(secureRead(join(dir(root, "pending"), file), 4096).toString("utf8")) as PendingEnrollment;
+    if (pendingFile(root, value.url) !== join(dir(root, "pending"), file)) throw new Error("invalid pending enrollment URL");
+    parseDeviceId(value.deviceId); parseDeviceId(value.serverId); parseAuthToken(value.token); decodeCanonicalBase64Url(value.fingerprint, 32);
+    if (!value.name || !value.alias || !Number.isSafeInteger(value.expiresAtMs) || value.status && !["pending", "denied", "expired"].includes(value.status)) throw new Error("invalid pending enrollment");
+    return value;
+  });
+}
+function pendingFile(root: string, url: string) { return join(dir(root, "pending"), createHash("sha256").update(baseUrl(url)).digest("hex") + ".json"); }
+export function connectionSummary(info: ServerRegistration) {
+  return { serverId: info.serverId, alias: info.name, url: info.baseUrl, deviceId: info.deviceId, status: "approved" };
+}
 export async function enrollServer(root: string, url: string, password: string | undefined, deviceName: string,
-  waitMs = 60_000): Promise<{ status: string; deviceName: string }> {
+  waitMs = 60_000, options: { alias?: string; fresh?: boolean; signal?: AbortSignal; password?: () => Promise<string> } = {}): Promise<Record<string, unknown> & { status: string }> {
   privateDirectory(root);
-  if (!deviceName || Buffer.byteLength(deviceName)>128 || /[\u0000-\u001f\u007f]/u.test(deviceName)) throw new Error("invalid device name");
-  const canonical = baseUrl(url), pendingPath = join(root, "enrollment.json");
-  if (servers(root).some(item => item.baseUrl === canonical)) throw new Error("server already registered");
-  let pending: { url: string; token: string; deviceId: string; name: string; fingerprint: string; serverId: string };
-  if (existsSync(pendingPath)) {
-    pending = JSON.parse(secureRead(pendingPath, 2048).toString("utf8"));
-    if (pending.url !== canonical || pending.name !== deviceName) throw new Error("another enrollment is pending");
-  } else {
-    if (!password) throw new Error("password required for first enrollment request");
-    pending = { url: canonical, token: await login(canonical, password), deviceId: randomUUID(), name: deviceName,
-      fingerprint: randomBytes(32).toString("base64url"), serverId: randomUUID() };
+  const canonical = baseUrl(url), pendingPath = pendingFile(root, canonical);
+  const existing = servers(root).find(item => item.baseUrl === canonical);
+  if (existing) {
+    if (existsSync(pendingPath)) {
+      const saved = JSON.parse(secureRead(pendingPath, 4096).toString("utf8")) as PendingEnrollment;
+      if (saved.deviceId !== existing.deviceId || saved.token !== existing.token || saved.serverId !== existing.serverId)
+        throw new CliError("CONFLICT", "pending identity differs from saved connection; inspect local state");
+      unlinkSync(pendingPath); syncPrivateDirectory(dir(root, "pending"));
+    }
+    return connectionSummary(existing);
+  }
+  let pending: PendingEnrollment | undefined = existsSync(pendingPath) ? JSON.parse(secureRead(pendingPath, 4096).toString("utf8")) : undefined;
+  if (pending && options.alias && pending.alias !== options.alias) throw new CliError("CONFLICT", "Pending request has a different alias; resume that alias");
+  const alias = pending?.alias ?? options.alias ?? deviceName;
+  if (!alias.trim() || Buffer.byteLength(alias) > 128 || /[\u0000-\u001f\u007f]/u.test(alias)) throw new CliError("INVALID_INPUT", "invalid connection alias");
+  if (servers(root).some(item => item.name === alias) || pendingEnrollments(root).some(item => item.alias === alias && item.url !== canonical))
+    throw new CliError("CONFLICT", "connection alias already in use");
+  if (options.fresh && pending) {
+    // Fresh is deliberate, and only terminal requests can be replaced.
+    let status = pending.status ?? (Date.now() >= pending.expiresAtMs ? "expired" : "pending");
+    if (status === "pending") {
+      try { status = (await api(canonical, "/v1/auth/enrollments/status", {signal:options.signal}, pending.token)).status; }
+      catch (error) { if (error instanceof RemoteError && error.status === 401) status = "expired"; else throw error; }
+    }
+    if (!["denied", "expired"].includes(status)) throw new CliError("CONFLICT", "Only denied or expired requests may be replaced with --fresh");
+    unlinkSync(pendingPath); syncPrivateDirectory(dir(root, "pending")); pending = undefined;
+  }
+  if (!pending) {
+    if (!deviceName || Buffer.byteLength(deviceName)>128 || /[\u0000-\u001f\u007f]/u.test(deviceName)) throw new CliError("INVALID_INPUT", "invalid device name");
+    const secret = password ?? await options.password?.();
+    if (!secret) throw new CliError("INPUT_REQUIRED", "owner password required for first enrollment");
+    pending = { url: canonical, token: await login(canonical, secret), deviceId: randomUUID(), name: deviceName, alias,
+      fingerprint: randomBytes(32).toString("base64url"), serverId: randomUUID(), expiresAtMs: Date.now() + 24 * 60 * 60_000 };
     secureCreate(pendingPath, JSON.stringify(pending));
   }
-  const request = () => api(canonical, "/v1/auth/enrollments", { method: "POST", body: JSON.stringify({ protocolVersion: 1,
-    deviceId: pending.deviceId, displayName: pending.name, platform: "linux", clientVersion: "1", fingerprint: pending.fingerprint }) }, pending.token);
-  let response = await request();
-  const until = Date.now() + waitMs;
-  if (response.status === "pending" && waitMs) console.error(`Waiting for approval, run \`nanosync approve ${deviceName}\` on the server`);
-  while (response.status === "pending" && Date.now() < until) {
-    await Bun.sleep(Math.min(1000, until - Date.now()));
-    response = await api(canonical, "/v1/auth/enrollments/status", {}, pending.token);
+  const request = pending;
+  console.error(`nanosync server devices approve --device-id ${request.deviceId}`);
+  console.error(`Verification code: ${enrollmentVerificationCode(request.deviceId, request.fingerprint)}`);
+  const until = Math.min(request.expiresAtMs, waitMs === Infinity ? Infinity : Date.now() + waitMs);
+  let delay = 250;
+  async function retry<T>(operation: () => Promise<T>): Promise<T | null> {
+    while (true) {
+      if (options.signal?.aborted) throw new CliError("INTERRUPTED", "Enrollment interrupted; run the same connections add command to resume", 130);
+      try { return await operation(); }
+      catch (error) {
+        if (options.signal?.aborted) throw new CliError("INTERRUPTED", "Enrollment interrupted; retry the same command to resume", 130);
+        if (!(error instanceof TypeError || error instanceof RemoteError && (error.status >= 500 || error.status === 429))) throw error;
+        if (Date.now() >= until) { console.error("Temporary outage; pending request retained. Retry the same command."); return null; }
+        console.error(`Temporary outage; retrying in ${delay}ms (request retained)`);
+        await Bun.sleep(Math.min(delay, Math.max(0, until - Date.now()))); delay = Math.min(5000, delay * 2);
+      }
+    }
   }
-  if (response.status === "approved") {
-    const path = join(dir(root, "servers"), `${pending.serverId}.json`);
-    secureCreate(path, JSON.stringify({ version: 1, serverId: pending.serverId, baseUrl: canonical,
-      deviceId: pending.deviceId, name: deviceName, token: pending.token } satisfies ServerRegistration));
-    unlinkSync(pendingPath);
+  const caps = await retry(() => api(canonical, "/v1/capabilities", {signal:options.signal}));
+  if (caps) { const admin = parseCapabilityResponse(caps).webAdministration; if (admin.enabled && admin.url) console.error(`Administration: ${admin.url}`); }
+  let status = Date.now() >= request.expiresAtMs ? "expired" : request.status ?? "pending";
+  if (status === "pending") {
+    try {
+      const response = await retry(() => api(canonical, "/v1/auth/enrollments", { method: "POST", body: JSON.stringify({ protocolVersion: 1,
+        deviceId: request.deviceId, displayName: request.name, platform: process.platform, clientVersion: "1", fingerprint: request.fingerprint }), signal:options.signal }, request.token));
+      status = response?.status ?? "pending";
+      if (status === "pending") console.error("Waiting for approval; Ctrl-C preserves this request for resume.");
+      while (status === "pending" && Date.now() < until) {
+        if (options.signal?.aborted) throw new CliError("INTERRUPTED", "Enrollment interrupted; retry the same command to resume", 130);
+        await Bun.sleep(Math.min(1000, until - Date.now()));
+        if (options.signal?.aborted) throw new CliError("INTERRUPTED", "Enrollment interrupted; retry the same command to resume", 130);
+        if (Date.now() >= request.expiresAtMs) { status = "expired"; break; }
+        status = (await retry(() => api(canonical, "/v1/auth/enrollments/status", {signal:options.signal}, request.token)))?.status ?? "pending";
+      }
+    } catch (error) {
+      if (error instanceof RemoteError && error.status === 401) status = "expired";
+      else throw error;
+    }
   }
-  return { status: response.status, deviceName };
+  if (status === "pending" && Date.now() >= request.expiresAtMs) status = "expired";
+  if (status === "approved") {
+    const info: ServerRegistration = { version: 1, serverId: request.serverId, baseUrl: canonical, deviceId: request.deviceId, name: alias, token: request.token };
+    const path = join(dir(root, "servers"), `${request.serverId}.json`);
+    if (existsSync(path)) {
+      if (secureRead(path).toString("utf8") !== JSON.stringify(info)) throw new CliError("CONFLICT", "saved credential differs from pending enrollment");
+    } else secureCreate(path, JSON.stringify(info));
+    unlinkSync(pendingPath); syncPrivateDirectory(dir(root, "pending"));
+    console.error("Approved. Next: nanosync client vaults connect (no files transferred).");
+    return connectionSummary(info);
+  }
+  if (options.signal?.aborted) throw new CliError("INTERRUPTED", "Enrollment interrupted; retry the same command to resume", 130);
+  if (status === "denied" || status === "expired") {
+    secureReplace(pendingPath, JSON.stringify({...request, status}));
+    console.error(`Enrollment ${status}; review with the owner, then explicitly use --fresh for a new identity.`);
+  }
+  return { status, alias, url: canonical, deviceId: request.deviceId, deviceName: request.name };
 }
 
-/** Returns a recovery secret only to the caller, never to a server or log. */
-export async function createVault(root: string, info: ServerRegistration, name: string,
-  deliver: (secret: string) => Promise<void>): Promise<{ vaultId: string; name: string }> {
-  if (!name || name !== name.trim() || Buffer.byteLength(name)>128) throw new Error("invalid vault name");
-  const checkpointPath = join(privateDirectory(root), "vault-creation.json");
-  let checkpoint: VaultCreationCheckpoint;
-  if (existsSync(checkpointPath)) {
-    checkpoint = JSON.parse(secureRead(checkpointPath, 16_384).toString("utf8"));
-    if (checkpoint.version !== 1 || checkpoint.serverId !== info.serverId || checkpoint.name !== name ||
-        checkpoint.vaultId !== checkpoint.request?.vaultId || checkpoint.name !== checkpoint.request.name ||
-        !/^[0-9a-f]{64}$/.test(checkpoint.masterKey) || !/^[a-z2-7-]+$/.test(checkpoint.secret))
-      throw new Error("another vault creation is pending; retry its server and name");
-    parseVaultId(checkpoint.vaultId);
-    parseRecoveryWrap(checkpoint.request.recoveryWrap);
-    parsePersistedRevisionEnvelope(checkpoint.request.genesisRevision);
-  } else {
-    const vaultId = randomUUID(), revisionId = randomUUID(), master = generateVaultMasterKey(), recovery = generateRecoverySecret();
-    try {
-    const wrap = await wrapMasterKey(master, recovery, vaultId);
-    const manifest = { version: 1 as const, vaultId, revisionId, parents: [], creatingDeviceId: info.deviceId,
-      entries: [{ id: randomUUID(), parentId: null, name: "", kind: "directory" as const }] };
-    const encrypted = await encryptManifest(manifest, master);
-    const unsigned = { protocolVersion: 1, revisionFormatVersion: 1, vaultId, revisionId, parents: [],
-      creatingDeviceId: info.deviceId, createdAt: new Date().toISOString(), encryptedManifestObjectId: encrypted.reference.objectId,
-      references: [encrypted.reference], referenceSetMac: "0".repeat(64) };
-    const genesisRevision: RevisionEnvelope = parsePersistedRevisionEnvelope({ ...unsigned,
-      referenceSetMac: await referenceSetMac(parsePersistedRevisionEnvelope(unsigned), master) });
-    checkpoint = { version: 1, serverId: info.serverId, name, vaultId, masterKey: Buffer.from(master).toString("hex"),
-      secret: await displayRecoverySecret(recovery), request: { vaultId, name, recoveryWrap: wrap,
-        genesisRevision, frame: Buffer.from(encrypted.frame).toString("base64url") } };
-    secureCreate(checkpointPath, JSON.stringify(checkpoint));
-    } finally { master.fill(0); recovery.fill(0); }
-  }
-  await deliver(checkpoint.secret); // Exact same secret on every retry.
-  const master = Buffer.from(checkpoint.masterKey, "hex");
-  try { saveKey(root, info, checkpoint.vaultId, master); } finally { master.fill(0); }
-  await api(info.baseUrl, "/v1/vaults", { method: "POST", body: JSON.stringify(checkpoint.request) }, info.token);
-  unlinkSync(checkpointPath);
-  return { vaultId: checkpoint.vaultId, name };
-}
 export async function unlockVault(root: string, info: ServerRegistration, vaultId: string, secret: string): Promise<void> {
   const wrap = await api(info.baseUrl, "/v1/recovery-wrap", { headers: { "x-nanosync-vault-id": vaultId } }, info.token);
   const recovery = await decodeRecoverySecret(secret);
@@ -131,13 +166,5 @@ export async function unlockVault(root: string, info: ServerRegistration, vaultI
   } finally { recovery.fill(0); }
 }
 
-export async function prompt(label: string): Promise<string> {
-  const fd = openSync("/dev/tty", "r+");
-  try { if (!isatty(fd)) throw new Error(`${label} requires a usable terminal`); writeSync(fd, `${label}: `); }
-  finally { closeSync(fd); }
-  const value = await import("node:readline/promises");
-  const input = await import("node:fs");
-  const io = value.createInterface({ input: input.createReadStream("/dev/tty"), output: input.createWriteStream("/dev/tty") });
-  try { return await io.question(""); } finally { io.close(); }
-}
+export { text as prompt } from "./prompts.ts";
 export { secretPrompt };
