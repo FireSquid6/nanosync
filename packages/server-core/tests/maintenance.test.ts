@@ -330,3 +330,34 @@ test("restart reclaims SIGKILL-interrupted staging before deletion completes", a
     db.close(); await rm(root, { recursive: true, force: true });
   }
 });
+
+test("failed deleted-vault cleanup reports failure without starving later vaults", async () => {
+  const root = await mkdtemp(join(tmpdir(), "nanosync-cleanup-isolation-"));
+  const db = new ServerMetadataDatabase(":memory:");
+  const second = "22345678-1234-1234-9234-123456789abc";
+  try {
+    const storage = new LocalFilesystem(join(root, "objects"));
+    const { VaultRepository } = await import("@nanosync/server-metadata");
+    const vaults = new VaultRepository(db);
+    for (const id of [vault, second]) {
+      db.writeTransaction(tx => tx.run("INSERT INTO server_state(singleton,vault_id,name,current_sequence) VALUES(NULL,?,?,0)", [id, id]));
+      const bytes = frame("a".repeat(64), id);
+      await storage.putIfAbsent(objectKey("chunk", "a".repeat(64), id), new Blob([bytes]).stream(), createHash("sha256").update(bytes).digest("hex"));
+      vaults.markDeleted(id, { origin: "server-local", actorId: null }, now);
+    }
+    const failing = Object.create(storage) as LocalFilesystem;
+    failing.list = async (prefix, options) => {
+      if (prefix === `objects/v1/${vault}`) throw Error("unreadable namespace");
+      return storage.list(prefix, options);
+    };
+    const service = new ServerMaintenance(new MaintenanceRepository(db), failing);
+    for (let pass = 0; pass < 2; pass++) {
+      await expect(service.cleanupDeleted()).rejects.toThrow("unreadable namespace");
+      expect(vaults.deletions().find(row => row.vaultId === vault)?.cleanupState).toBe("pending");
+      expect(vaults.deletions().find(row => row.vaultId === second)?.cleanupState).toBe("complete");
+      expect(await storage.existsBatch([objectKey("chunk", "a".repeat(64), vault), objectKey("chunk", "a".repeat(64), second)])).toEqual([true, false]);
+    }
+    await new ServerMaintenance(new MaintenanceRepository(db), storage).cleanupDeleted();
+    expect(vaults.deletions().every(row => row.cleanupState === "complete")).toBe(true);
+  } finally { db.close(); await rm(root, { recursive: true, force: true }); }
+});

@@ -144,3 +144,30 @@ Changed paths:
 - `packages/server-core/tests/server.test.ts`
 - `packages/server-core/tests/revisions.test.ts`
 - `docs/implementation-progress.md`
+
+## Permanent deletion follow-up review fixes (completed)
+
+### Public contracts
+
+- `ServerMaintenance.cleanupDeleted(): Promise<void>` now isolates failures per vault and attempts every pending deletion before rejecting with an `AggregateError`. Each contained error identifies the failed UUID and preserves the original cause; the aggregate message includes the failures. Failed vaults remain pending for runtime retries, while successful vaults complete normally. Existing runtime single-flight scheduling and visible failure reporting remain unchanged.
+- Remote test setup now awaits the public `LocalFilesystem.list()` readiness boundary before returning. Constructor-started staging recovery therefore finishes before tests can remove their temporary root; production staging error handling is not suppressed or weakened.
+
+### Evidence
+
+- Reproduced cleanup starvation red at the existing maintenance/storage seams with two real metadata tombstones: a failing first namespace left the second pending. Regression now verifies two failed passes still reclaim the second namespace, retain the first ciphertext/tombstone for retry, and complete the first after storage recovery.
+- Reproduced the reported asynchronous setup failure before changing setup: focused remote suite **14 passed, 2 failed**, including staging-directory `ENOENT`. After awaiting initialization: **16 passed, 0 failed**.
+- `bun test packages/server-core/tests/maintenance.test.ts`: **12 passed, 0 failed**.
+- `bun test packages/server-metadata packages/server-core packages/server-object-storage packages/sync-core`: **172 passed, 0 failed**, no unhandled errors.
+- `bun run typecheck`: **all eight packages passed**.
+- `bun test`: **256 passed, 0 failed**, no unhandled errors (includes CLI sync preservation/runtime-cleanup tests).
+- `git diff --check`: passed.
+
+### Review handoff
+
+Key functions: `ServerMaintenance.cleanupDeleted`, remote test `setup`.
+
+Changed paths:
+- `packages/server-core/src/maintenance.ts`
+- `packages/server-core/tests/maintenance.test.ts`
+- `packages/sync-core/tests/remote.test.ts`
+- `docs/implementation-progress.md`

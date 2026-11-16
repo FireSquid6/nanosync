@@ -25,6 +25,8 @@ async function setup() {
   const database = new ServerMetadataDatabase(":memory:");
   database.writeTransaction(tx => tx.run("INSERT INTO server_state(singleton, vault_id, current_head_revision_id, current_sequence) VALUES (1, ?, NULL, 0)", [vaultId]));
   const filesystem = new LocalFilesystem(root);
+  // Constructor-started staging recovery must settle before any test can tear down the root.
+  await filesystem.list();
   const catalog = new ObjectCatalogRepository(database), revisions = new RevisionRepository(database);
   let revoked = false;
   const handle = createServerHandler({ filesystem, catalog, revisions, authorize: async request => {
