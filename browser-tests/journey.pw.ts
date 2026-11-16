@@ -37,7 +37,13 @@ test("local init and creation → CLI enrollment/browser approval → two replic
     await page.goto(url + "/admin");
     await page.getByLabel("Owner password", { exact: true }).fill(password);
     await page.getByRole("button", { name: "Log in", exact: true }).click();
+    await expect(page).toHaveURL(url + "/admin/clients");
+    await expect(page.getByRole("heading", { name: "Clients", exact: true })).toBeVisible();
+    const navigation = page.getByRole("navigation", { name: "Administration" });
+    await navigation.getByRole("link", { name: "Vaults", exact: true }).click();
     await expect(page.getByRole("heading", { name: "local-vault", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Pending requests", exact: true })).toHaveCount(0);
+    await navigation.getByRole("link", { name: "Clients", exact: true }).click();
 
     const clients = [join(root, "client-a"), join(root, "client-b")];
     const replicas = [join(root, "replica-a"), join(root, "replica-b")];
@@ -66,6 +72,8 @@ test("local init and creation → CLI enrollment/browser approval → two replic
     expect((await sync(0)).exit).toBe(0);
     expect(readFileSync(join(replicas[0]!, "second.txt"), "utf8")).toBe("from the second replica\n");
 
+    await navigation.getByRole("link", { name: "Vaults", exact: true }).click();
+    await expect(page).toHaveURL(url + "/admin/vaults");
     await page.getByLabel("New vault name").fill("browser-vault");
     await page.getByRole("button", { name: "Prepare recovery" }).click();
     const browserSecret = await page.getByTestId("recovery-secret").innerText();
@@ -77,12 +85,15 @@ test("local init and creation → CLI enrollment/browser approval → two replic
 
     writeFileSync(join(replicas[0]!, "unsynced.txt"), "retained after revocation\n");
     writeFileSync(join(replicas[1]!, "unsynced.txt"), "retained after deletion\n");
+    await navigation.getByRole("link", { name: "Clients", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Vaults", exact: true })).toHaveCount(0);
     await page.getByRole("button", { name: "Revoke journey-0", exact: true }).click();
     await page.getByRole("button", { name: "Confirm revocation" }).click();
     const revoked = await sync(0);
     expect(revoked.exit).toBe(5);
     expect(revoked.stderr).toContain('"code":"UNAUTHORIZED"');
     expect(revoked.stdout).toBe("");
+    await navigation.getByRole("link", { name: "Vaults", exact: true }).click();
     await page.getByRole("button", { name: "Delete local-vault", exact: true }).click();
     await page.getByLabel("Exact vault name").fill("local-vault");
     await page.getByLabel("Owner password", { exact: true }).fill(password);
@@ -99,6 +110,12 @@ test("local init and creation → CLI enrollment/browser approval → two replic
       expect(readFileSync(join(replicas[i]!, "unsynced.txt"), "utf8")).toBe(i === 0 ? "retained after revocation\n" : "retained after deletion\n");
     }
     await expect(page.getByRole("heading", { name: "browser-vault", exact: true })).toBeVisible();
+    await navigation.getByRole("link", { name: "Activity", exact: true }).click();
+    await expect(page).toHaveURL(url + "/admin/activity");
+    await expect(page.getByRole("heading", { name: "Recent activity", exact: true })).toBeVisible();
+    await expect(page.getByText("vault.deleted", { exact: true })).toBeVisible();
+    await expect(page.getByText("device.revoked", { exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Vaults", exact: true })).toHaveCount(0);
     const activity = await page.request.get(url + "/admin/api/activity").then(r => r.json());
     expect(activity).toMatchObject({ activity: expect.arrayContaining([
       expect.objectContaining({ action: "vault.created", origin: "server-local", targetId: localId, occurredAtMs: expect.any(Number) }),

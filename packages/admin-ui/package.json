@@ -10,7 +10,8 @@
     "@nanosync/sync-core": "workspace:*",
     "@radix-ui/react-dialog": "^1.1.15",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "react-router-dom": "^7.18.5"
   },
   "devDependencies": {
     "@types/react": "^19.2.0",

@@ -30,6 +30,9 @@ map["/admin"] = {
   body: `<!doctype html><!-- Paper UI: https://github.com/FireSquid6/paper-ui @ f6cd7e07c88aa780618717a388c3762fd406bef1; see PAPER-UI-NOTICE.md --><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Nanosync administration</title>${style}</head><body><div id="root"></div>${script}</body></html>`,
   contentType: "text/html; charset=utf-8",
 };
+// Only actual document routes receive the shell; unknown paths/assets stay 404.
+for (const path of ["/admin/", "/admin/login", "/admin/clients", "/admin/vaults", "/admin/activity"])
+  map[path] = map["/admin"]!;
 await mkdir("packages/admin-ui/generated", { recursive: true });
 await Bun.write(
   "packages/admin-ui/generated/assets.ts",

@@ -7,10 +7,23 @@ source server runs work immediately after install; regenerate after UI changes.
 served by the existing server only with `server run --web-ui`; no CDN or extra
 frontend service is used. See `PAPER-UI-NOTICE.md` for copied source provenance.
 
+The React Router pages are `/admin/clients` (pending and allowed clients),
+`/admin/vaults` (vault management), and `/admin/activity` (recent actions).
+`/admin` opens Clients; protected deep links return to their destination after
+`/admin/login`. Links, browser history, and refresh work on each page.
+
+`src/main.tsx` only mounts the app. `src/App.tsx` defines routes; `src/pages/`
+contains page views, `src/components/` contains the shared layout, confirmations,
+and recovery forms, and `src/state/` owns session/data and vault-creation state.
+`src/api.ts` handles HTTP transport and shared response types. Creation state
+survives page navigation; logout clears unpublished plaintext secret material,
+while acknowledged encrypted receipts remain resumable.
+
 HTML/API/error responses are no-store. Content-hashed JS/CSS have immutable
-caching, exact allowlisting, nosniff and a restrictive CSP. Unknown paths have no
-SPA fallback. Browser sessions/CSRF tokens are memory-only; native password fields
-are cleared after submit. No file browsing or recovery retrieval exists.
+caching, exact allowlisting, nosniff and a restrictive CSP. Only the explicit page
+routes receive the HTML shell; unknown paths have no SPA fallback. Browser
+sessions/CSRF tokens are memory-only; native password fields are cleared after
+submit. No file browsing or recovery retrieval exists.
 
 Creation uses the portable sync-core encryption format. Save the recovery secret,
 acknowledge it, then save the encrypted receipt before publishing. Reenter the

@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,7 +6,31 @@ let proc: ReturnType<typeof Bun.spawn>, directory: string, url: string;
 const executable = process.env.NANOSYNC_TEST_BINARY
   ? [process.env.NANOSYNC_TEST_BINARY]
   : ["bun", "packages/cli/src/main.ts"];
-test.beforeAll(async () => {
+// Assert page isolation as well as the URL: navigation must not just scroll
+// between sections of the old single-page dashboard.
+async function expectAdminPage(page: Page, section: "Clients" | "Vaults" | "Activity") {
+  await expect(page).toHaveURL(url + "/admin/" + section.toLowerCase());
+  for (const [name, visible] of [
+    ["Clients", section === "Clients"],
+    ["Pending requests", section === "Clients"],
+    ["Vaults", section === "Vaults"],
+    ["Recent activity", section === "Activity"],
+  ] as const) {
+    const heading = page.getByRole("heading", { name, exact: true });
+    if (visible) await expect(heading).toBeVisible();
+    else await expect(heading).toHaveCount(0);
+  }
+  if (section !== "Vaults") await expect(page.getByLabel("New vault name")).toHaveCount(0);
+}
+
+async function navigate(page: Page, section: "Clients" | "Vaults" | "Activity") {
+  await page.getByRole("navigation", { name: "Administration" })
+    .getByRole("link", { name: section, exact: true }).click();
+  await expectAdminPage(page, section);
+}
+
+// Isolate server state and password-verification quotas between workflows.
+test.beforeEach(async () => {
   directory = mkdtempSync(join(tmpdir(), "nanosync-browser-"));
   const env = { ...process.env, NANOSYNC_PASSWORD: "browser-owner-password" };
   const init = Bun.spawn(
@@ -44,11 +68,45 @@ test.beforeAll(async () => {
   }
   throw new Error("Real server failed to start");
 });
-test.afterAll(async () => {
+test.afterEach(async () => {
   proc?.kill();
   if (proc) await proc.exited;
   rmSync(directory, { recursive: true, force: true });
 });
+test("protected deep link survives login, refresh and browser history", async ({ page }) => {
+  await page.goto(url + "/admin/vaults");
+  await expect(page).toHaveURL(/\/admin\/login(?:\?.*)?$/);
+  await expect(page.getByRole("button", { name: "Log in", exact: true })).toBeVisible();
+  await expect(page.getByLabel("New vault name")).toHaveCount(0);
+  await page.getByLabel("Owner password", { exact: true }).fill("browser-owner-password");
+  await page.getByRole("button", { name: "Log in", exact: true }).click();
+  await expectAdminPage(page, "Vaults");
+  await page.reload();
+  await expectAdminPage(page, "Vaults");
+  await navigate(page, "Clients");
+  await page.reload();
+  await expectAdminPage(page, "Clients");
+  await navigate(page, "Activity");
+  await page.reload();
+  await expectAdminPage(page, "Activity");
+  await page.goBack();
+  await expectAdminPage(page, "Clients");
+  await page.goBack();
+  await expectAdminPage(page, "Vaults");
+  await page.goForward();
+  await expectAdminPage(page, "Clients");
+  await page.goForward();
+  await expectAdminPage(page, "Activity");
+  await page.goto(url + "/admin");
+  await expectAdminPage(page, "Clients");
+  await page.getByRole("button", { name: "Log out" }).click();
+  await expect(page).toHaveURL(url + "/admin/login");
+  await expect(page.getByRole("button", { name: "Log in", exact: true })).toBeVisible();
+  await page.goto(url + "/admin/activity");
+  await expect(page).toHaveURL(/\/admin\/login(?:\?.*)?$/);
+  await expect(page.getByRole("heading", { name: "Recent activity", exact: true })).toHaveCount(0);
+});
+
 test("real browser encrypted provisioning, refresh retry, rename, danger dialog, logout and mobile keyboard", async ({
   page,
 }) => {
@@ -58,13 +116,16 @@ test("real browser encrypted provisioning, refresh retry, rename, danger dialog,
     .getByLabel("Owner password", { exact: true })
     .fill("browser-owner-password");
   await page.getByRole("button", { name: "Log in", exact: true }).click();
-  await expect(
-    page.getByRole("heading", { name: "Vaults", exact: true }),
-  ).toBeVisible();
+  await expectAdminPage(page, "Clients");
+  await navigate(page, "Vaults");
   await page.getByLabel("New vault name").fill("notes");
   await page.getByRole("button", { name: "Prepare recovery" }).click();
   const secret = await page.getByTestId("recovery-secret").innerText();
   expect(secret.length).toBeGreaterThan(40);
+  await navigate(page, "Clients");
+  await expect(page.getByTestId("recovery-secret")).toHaveCount(0);
+  await navigate(page, "Vaults");
+  await expect(page.getByTestId("recovery-secret")).toHaveText(secret);
   expect(
     await page.request.get(url + "/admin/api/vaults").then((r) => r.json()),
   ).toMatchObject({ vaults: [] });
@@ -77,7 +138,12 @@ test("real browser encrypted provisioning, refresh retry, rename, danger dialog,
   // Acknowledged receipt survives refresh, but requires proof before publishing.
   await page.getByRole("button", { name: "Save encrypted receipt" }).click();
   await expect(page.getByLabel("Saved recovery secret")).toBeVisible();
+  await navigate(page, "Activity");
+  await navigate(page, "Vaults");
+  await expect(page.getByLabel("Saved recovery secret")).toBeVisible();
+  await expect(page.getByTestId("recovery-secret")).toHaveCount(0);
   await page.reload();
+  await expectAdminPage(page, "Vaults");
   await page.getByLabel("Saved recovery secret").fill("wrong");
   await page.getByRole("button", { name: "Verify and publish" }).click();
   await expect(page.getByRole("alert")).toBeVisible();
@@ -129,13 +195,20 @@ test("real browser encrypted provisioning, refresh retry, rename, danger dialog,
   await expect(
     page.getByRole("heading", { name: "renamed", exact: true }),
   ).toHaveCount(0);
-  await expect(page.getByText("vault.deleted")).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+  await navigate(page, "Activity");
+  await expect(page.getByText("vault.deleted", { exact: true })).toBeVisible();
   expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= innerWidth,
     ),
   ).toBe(true);
   await page.getByRole("button", { name: "Log out" }).click();
+  await expect(page).toHaveURL(url + "/admin/login");
   await expect(
     page.getByRole("button", { name: "Log in", exact: true }),
   ).toBeVisible();
@@ -183,6 +256,7 @@ test("approve/deny comparison codes, active/revoked clients and lost creation re
       .getByLabel("Owner password", { exact: true })
       .fill("browser-owner-password");
     await page.getByRole("button", { name: "Log in", exact: true }).click();
+    await expectAdminPage(page, "Clients");
     const first = await enroll("keyboard-device"),
       second = await enroll("denied-device");
     await page.getByRole("button", { name: "Refresh", exact: true }).click();
@@ -223,7 +297,9 @@ test("approve/deny comparison codes, active/revoked clients and lost creation re
     await expect(
       page.getByRole("button", { name: "Revoke keyboard-device", exact: true }),
     ).toHaveCount(0);
-    await expect(page.getByText("device.revoked")).toBeVisible();
+    await navigate(page, "Activity");
+    await expect(page.getByText("device.revoked", { exact: true })).toBeVisible();
+    await navigate(page, "Vaults");
     await page.getByLabel("New vault name").fill("lost-response");
     await page.getByRole("button", { name: "Prepare recovery" }).click();
     const secret = await page.getByTestId("recovery-secret").innerText();
@@ -267,6 +343,13 @@ test("approve/deny comparison codes, active/revoked clients and lost creation re
 test("exact embedded asset allowlist, security headers and opt-in routing", async ({
   page,
 }) => {
+  const pages = ["/admin", "/admin/login", "/admin/clients", "/admin/vaults", "/admin/activity"];
+  for (const path of pages) {
+    const response = await page.request.get(url + path);
+    expect(response.status(), path).toBe(200);
+    expect(response.headers()["content-type"], path).toContain("text/html");
+    expect(await response.text(), path).toMatch(/<!doctype html>/i);
+  }
   const html = await page.request.get(url + "/admin");
   expect(html.headers()["cache-control"]).toBe("no-store");
   expect(html.headers()["content-security-policy"]).toContain(
@@ -332,7 +415,7 @@ test("exact embedded asset allowlist, security headers and opt-in routing", asyn
       await new Promise((r) => setTimeout(r, 50));
     }
     expect(response?.status).toBe(404);
-    for (const path of [...assets, "/admin/api/session"])
+    for (const path of [...pages, ...assets, "/admin/api/session"])
       expect((await fetch("http://127.0.0.1:17944" + path)).status).toBe(404);
   } finally {
     disabled.kill();
@@ -346,8 +429,11 @@ test('two tabs cannot overwrite an acknowledged encrypted receipt', async ({page
  await page.getByLabel('Owner password',{exact:true}).fill('browser-owner-password');
  await page.getByRole('button',{name:'Log in',exact:true}).click();
  // Wait for login to commit its cookie before navigating the second tab.
- await expect(page.getByRole('heading',{name:'Vaults',exact:true})).toBeVisible();
- const other=await context.newPage();await other.goto(url+'/admin');
+ await expectAdminPage(page, 'Clients');
+ await page.goto(url+'/admin/vaults');
+ await expectAdminPage(page, 'Vaults');
+ const other=await context.newPage();await other.goto(url+'/admin/vaults');
+ await expectAdminPage(other, 'Vaults');
  for(const [tab,name] of [[page,'first-tab'],[other,'second-tab']] as const){
   await tab.getByLabel('New vault name').fill(name);
   await tab.getByRole('button',{name:'Prepare recovery'}).click();
