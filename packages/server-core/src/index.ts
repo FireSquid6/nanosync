@@ -3,7 +3,7 @@ import {
   MAX_PRESENCE_QUERY, MAX_REFERENCES_PER_REVISION, OBJECT_FORMAT_VERSION, OBJECT_TYPES,
   PROTOCOL_VERSION, REVISION_FORMAT_VERSION, parseDeviceId, parsePrincipalId, parseVaultId,
 } from "@nanosync/protocol";
-import { BootstrapRepository, ObjectCatalogRepository, RevisionRepository, VaultRepository } from "@nanosync/server-metadata";
+import { BootstrapRepository, ObjectCatalogRepository, RevisionRepository, RevisionRepositoryError, VaultRepository } from "@nanosync/server-metadata";
 import type { Filesystem } from "@nanosync/server-object-storage";
 import { createServerConfig, type ServerConfig } from "./config.ts";
 import { ApiError, errorResponse, json } from "./http.ts";
@@ -132,7 +132,10 @@ async function authorizeRequest(dependencies: ServerDependencies, request: Reque
     catch { throw new ApiError(400, "MALFORMED_REQUEST", "An explicit vault ID is required"); }
     if (!dependencies.revisions) throw new ApiError(503, "UNAVAILABLE", "Vault service is unavailable");
     try { dependencies.revisions.requireVault(vaultId); }
-    catch { throw new ApiError(403, "FORBIDDEN", "Vault is unavailable"); }
+    catch (error) {
+      if (error instanceof RevisionRepositoryError && error.code === "VAULT_DELETED") throw new ApiError(410, "VAULT_DELETED", "Vault is permanently deleted");
+      throw new ApiError(403, "FORBIDDEN", "Vault is unavailable");
+    }
     return { principalId: identity.principalId, deviceId: identity.deviceId, vaultId };
   }
   return authorize(dependencies.authorize, request);
@@ -160,3 +163,4 @@ export function startServer(dependencies: ServerDependencies): ReturnType<typeof
   const config = dependencies.config ?? createServerConfig();
   return Bun.serve({ hostname: config.hostname, port: config.port, fetch: createServerHandler({ ...dependencies, config }) });
 }
+export * from "./owner-operations.ts";

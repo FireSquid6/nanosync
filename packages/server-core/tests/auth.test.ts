@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AuthenticationRepository, BootstrapRepository, MaintenanceRepository, ObjectCatalogRepository, RevisionRepository, ServerMetadataDatabase, type PasswordVerifierRecord } from "@nanosync/server-metadata";
 import { LocalFilesystem } from "@nanosync/server-object-storage";
-import { AuthenticationService, createServerHandler, ServerMaintenance, type PasswordHasher } from "../src/index.ts";
+import { OwnerOperations, AuthenticationService, createServerHandler, ServerMaintenance, type PasswordHasher } from "../src/index.ts";
 import { Argon2idPasswordHasher } from "../src/index.ts";
 import { hashRaw } from "@node-rs/argon2";
 
@@ -32,7 +32,7 @@ async function setup(authorizeBootstrap: ((request: Request) => Promise<boolean>
   const auth = new AuthenticationService(new AuthenticationRepository(database), { pepper: new Uint8Array(32).fill(9), password, clock: () => now, random: () => new Uint8Array(32).fill(randomCounter++) });
   const catalog = new ObjectCatalogRepository(database), revisions = new RevisionRepository(database);
   const handle = createServerHandler({ filesystem, catalog, revisions, bootstrap, authentication: auth, maintenance: new ServerMaintenance(new MaintenanceRepository(database), filesystem), clock: () => now, authorizeBootstrap: authorizeBootstrap ?? undefined });
-  return { database, handle, auth, setNow: (value: number) => { now = value; } };
+  return { database, filesystem, handle, auth, setNow: (value: number) => { now = value; } };
 }
 function post(path: string, body: unknown, token?: string, extraHeaders: Record<string, string> = {}): Request { return new Request(`http://local${path}`, { method: "POST", headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}), ...extraHeaders }, body: JSON.stringify(body) }); }
 async function json(response: Response): Promise<any> { return response.json(); }
@@ -197,3 +197,41 @@ describe("production authentication lifecycle", () => {
     expect(() => repository.revoke(initialId as any, secondId as any, 23)).toThrow(expect.objectContaining({ code: "FORBIDDEN" }));
   });
 });
+
+ test('shared owner decisions use exact identities, immutable codes, and explicit provenance', async () => {
+  const { database, filesystem, handle } = await setup();
+  try {
+    const owner = new OwnerOperations(database, filesystem, () => 20);
+    const actor = { origin: 'browser' as const, actorId: 'owner-session' };
+    const token = await login(handle);
+    await handle(post('/v1/auth/enrollments', enrollment(secondId), token));
+    const pending = owner.pending(actor);
+    expect(pending[0]?.verificationCode).toContain(secondId.toUpperCase());
+    expect(pending[0]?.requestedAtMs).toBe(10);
+    expect(() => owner.decideEnrollment(actor, { protocolVersion: 1, deviceId: 'Phone', decision: 'approve' })).toThrow();
+    owner.decideEnrollment(actor, { protocolVersion: 1, deviceId: secondId, decision: 'deny' });
+    expect(owner.pending(actor)).toEqual([]);
+    expect((await json(await handle(new Request('http://local/v1/auth/enrollments/status', { headers: { authorization: `Bearer ${token}` } })))).status).toBe('denied');
+    owner.decideEnrollment(actor, { protocolVersion: 1, deviceId: secondId, decision: 'deny' });
+    expect(owner.recentActivity(actor)).toEqual([expect.objectContaining({ action: 'enrollment.denied', origin: 'browser', actorId: 'owner-session', targetId: secondId })]);
+    expect(database.get<{ count: number }>('SELECT count(*) AS count FROM devices')?.count).toBe(2);
+    const fresh = await login(handle);
+    expect((await handle(post('/v1/auth/enrollments', enrollment(backupAdminId), fresh))).status).toBe(202);
+    const code = owner.pending(actor)[0]?.verificationCode;
+    await handle(post('/v1/auth/enrollments', enrollment(backupAdminId), fresh));
+    expect(owner.pending(actor)[0]?.verificationCode).toBe(code);
+    owner.decideEnrollment({ origin: 'server-local', actorId: null }, { protocolVersion: 1, deviceId: backupAdminId, decision: 'approve' });
+    expect(owner.recentActivity(actor)[0]).toMatchObject({ action: 'enrollment.approved', origin: 'server-local', actorId: null, targetId: backupAdminId });
+  } finally { database.close(); }
+ });
+ test('owner revocation is not device self-revocation or a fabricated administrator', async () => {
+   const { database, filesystem, handle } = await setup();
+   try {
+     const token = await login(handle);
+     await handle(post('/v1/auth/enrollments', enrollment(initialId), token, { 'x-nanosync-bootstrap-authorization': bootstrapProof }));
+     const owner = new OwnerOperations(database, filesystem, () => 20);
+     owner.revoke({ origin: 'server-local', actorId: initialId }, initialId);
+     expect(owner.devices({ origin: 'server-local', actorId: null })[0]?.state).toBe('revoked');
+     expect(owner.recentActivity({ origin: 'server-local', actorId: null })[0]).toMatchObject({ origin: 'server-local', actorId: initialId, targetId: initialId });
+   } finally { database.close(); }
+ });

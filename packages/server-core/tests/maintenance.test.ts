@@ -242,7 +242,7 @@ test("offline staged backup restores private metadata and verifies copied cipher
     const restored = new ServerMetadataDatabase(join(stage, "metadata.sqlite"));
     try {
       const maintenance = new ServerMaintenance(new MaintenanceRepository(restored), stagedStorage);
-      expect(restored.pragmas().userVersion).toBe(5);
+      expect(restored.pragmas().userVersion).toBe(6);
       expect(await maintenance.scan(now)).toEqual({ verified: 1, missing: 0, corrupt: 0 });
       await stagedStorage.delete(objectKey("chunk", id));
       expect((await maintenance.scan(now)).missing).toBe(1);

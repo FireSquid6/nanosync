@@ -24,6 +24,7 @@ import {
 
 export type RevisionRepositoryErrorCode =
   | "IDEMPOTENCY_KEY_REUSE"
+  | "VAULT_DELETED"
   | "VAULT_CONFLICT"
   | "SERVER_UNINITIALIZED"
   | "INVARIANT";
@@ -280,6 +281,7 @@ function requireVaultReader(
   db: ServerMetadataDatabase,
   vaultId: VaultId,
 ): void {
+  if (db.get("SELECT 1 FROM vault_deletions WHERE vault_id=?", [vaultId])) throw new RevisionRepositoryError("VAULT_DELETED", "Vault is permanently deleted");
   const state = db.get<{ vault_id: string }>(
     "SELECT vault_id FROM server_state WHERE vault_id = ?",
     [vaultId],
@@ -296,6 +298,7 @@ function requireVaultReader(
     );
 }
 function requireVault(tx: MetadataTransaction, vaultId: VaultId): void {
+  if (tx.get("SELECT 1 FROM vault_deletions WHERE vault_id=?", [vaultId])) throw new RevisionRepositoryError("VAULT_DELETED", "Vault is permanently deleted");
   const state = tx.get<{ vault_id: string }>(
     "SELECT vault_id FROM server_state WHERE vault_id = ?",
     [vaultId],

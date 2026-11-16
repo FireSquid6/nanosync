@@ -78,6 +78,7 @@ export class RevisionService {
     try { return callback(); }
     catch (error) {
       if (error instanceof RevisionRepositoryError) {
+        if (error.code === "VAULT_DELETED") throw new ApiError(410, "VAULT_DELETED", "Vault is permanently deleted");
         if (error.code === "IDEMPOTENCY_KEY_REUSE") throw new ApiError(409, "IDEMPOTENCY_KEY_REUSE", "Idempotency key was used for another request");
         if (error.code === "VAULT_CONFLICT") throw new ApiError(403, "FORBIDDEN", "Authenticated vault is not available");
         if (error.code === "SERVER_UNINITIALIZED") throw new ApiError(503, "UNAVAILABLE", "Server vault is not initialized");

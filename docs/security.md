@@ -134,7 +134,7 @@ Revocation does not:
 - Prevent decryption of encrypted objects already downloaded.
 - Rotate the vault key or re-encrypt history.
 
-V1 rejects self-revocation and any revocation that would remove the last active administrator. Revocation clears the server credential digest and enrollment session in one transaction.
+Device-admin routes reject self-revocation and any revocation that would remove the last active administrator. Explicit owner operations use separate browser/server-local provenance, not a fabricated device; they may revoke even the last device administrator. Revocation clears the server credential digest and enrollment session in one transaction.
 
 The UI must describe this as access revocation, not data erasure.
 
@@ -218,3 +218,9 @@ Before implementation is considered production-ready, review:
 - Filesystem path traversal and symlink handling.
 - Reverse-proxy trust configuration.
 - Secret storage on Linux and Android.
+
+### Owner provisioning boundary
+
+The owner-administration redesign intentionally permits server-local provisioning to handle plaintext vault keys and new recovery material transiently on the operator machine. It must not persist those plaintext secrets. Browser provisioning instead submits only existing-format encrypted frames, a recovery wrap, and a MAC-authenticated genesis envelope. Owner-created genesis uses reserved author UUID `00000000-0000-4000-8000-000000000001` in both manifest and envelope: this is an author label, never an enrolled device or credential. Encryption and MAC formats are unchanged. A malicious server can deliver malicious browser code; browser provisioning does not defend against that threat.
+
+Shared owner operations require an already authenticated owner boundary; their actor object records provenance, not proof of authentication. Browser session authentication, CSRF, transport policy, and deletion confirmations belong to the invoking surface. Verification codes are public comparisons of immutable enrollment identity/fingerprint, never authenticators.

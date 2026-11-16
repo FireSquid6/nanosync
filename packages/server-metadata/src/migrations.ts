@@ -473,6 +473,32 @@ CREATE TRIGGER device_last_admin BEFORE UPDATE OF state ON devices WHEN OLD.stat
 BEGIN SELECT RAISE(ABORT,'last active administrator cannot be revoked'); END;
 `;
 
+const V6_SQL = `
+-- Device-admin revocation keeps its transactional repository guard. Owner
+-- authority is independent of the availability of enrolled administrators.
+DROP TRIGGER device_last_admin;
+-- Denied/expired requests must not reserve a display name. Pending names
+-- are checked against live requests by the enrollment transaction.
+DROP INDEX device_name_unique;
+CREATE UNIQUE INDEX device_name_unique ON devices(display_name COLLATE NOCASE) WHERE state='active';
+ALTER TABLE audit_events ADD COLUMN origin TEXT NOT NULL DEFAULT 'device' CHECK(origin IN ('device','server-local','browser'));
+ALTER TABLE audit_events ADD COLUMN actor_id TEXT;
+ALTER TABLE audit_events ADD COLUMN target_id TEXT;
+CREATE TABLE vault_creations (
+ vault_id TEXT PRIMARY KEY CHECK(${uuid("vault_id")}),
+ request_digest TEXT NOT NULL CHECK(${hex64("request_digest")})
+) STRICT;
+CREATE TRIGGER vault_creation_immutable BEFORE UPDATE ON vault_creations BEGIN SELECT RAISE(ABORT,'immutable creation'); END;
+CREATE TABLE vault_deletions (
+ vault_id TEXT PRIMARY KEY CHECK(${uuid("vault_id")}),
+ deleted_at_ms INTEGER NOT NULL CHECK(${timestamp("deleted_at_ms")}),
+ cleanup_state TEXT NOT NULL CHECK(cleanup_state IN ('pending','complete'))
+) STRICT;
+CREATE TRIGGER deletion_identity_immutable BEFORE UPDATE OF vault_id,deleted_at_ms ON vault_deletions BEGIN SELECT RAISE(ABORT,'immutable deletion'); END;
+CREATE TRIGGER deletion_terminal BEFORE UPDATE OF cleanup_state ON vault_deletions WHEN NOT(OLD.cleanup_state='pending' AND NEW.cleanup_state='complete') BEGIN SELECT RAISE(ABORT,'invalid cleanup transition'); END;
+CREATE TRIGGER deletion_durable BEFORE DELETE ON vault_deletions BEGIN SELECT RAISE(ABORT,'deletion identifiers cannot be reused'); END;
+`;
+
 export function migrationChecksum(version: number, name: string, sql: string): string {
   return createHash("sha256").update(`${version}\0${name}\0${sql}`, "utf8").digest("hex");
 }
@@ -487,4 +513,5 @@ export const METADATA_MIGRATIONS: readonly MetadataMigration[] = Object.freeze([
   migration(3, "device_authentication", V3_SQL),
   migration(4, "offline_gc_candidates", V4_SQL),
   migration(5, "multiple_vaults", V5_SQL),
+  migration(6, "owner_administration", V6_SQL),
 ]);
