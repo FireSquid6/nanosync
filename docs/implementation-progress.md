@@ -324,3 +324,43 @@ Changed paths:
 - `packages/cli/tests/multi-vault.test.ts`
 - `packages/cli/README.md`
 - `docs/implementation-progress.md`
+
+## Safe local binding/removal and recoverable owner provisioning (completed)
+
+### Public contracts
+
+- `LinuxScanner.hasUnsyncedChanges()` is a read-only full inventory/content-hash comparison against applied local entries. It uses the existing no-follow, descriptor-anchored scanner traversal and ignore rules; it detects unscanned additions, removals, renames and file edits without transferring or applying files. Disconnect also checks proposal/restore/hydration intents, unfinished operations/transfers and accepted-versus-applied heads. Synchronized plaintext can now disconnect without force; unsynced work still requires explicit `--force`, never `--yes`.
+- `withConnectionRegistry` serializes binding creation/repair/disconnection, forced server removal and CLI sync's discovery-to-replica-lock handoff using the existing process-identity lock implementation. `connectRegisteredVault` revalidates the selected server inside that gate after remote discovery, preventing attachment to forgotten credentials. `removeServerConnection` reads the attachment set and forgets the server under one registry ownership interval. Neither force nor yes bypasses registry ownership.
+- Multi-binding disconnection acquires **all** replica locks in connection-UUID order before dirty checks or any binding mutation. Any lock failure releases earlier acquired locks and leaves every marker, binding record and server credential intact. Successful forced removal discards replica journals/cache, preserves plaintext and remote data, and does not revoke remote device authorization. Ordinary disconnection retains cached vault keys for deliberate reconnection. Arbitrary filesystem I/O failures during mutation still report failure; this is not a cross-filesystem atomic transaction or a promise of rollback after power loss.
+- `provisionLocalVault` now holds an owner-creation lock and persists encrypted receipts **before** protected output delivery. Script idempotency is the absolute `--recovery-output` path plus the original name: `owner-creations/<sha256(path)>.json` stores encrypted request bytes, delivery phase, output path and a recovery-secret digest, never plaintext secrets or master keys. After output delivery it verifies the protected file before advancing the receipt and publishing. A crash between output creation and delivery checkpoint reuses the original encrypted request after verifying the file. A prepared receipt with no output can safely regenerate unpublished material. Delivered-but-missing/modified/unsafe output fails visibly rather than guessing or provisioning another vault.
+- Completed receipts are retained: retry after lost stdout/local completion failure returns the original vault through the existing idempotent owner operation. A different output path deliberately starts a new creation. Interactive creation retains its acknowledged/completed encrypted receipt in `owner-creation.json`; retrying the same name replays it, and a new name can replace a completed interactive receipt. Recovery acknowledgement failure publishes nothing. These receipt files are ordinary encrypted provisioning state, not a secret-retrieval facility.
+- Existing owner list/rename/delete operations remain the authority. PTY tests now exercise recovery acknowledgement failure and exact-name deletion, including directory/name/UUID warning visibility and refusal despite `--yes`. Script UUID confirmation remains mandatory. Existing connect/no-transfer/recovery-only-when-key-missing contracts are covered with a second CLI-connected replica and independent journal creation.
+
+### Evidence
+
+- Observed red at the public CLI seam: a fully synchronized plaintext directory still required force. The new unscanned-edit/clean-disconnect regression now passes and preserves file contents throughout.
+- Observed red at the public CLI seam: retrying successful owner creation with the same protected output returned failure instead of the original identity. Encrypted receipts now pass retry, failed output delivery, substituted output refusal and actual injected stdout loss **after durable publication**, with exactly one listed vault. Real-server CLI retry then recovers/connects using the original delivered secret.
+- CLI regressions cover a locked second replica during multi-binding forced removal (all bindings/credential retained), registry contention (no force/yes bypass), successful removal with retained plaintext and still-authorized remote credential, and remote discovery racing local removal (no dangling new binding).
+- Terminal integration uses Python's maintained standard-library `pty`/`subprocess` harness against actual Bun CLI processes and Inquirer prompts, without skips or custom production terminal/password handling. Hidden password tests remain green; added acknowledgement/deletion tests validate observable server results.
+- `bun test packages/cli`: **56 passed, 0 failed**, 563 assertions.
+- `bun run typecheck`: **all eight packages passed**.
+- `bun test`: **277 passed, 0 failed**, 1982 assertions; no unhandled errors.
+- `git diff --check`: passed.
+
+### Review handoff
+
+Key functions/types: `LinuxScanner.hasUnsyncedChanges`, `hasUnsyncedWork`, `withConnectionRegistry`, `connectRegisteredVault`, `removeServerConnection`, `disconnectConnections`/`disconnectLocked`, `provisionLocalVault`/encrypted `Receipt`, CLI binding/removal/sync adapters.
+
+Changed paths:
+- `packages/linux-client/src/index.ts`
+- `packages/cli/src/connections.ts`
+- `packages/cli/src/local-provision.ts`
+- `packages/cli/src/main.ts`
+- `packages/cli/tests/sync.test.ts`
+- `packages/cli/tests/local-safety.test.ts`
+- `packages/cli/tests/command-tree.test.ts`
+- `packages/cli/tests/terminal.test.ts`
+- `packages/cli/README.md`
+- `docs/implementation-progress.md`
+
+Continue to require exclusive server-runtime ownership for offline provisioning/storage operations, as in prior steps. Browser frontend/Paper UI delivery remains outside this local-workflow slice.

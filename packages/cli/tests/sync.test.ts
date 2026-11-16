@@ -471,3 +471,69 @@ test("deleted vault stops watch without changing plaintext or stored keys", asyn
   const { LocalFilesystem } = await import('@nanosync/server-object-storage');
   expect((await new LocalFilesystem(join(f.serverDir, 'objects')).list()).keys).toEqual([]);
 });
+
+test('disconnect distinguishes synchronized plaintext from unscanned edits and preserves both', async () => {
+  const e = await fixture();
+  writeFileSync(join(e.firstFiles, 'saved'), 'published', {mode:0o600});
+  expect(await main(['client','sync','--client-dir',e.firstDir,'--path',e.firstFiles])).toBe(0);
+  writeFileSync(join(e.firstFiles, 'saved'), 'unscanned', {mode:0o600});
+  expect(await main(['client','vaults','disconnect','--client-dir',e.firstDir,'--path',e.firstFiles,'--yes'])).toBe(2);
+  expect(readFileSync(join(e.firstFiles, 'saved'),'utf8')).toBe('unscanned');
+  expect(existsSync(join(e.firstFiles,'.nanosync'))).toBe(true);
+  expect(await main(['client','sync','--client-dir',e.firstDir,'--path',e.firstFiles])).toBe(0);
+  expect(await main(['client','vaults','disconnect','--client-dir',e.firstDir,'--path',e.firstFiles])).toBe(0);
+  expect(readFileSync(join(e.firstFiles, 'saved'),'utf8')).toBe('unscanned');
+});
+
+test('forced multi-binding removal preflights every lock and registry contention preserves all bindings', async () => {
+  const e = await fixture();
+  const { records } = await import('../src/connections.ts');
+  const { acquireSyncLock } = await import('../src/sync-lock.ts');
+  const first = records(e.firstDir)[0]!;
+  const another = temp();
+  writeFileSync(join(another,'private-note'),'retained',{mode:0o600});
+  createConnection(e.firstDir, another, first.serverId, first.vaultId, first.deviceId, true);
+  const bindings = records(e.firstDir).sort((a,b) => a.connectionId.localeCompare(b.connectionId));
+  const last = bindings[1]!;
+  const release = acquireSyncLock(privateDirectory(join(privateDirectory(join(e.firstDir,'replicas')),last.connectionId)));
+  const remove = ['client','connections','remove','--client-dir',e.firstDir,'--server',first.serverId,'--force','--yes'];
+  try {
+    expect(await main(remove)).toBe(2);
+    expect(records(e.firstDir)).toHaveLength(2);
+    for (const c of bindings) expect(existsSync(join(c.root,'.nanosync'))).toBe(true);
+    expect(existsSync(join(e.firstDir,'servers',`${first.serverId}.json`))).toBe(true);
+  } finally { release(); }
+  const releaseRegistry = acquireSyncLock(privateDirectory(join(e.firstDir,'registry-lock')));
+  try {
+    expect(await main(remove)).toBe(2);
+    expect(records(e.firstDir)).toHaveLength(2);
+  } finally { releaseRegistry(); }
+  expect(await main(remove)).toBe(0);
+  expect(records(e.firstDir)).toHaveLength(0);
+  expect(readFileSync(join(another,'private-note'),'utf8')).toBe('retained');
+  expect(existsSync(join(e.firstDir,'servers',`${first.serverId}.json`))).toBe(false);
+  // Local forgetting does not revoke the remote approved-device credential.
+  expect((await fetch(e.url + '/v1/vaults',{headers:{authorization:`Bearer ${e.first.token}`}})).status).toBe(200);
+});
+
+test('connect revalidates the selected server after remote discovery races local removal', async () => {
+  const e = await fixture();
+  const { records } = await import('../src/connections.ts');
+  const binding = records(e.firstDir)[0]!, destination = temp();
+  const native = globalThis.fetch;
+  let removed = false;
+  globalThis.fetch = (async (input, init) => {
+    const response = await native(input, init);
+    if (!removed && String(input).endsWith('/v1/vaults')) {
+      removed = true;
+      expect(await main(['client','connections','remove','--client-dir',e.firstDir,'--server',binding.serverId,'--force'])).toBe(0);
+    }
+    return response;
+  }) as typeof fetch;
+  try {
+    expect(await main(['client','vaults','connect','--client-dir',e.firstDir,'--server',binding.serverId,'--vault',binding.vaultId,'--path',destination,'--non-interactive'])).toBe(2);
+    expect(removed).toBe(true);
+    expect(records(e.firstDir)).toHaveLength(0);
+    expect(existsSync(join(destination,'.nanosync'))).toBe(false);
+  } finally { globalThis.fetch = native; }
+});

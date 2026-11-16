@@ -58,9 +58,22 @@ test('scripted CLI enrollment resumes lost submission, keeps aliases separate an
     const recovery = join(base,'recovery.txt');
     expect(await invoke(['server','vaults','create','--server-dir',serverDir,'--name','notes','--recovery-output',recovery])).toBe(0);
     const vault = result().data.vaultId;
+    // Lost stdout/retry uses the original recovery output and encrypted receipt.
+    expect(await invoke(['server','vaults','create','--server-dir',serverDir,'--name','notes','--recovery-output',recovery])).toBe(0);
+    expect(result().data.vaultId).toBe(vault);
     expect(existsSync(recovery)).toBe(true);
     expect(out.mock.calls.flat().join('\n')).not.toContain(readFileSync(recovery,'utf8').trim());
     expect(await invoke(['client','vaults','connect','--client-dir',clientDir,'--server','home','--vault',vault,'--path',files,'--recovery-file',recovery])).toBe(0);
+    const replica = join(base,'replica'); mkdirSync(replica,{mode:0o700});
+    expect(await invoke(['client','vaults','connect','--client-dir',clientDir,'--server','home','--vault',vault,'--path',replica])).toBe(0);
+    const replicaId = result().data.connectionId;
+    expect(await invoke(['client','vaults','view','--client-dir',clientDir])).toBe(0);
+    expect(result().data.bindings).toHaveLength(2);
+    expect(result().data.bindings.every((b:any) => b.serverAlias === 'home' && b.vaultId === vault)).toBe(true);
+    expect(new Set(result().data.bindings.map((b:any) => b.connectionId)).size).toBe(2);
+    expect(existsSync(join(clientDir,'replicas',replicaId,'local.sqlite'))).toBe(false);
+    expect(await invoke(['client','sync','--client-dir',clientDir,'--path',replica])).toBe(0);
+    expect(existsSync(join(clientDir,'replicas',replicaId,'local.sqlite'))).toBe(true);
     expect(await invoke(['client','connections','remove','--client-dir',clientDir,'--server','home'])).toBe(2);
     expect(await invoke(['client','sync','--client-dir',clientDir,'--path',files])).toBe(0);
     expect(await invoke(['server','vaults','delete','--server-dir',serverDir,'--vault',vault,'--yes'])).toBe(2);

@@ -1,3 +1,6 @@
+import { ClientLocal } from '@nanosync/client-local';
+import { LinuxScanner } from '@nanosync/linux-client';
+import { CliError } from './prompts.ts';
 import { acquireSyncLock } from "./sync-lock.ts";
 import { randomUUID } from "node:crypto";
 import { constants, closeSync, existsSync, lstatSync, openSync, realpathSync, readdirSync, renameSync, writeFileSync, fsyncSync, unlinkSync, rmSync } from "node:fs";
@@ -87,6 +90,18 @@ export function discoverConnection(globalDirectory: string, from: string): Conne
 /** Setup has no file transfer side effects. Existing files are deliberately left alone. */
 export function createConnection(globalDirectory: string, destination: string, serverId: string, vaultId: string, deviceId: string,
   confirmNonempty = false): Connection {
+  return withConnectionRegistry(globalDirectory, () => createLocked(globalDirectory, destination, serverId, vaultId, deviceId, confirmNonempty));
+}
+
+/** Client adapter: revalidate the selected server while mutation is serialized with removal. */
+export function connectRegisteredVault(globalDirectory: string, destination: string, serverId: string, vaultId: string, deviceId: string, confirmNonempty = false): Connection {
+  return withConnectionRegistry(globalDirectory, () => {
+    const saved = JSON.parse(secureRead(join(globalDirectory, 'servers', `${parseVaultId(serverId)}.json`)).toString('utf8'));
+    if (saved.serverId !== serverId || saved.deviceId !== deviceId) throw new Error('server connection changed; select it again');
+    return createLocked(globalDirectory, destination, serverId, vaultId, deviceId, confirmNonempty);
+  });
+}
+function createLocked(globalDirectory: string, destination: string, serverId: string, vaultId: string, deviceId: string, confirmNonempty: boolean): Connection {
   const global = privateDirectory(globalDirectory), root = rootPath(destination);
   if (overlaps(root, global)) throw new Error("sync destination overlaps private global state");
   if (ancestorMarker(root)) throw new Error("sync destination is nested under a marked sync root");
@@ -105,6 +120,9 @@ export function createConnection(globalDirectory: string, destination: string, s
 
 /** A move retains the journal; a copy always gets a distinct identity and journal. */
 export function repairConnection(globalDirectory: string, destination: string, mode: "move" | "copy", confirmNonempty = false): Connection {
+  return withConnectionRegistry(globalDirectory, () => repairLocked(globalDirectory, destination, mode, confirmNonempty));
+}
+function repairLocked(globalDirectory: string, destination: string, mode: "move" | "copy", confirmNonempty: boolean): Connection {
   const global = privateDirectory(globalDirectory), root = rootPath(destination);
   if (overlaps(global, root) || ancestorMarker(root) || records(global).some(item => overlaps(root, item.root)))
     throw new Error("sync destination overlaps an existing connection");
@@ -151,9 +169,42 @@ function createFile(path: string, text: string): void {
   syncDirectory(dirname(path));
 }
 
-/** Conservative until a full filesystem/journal dirty check: any replica state or files needs force. */
+function hasUnsyncedWork(replica: string, connection: Connection): boolean {
+  if (!existsSync(join(replica, 'local.sqlite'))) return readdirSync(connection.root).some(name => name !== MARKER);
+  const local = new ClientLocal(replica, connection.vaultId, connection.deviceId);
+  try {
+    return !!local.proposal() || !!local.pendingHydration() || !!local.restoreProposal() ||
+      local.listWork('operations').some(work => work.state !== 'done') ||
+      local.listWork('transfers').some(work => work.state !== 'done') ||
+      local.head('accepted').revisionId !== local.head('applied').revisionId ||
+      new LinuxScanner(connection.root, local).hasUnsyncedChanges();
+  } finally { local.close(); }
+}
+
+/** Serialize binding mutation and server forgetting across CLI processes. Never bypassed by force. */
+export function withConnectionRegistry<T>(globalDirectory: string, action: () => T): T {
+  const directory = privateDirectory(join(privateDirectory(globalDirectory), 'registry-lock'));
+  const release = acquireSyncLock(directory);
+  try { return action(); } finally { release(); }
+}
+
+export function removeServerConnection(globalDirectory: string, serverId: string, force = false): void {
+  withConnectionRegistry(globalDirectory, () => {
+    const attached = records(globalDirectory).filter(c => c.serverId === serverId);
+    if (attached.length && !force) throw new CliError('CONNECTION_IN_USE', 'Vaults remain attached; disconnect them or explicitly use --force');
+    disconnectLocked(globalDirectory, attached, force);
+    unlinkSync(join(globalDirectory, 'servers', `${serverId}.json`));
+    syncDirectory(join(globalDirectory, 'servers'));
+  });
+}
+
+/** All replica locks are acquired in UUID order before any binding is changed. */
 export function disconnectConnections(globalDirectory: string, connections: Connection[], force = false): void {
+  return withConnectionRegistry(globalDirectory, () => disconnectLocked(globalDirectory, connections, force));
+}
+function disconnectLocked(globalDirectory: string, connections: Connection[], force: boolean): void {
   const global = privateDirectory(globalDirectory);
+  connections = [...connections].sort((a,b) => a.connectionId.localeCompare(b.connectionId));
   const releases: (() => void)[] = [];
   const replicaPaths: string[] = [];
   try {
@@ -162,7 +213,9 @@ export function disconnectConnections(globalDirectory: string, connections: Conn
       const replica = privateDirectory(join(privateDirectory(join(global, "replicas")), connection.connectionId));
       releases.push(acquireSyncLock(replica));
       replicaPaths.push(replica);
-      if (!force && (readdirSync(connection.root).some(name => name !== MARKER) || existsSync(join(replica, "local.sqlite"))))
+    }
+    for (let i = 0; i < connections.length; i++) {
+      if (!force && hasUnsyncedWork(replicaPaths[i]!, connections[i]!))
         throw new Error("possible unsynced work; use --force to explicitly discard pending synchronization state (files are preserved)");
     }
     for (const connection of connections) {

@@ -139,6 +139,33 @@ export class LinuxScanner {
   }
   rules() { checkedRoot(this.root); return new IgnoreRules(this.root); }
   snapshot() { const rules = this.rules(); return inventory(this.root, rules); }
+  /** Read-only full-content check against the last applied inventory, including unscanned edits. */
+  hasUnsyncedChanges(): boolean {
+    const rules = this.rules(), found = this.snapshot();
+    const entries = this.local.entries().filter(e => e.kind !== 'tombstone' && !rules.ignores(e.path, e.kind === 'directory'));
+    const prior = new Map(entries.map(e => [e.path, e]));
+    for (const file of found) {
+      if (!file.path) continue; // Root identity/metadata changes do not constitute user work.
+      const old = prior.get(file.path);
+      if (!old || old.kind !== file.kind || old.hydration === 'evicted') return true;
+      if (file.kind === 'file') {
+        const fd = openPath(this.root, file.path, file.stat);
+        try {
+          const hash = createHash('sha256'), buffer = Buffer.allocUnsafe(65536);
+          let position = 0;
+          while (position < file.stat.size) {
+            const n = readSync(fd, buffer, 0, Math.min(buffer.length, file.stat.size - position), position);
+            if (!n) throw new Error('file shortened during dirty check');
+            hash.update(buffer.subarray(0, n)); position += n;
+          }
+          if (!same(fstatSync(fd), file.stat)) throw new Error('file changed during dirty check');
+          if (hash.digest('hex') !== old.fingerprint) return true;
+        } finally { closeSync(fd); }
+      }
+    }
+    const paths = new Set(found.map(f => f.path));
+    return entries.some(e => e.path && e.hydration !== 'evicted' && !paths.has(e.path));
+  }
   async plan(priorInput: ManifestV1, revisionId: string, deviceId: string, master: Uint8Array, identityHints?: ManifestV1): Promise<ScanPlan> {
     const prior = parseManifest(priorInput), revision = parseRevisionId(revisionId), device = parseDeviceId(deviceId);
     parseVaultId(prior.vaultId);

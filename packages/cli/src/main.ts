@@ -1,15 +1,15 @@
 #!/usr/bin/env bun
 import { join } from 'node:path';
 import { hostname } from 'node:os';
-import { existsSync, readdirSync, unlinkSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import { Command, CommanderError, Option } from 'commander';
 import { parseDeviceId, parseVaultId } from '@nanosync/protocol';
 import { RemoteError } from '@nanosync/sync-core';
 import { api, baseUrl } from './client.ts';
-import { privateDirectory, provisionSecret, secureCreate, secureRead, syncPrivateDirectory } from './security.ts';
+import { privateDirectory, provisionSecret, secureCreate, secureRead } from './security.ts';
 import { runServer, initializeServerOwner, localAdminReport, withLocalOwner, localOwner } from './server.ts';
 import { SyncRunner } from './sync-runner.ts';
-import { createConnection, discoverConnection, records, disconnectConnections } from './connections.ts';
+import { connectRegisteredVault, discoverConnection, records, disconnectConnections, removeServerConnection, withConnectionRegistry } from './connections.ts';
 import { enrollServer, key, server as storedServer, servers, unlockVault, pendingEnrollments, connectionSummary } from './vault-client.ts';
 import { provisionLocalVault } from './local-provision.ts';
 import { CliError, interactive, text, hidden, choose, acknowledge } from './prompts.ts';
@@ -103,7 +103,7 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
           console.error(`Recovery secret (record offline): ${recovery}`);
           if (await hidden('Retype recovery secret to acknowledge backup', canPrompt(command)) !== recovery) throw new CliError('INVALID_INPUT', 'recovery acknowledgement mismatch; no vault created');
         }
-      });
+      }, opts(command).recoveryOutput);
     });
     flags(vaults.command('rename'), ...local, ...common, '--vault <uuid>', '--name <name>').action(async (_o, command) => {
       const dir = await serverRoot(command), id = parseVaultId(await need(command, 'vault')), name = await need(command, 'name');
@@ -153,11 +153,9 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
         } finally { process.off('SIGINT', stop); }
       });
     flags(connections.command('remove'), ...clientFlags, ...common, '--server <alias-or-id>', '--force').action(async (_o, command) => {
-      const info = await selectServer(command), dir = root(command), attached = records(dir).filter(c => c.serverId === info.serverId);
-      if (attached.length && !opts(command).force) throw new CliError('CONNECTION_IN_USE', 'Vaults remain attached; disconnect them or explicitly use --force');
+      const info = await selectServer(command), dir = root(command);
       console.error('Local removal only: remote device access is NOT revoked. Files and remote data are preserved. --force discards pending synchronization state.');
-      disconnectConnections(dir, attached, !!opts(command).force);
-      unlinkSync(join(dir, 'servers', `${info.serverId}.json`)); syncPrivateDirectory(join(dir, 'servers'));
+      removeServerConnection(dir, info.serverId, !!opts(command).force);
       result = {serverId:info.serverId, removed:true, remotelyRevoked:false};
     });
     const bindings = flags(client.command('vaults'), ...clientFlags, ...common);
@@ -178,11 +176,12 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
         const stored = key(dir, info.serverId, vault.vaultId);
         if (!stored) await unlockVault(dir, info, vault.vaultId, await secret(command, 'NANOSYNC_RECOVERY_SECRET', 'recoveryFile', 'Vault recovery secret'));
         else stored.fill(0);
-        result = createConnection(dir, destination, info.serverId, vault.vaultId, info.deviceId, confirmed);
+        result = connectRegisteredVault(dir, destination, info.serverId, vault.vaultId, info.deviceId, confirmed);
         console.error('Connected; no files transferred. Next: nanosync client sync');
       });
     flags(bindings.command('disconnect'), ...clientFlags, ...common, '--path <directory>', '--force').action(async (_o, command) => {
       const dir = root(command), binding = discoverConnection(dir, opts(command).path ?? process.cwd());
+      if (opts(command).force) console.error('Disconnect discards pending synchronization state. Local files and remote data are preserved.');
       disconnectConnections(dir, [binding], !!opts(command).force); result = {connectionId:binding.connectionId, disconnected:true, filesPreserved:true};
     });
     flags(client.command('sync'), ...clientFlags, ...common, '--path <directory>', '--watch').action(async (_o, command) => {
@@ -191,8 +190,12 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
       const master = key(dir, info.serverId, binding.vaultId);
       if (!master) throw new CliError('INPUT_REQUIRED', 'vault key is missing; reconnect to unlock');
       let runner: SyncRunner;
-      try { runner = SyncRunner.start({clientDirectory:privateDirectory(join(privateDirectory(join(privateDirectory(dir), 'replicas')), binding.connectionId)),
-        syncDirectory:binding.root, vaultId:binding.vaultId, deviceId:binding.deviceId, masterKey:master, baseUrl:info.baseUrl, token:info.token}); }
+      try { runner = withConnectionRegistry(dir, () => {
+        if (discoverConnection(dir, binding.root).connectionId !== binding.connectionId) throw new CliError('CONFLICT', 'binding changed');
+        storedServer(dir, binding.serverId);
+        return SyncRunner.start({clientDirectory:privateDirectory(join(privateDirectory(join(privateDirectory(dir), 'replicas')), binding.connectionId)),
+          syncDirectory:binding.root, vaultId:binding.vaultId, deviceId:binding.deviceId, masterKey:master, baseUrl:info.baseUrl, token:info.token});
+      }); }
       finally { master.fill(0); }
       try {
         if (!opts(command).watch) result = await runner.syncOnce();
