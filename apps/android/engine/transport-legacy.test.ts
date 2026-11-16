@@ -23,7 +23,9 @@ test("native transport preserves raw JSON, bytes and streams when old Request ha
     await transport(new URL("https://example.org/v1/bytes"), { method: "PUT", body: frame });
     await transport("https://example.org/v1/buffer", { method: "PUT", body: frame.buffer });
     await transport("https://example.org/v1/stream", { method: "PUT", body: new ReadableStream({ start(controller) { controller.enqueue(frame.subarray(0, 2)); controller.enqueue(frame.subarray(2)); controller.close(); } }) });
-    const external = new OldRequest("https://example.org/v1/request", { method: "POST", body: json });
+    const external = new OldRequest("https://example.org/v1/request", {
+      method: "POST", headers: { "content-length": String(new TextEncoder().encode(json).length) }, body: json,
+    });
     expect(external.body).toBeUndefined();
     await transport(external);
     expect(calls.map(c => c.path)).toEqual(["/v1/json", "/v1/bytes", "/v1/buffer", "/v1/stream", "/v1/request"]);

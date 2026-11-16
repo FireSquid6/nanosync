@@ -32,3 +32,10 @@ bunx bun2nix -l bun.lock -c ../../ -o build/nix/bun.nix
 
 Review and commit the updated `bun.nix` with the lockfile. When updating Nix
 inputs, run `nix flake update` and commit the resulting `flake.lock` as well.
+
+The binary build first runs `bun run build:frontend` with Bun's browser target.
+React, Radix and copied Paper UI sources are bundled locally into hashed assets,
+then an exact asset map is compiled into the executable. No CDN, browser download,
+or network frontend build is needed. The updated `bun.nix` includes frontend and
+local Playwright dependencies; Playwright browser installation is not part of the
+package build. Browser tests use `CHROMIUM_PATH` (or the development profile path).

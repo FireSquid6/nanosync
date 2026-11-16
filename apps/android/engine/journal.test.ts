@@ -37,3 +37,28 @@ test("garbage deletion failure is retryable across fresh journal instances witho
   const fresh = new Journal(e.host.runtime.bridge, 4096); await fresh.collectGarbage();
   expect(e.files()).toHaveLength(1); expect(await fresh.get(vault, object.reference)).toEqual(bytes);
 });
+
+test("reconciliation branch and committed entry revision survive journal recreation until accepted apply", () => {
+  const e = fixture(), journal = new Journal(e.host.runtime.bridge);
+  const base = crypto.randomUUID(), local = crypto.randomUUID(), merged = crypto.randomUUID(), entryId = crypto.randomUUID();
+  const request = (revisionId: string) => ({ proposedRevision: { revisionId } }) as Parameters<Journal["freezeProposal"]>[0];
+  journal.recordHead("applied", { revisionId: base, sequence: 1 });
+  expect(() => journal.beginReconciliation(base, local)).toThrow("branch changed");
+  journal.freezeProposal(request(local), new Uint8Array([1]));
+  journal.beginReconciliation(base, local);
+  journal.discardStaleProposal(local);
+  const resumed = new Journal(e.host.runtime.bridge);
+  expect(resumed.reconciliation()).toEqual({ baseRevision: base, localRevision: local });
+  expect(() => resumed.beginReconciliation(base, merged)).toThrow("already pending");
+  resumed.commitEntries({ version: 1, vaultId: vault, revisionId: local, parents: [base], creatingDeviceId: crypto.randomUUID(),
+    entries: [{ id: entryId, parentId: null, name: "", kind: "directory" }] }, [{ path: "", directory: true, size: 0, modified: 1 }]);
+  expect(new Journal(e.host.runtime.bridge).entry(entryId)?.revision).toBe(local);
+  expect(() => resumed.finishReconciliation()).toThrow("not applied");
+  resumed.freezeProposal(request(merged), new Uint8Array([2]));
+  resumed.acceptProposal(2);
+  expect(() => resumed.finishReconciliation()).toThrow("not applied");
+  resumed.recordHead("applied", { revisionId: merged, sequence: 2 });
+  resumed.finishReconciliation();
+  const finished = new Journal(e.host.runtime.bridge);
+  expect(finished.reconciliation()).toBeNull(); expect(finished.proposal()).toBeNull();
+});

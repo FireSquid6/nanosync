@@ -207,4 +207,39 @@ The server should bind to loopback by default. Binding to a non-loopback interfa
 - Garbage collection must prefer leaking storage over deleting possibly referenced data.
 # Maintenance boundary
 
-Migration 4 adds durable offline GC candidate marks; migrations 1–3 and their checksums are unchanged. Retention selection is a UTC dry run, not revision deletion: with no client merge-base ACK, all accepted/prepared revision ancestry and all their object references remain protected. Only verified unreferenced cataloged uploads can pass offline GC, after creation and candidate grace and repeat transactional reachability checks. The object store has no cross-process lease, so physical deletion is deliberately absent from HTTP and background jobs; operators must stop writers and hold exclusive access to metadata and objects. Integrity scans hash entire ciphertext frames with bounded memory; they do not decrypt vault contents.
+Migration 4 adds durable offline GC candidate marks; migrations 1–3 and their checksums are unchanged. Retention selection is a UTC dry run, not revision deletion: with no client merge-base ACK, all accepted/prepared revision ancestry and all their object references remain protected. Only verified unreferenced cataloged uploads can pass offline GC, after creation and candidate grace and repeat transactional reachability checks. The CLI runtime, initialization and local provisioning share a process-identity server-root ownership gate, preventing concurrent runtimes and cross-instance local creation/cleanup races. Metadata-only owner commands do not take that gate. This is not a distributed object-store lease and does not wrap programmatic GC: normal live-vault GC is deliberately absent from HTTP and background jobs; operators must stop writers and hold exclusive access to metadata and objects. Integrity scans hash entire ciphertext frames with bounded memory; they do not decrypt vault contents.
+
+### Shared owner administration foundation
+
+`OwnerOperations` in server-core composes the existing transactional authentication and vault repositories for server-local and browser callers. Owner actors are explicitly `{ origin: 'server-local' | 'browser', actorId: string | null }`, separate from device authorization. Metadata migration 6 adds action provenance, complete encrypted-creation replay digests, and permanent vault-deletion identifiers with pending/complete cleanup state. Tombstones gate vault admission and transactional publication/upload commits; the runtime retries restart-safe physical cleanup immediately and every second. A per-vault queue on the shared storage instance drains in-flight writers before reclamation, and publication rechecks the tombstone transactionally. Failed cleanup stays pending with visible errors; other deleted vaults still progress. Tombstones remain permanently. Multiple serving runtimes on the same storage are unsupported. See [implementation-progress.md](implementation-progress.md) for evidence.
+
+### Browser owner adapter
+
+`BrowserAdministration` adapts `/admin/api` to the same `OwnerOperations` used
+by local administration. It owns only ephemeral session authentication,
+transport/origin/CSRF checks, input limits, password throttling and destructive
+confirmation. Browser sessions do not enter metadata password/device session
+tables. `createServerHandler` creates this adapter only with `webUi: true` and
+requires concrete authentication plus shared owner operations. `startServer`
+supplies the actual Bun socket peer for exact trusted-proxy matching; no
+forwarding-header parsing is involved. The React/Paper UI is compiled into an exact injectable
+asset map and embedded in the executable, served on the existing listener with
+restrictive CSP and nosniff. HTML/API are no-store and hashed assets immutable. Device vault provisioning mutations are
+removed, while list/recovery and ordinary sync keep their bearer boundary.
+
+
+### Creation and local state
+
+The public CLI separates named server connections (URL/alias/device credential)
+from directory bindings (vault/directory/independent replica journal). Pending
+enrollment is durable per canonical URL before submission; approved credentials
+are saved before clearing it. Registry and replica locks serialize attachment and
+removal without bypasses for force/yes. Dirty checks include unscanned content and
+executable metadata. Local removal never revokes remote credentials.
+
+Browser creation reuses portable crypto and reserved owner genesis, submits only
+encrypted material, and retains only an encrypted receipt across refresh. Web Locks
+prevent cross-tab receipt replacement. Server-local creation handles keys transiently
+and writes encrypted receipts before protected secret delivery; verified delivery
+precedes publication. No ordinary server state stores plaintext vault keys. This
+accepted operator-machine exception does not change object encryption formats.

@@ -85,26 +85,39 @@ export function nativeFetch(bridge: Bridge, baseUrl: string): (input: RequestInf
     // Do not construct a Request here: pre-Chromium-105 WebViews cannot accept
     // stream request bodies, and older Request implementations omit .body.
     const request = typeof input === "object" && "url" in input ? input as Request : undefined;
-    const url = new URL(request ? request.url : String(input));
-    if (url.origin !== base.origin || !url.pathname.startsWith("/v1/") || url.username || url.password || url.hash) throw new Error("HTTP outside scoped server");
-    const normalizedHeaders = new Headers(init?.headers ?? request?.headers);
-    const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
-    let bytes: Uint8Array;
-    if (init?.body != null) bytes = await rawBody(init.body, normalizedHeaders);
-    else if (request?.body) bytes = await boundedBody(request.body);
-    else if (request && method !== "GET" && method !== "HEAD") {
-      // Compatibility fallback for trusted, protocol-bounded external Requests.
-      // Reject a declared oversize before allocation, then check actual bytes too.
-      const length = normalizedHeaders.get("content-length");
-      if (length !== null && (!/^\\d+$/.test(length) || Number(length) > MAX_HTTP_BYTES)) throw new Error("HTTP body too large");
-      bytes = checkedBytes(new Uint8Array(await request.arrayBuffer()));
-    } else bytes = new Uint8Array();
-    if ((method === "GET" || method === "HEAD") && bytes.length) throw new Error("GET/HEAD request cannot contain a body");
-    const headers: Record<string, string> = {}; normalizedHeaders.forEach((v, k) => { headers[k] = v; });
-    const response = await bridge.call<{ status: number; headers: Record<string, string>; bodyBase64?: string }>("http", {
-      path: url.pathname + url.search, method, headers, ...(bytes.length ? { bodyBase64: toBase64(bytes) } : {}),
+    const signal = init?.signal ?? request?.signal;
+    const reason = () => signal?.reason ?? new Error("HTTP request aborted");
+    if (signal?.aborted) throw reason();
+    let onAbort: (() => void) | undefined;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      if (signal) { onAbort = () => reject(reason()); signal.addEventListener("abort", onAbort, { once: true }); }
     });
-    if (response.status >= 300 && response.status < 400) throw new Error("redirect refused");
-    return new Response([204, 205, 304].includes(response.status) ? null : new Uint8Array(fromBase64(response.bodyBase64 ?? "")).buffer, { status: response.status, headers: response.headers });
+    const operation = async () => {
+      const url = new URL(request ? request.url : String(input));
+      if (url.origin !== base.origin || !url.pathname.startsWith("/v1/") || url.username || url.password || url.hash) throw new Error("HTTP outside scoped server");
+      const normalizedHeaders = new Headers(init?.headers ?? request?.headers);
+      const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
+      let bytes: Uint8Array;
+      if (init?.body != null) bytes = await rawBody(init.body, normalizedHeaders);
+      else if (request?.body) bytes = await boundedBody(request.body);
+      else if (request && method !== "GET" && method !== "HEAD") {
+        // Compatibility fallback for trusted, protocol-bounded external Requests.
+        // Reject a declared oversize before allocation, then check actual bytes too.
+        const length = normalizedHeaders.get("content-length");
+        if (length !== null && (!/^\d+$/.test(length) || Number(length) > MAX_HTTP_BYTES)) throw new Error("HTTP body too large");
+        bytes = checkedBytes(new Uint8Array(await request.arrayBuffer()));
+      } else bytes = new Uint8Array();
+      if (signal?.aborted) throw reason();
+      if ((method === "GET" || method === "HEAD") && bytes.length) throw new Error("GET/HEAD request cannot contain a body");
+      const headers: Record<string, string> = {}; normalizedHeaders.forEach((v, k) => { headers[k] = v; });
+      const response = await bridge.call<{ status: number; headers: Record<string, string>; bodyBase64?: string }>("http", {
+        path: url.pathname + url.search, method, headers, ...(bytes.length ? { bodyBase64: toBase64(bytes) } : {}),
+      });
+      if (signal?.aborted) throw reason();
+      if (response.status >= 300 && response.status < 400) throw new Error("redirect refused");
+      return new Response([204, 205, 304].includes(response.status) ? null : new Uint8Array(fromBase64(response.bodyBase64 ?? "")).buffer, { status: response.status, headers: response.headers });
+    };
+    try { return await Promise.race([operation(), aborted]); }
+    finally { if (signal && onAbort) signal.removeEventListener("abort", onAbort); }
   };
 }

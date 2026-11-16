@@ -25,6 +25,8 @@ async function setup() {
   const database = new ServerMetadataDatabase(":memory:");
   database.writeTransaction(tx => tx.run("INSERT INTO server_state(singleton, vault_id, current_head_revision_id, current_sequence) VALUES (1, ?, NULL, 0)", [vaultId]));
   const filesystem = new LocalFilesystem(root);
+  // Constructor-started staging recovery must settle before any test can tear down the root.
+  await filesystem.list();
   const catalog = new ObjectCatalogRepository(database), revisions = new RevisionRepository(database);
   let revoked = false;
   const handle = createServerHandler({ filesystem, catalog, revisions, authorize: async request => {
@@ -52,8 +54,33 @@ async function setup() {
     tx.run("UPDATE server_state SET current_head_revision_id = ?, current_sequence = 1 WHERE singleton = 1", [genesisId]);
   });
   const manifest = (id = nextId) => ({ ...genesisManifest, revisionId: id, parents: [genesisId] });
-  return { remote, transport, handle, calls, manifest, genesis, filesystem, revoke: () => { revoked = true; } };
+  return { database, remote, transport, handle, calls, manifest, genesis, filesystem, revoke: () => { revoked = true; } };
 }
+
+test("request deadlines remain active while reading bodies and external cancellation reaches fetch", async () => {
+  for (const phase of ["fetch", "body"] as const) {
+    const external = new AbortController(), started = Promise.withResolvers<Request>();
+    {
+      const client = new HttpRemote({ baseUrl: "http://local", token, signal: external.signal, fetch: async (input, init) => {
+        const request = new Request(input, init);
+        if (phase === "fetch") {
+          started.resolve(request);
+          return new Promise<Response>((_resolve, reject) => request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true }));
+        }
+        return new Response(new ReadableStream({ start(controller) {
+          request.signal.addEventListener("abort", () => controller.error(request.signal.reason), { once: true });
+          started.resolve(request);
+        } }), { headers: { "content-type": "application/json" } });
+      } });
+      const pending = client.capabilities();
+      void pending.catch(() => {});
+      const request = await started.promise;
+      external.abort(new Error("cancelled request"));
+      await expect(pending).rejects.toThrow("cancelled request");
+      expect(request.signal.aborted).toBe(true);
+    }
+  }
+});
 
 test("negotiates, authenticates, publishes immutable frames, replays a lost acceptance and leaves stale head alone", async () => {
   const env = await setup(); const client = env.remote();
@@ -363,4 +390,19 @@ test("custom transports receive URL plus raw JSON and frame stream without Reque
   expect(bodies.some(body => typeof body === "string")).toBe(true);
   expect(bodies.some(body => body instanceof ReadableStream)).toBe(true);
   expect(await client.download(object.reference, master, vaultId)).toEqual(new Uint8Array([0, 255, 7]));
+});
+
+test("permanently deleted vault is terminal, not a retried outage", async () => {
+  const env = await setup();
+  const { VaultRepository } = await import('../../server-metadata/src/index.ts');
+  new VaultRepository(env.database).markDeleted(vaultId,{origin:'server-local',actorId:null},10);
+  try {
+    await env.remote().presence('chunk',['a'.repeat(64)]);
+    throw Error('expected deleted vault');
+  } catch (error) {
+    expect(error).toMatchObject({status:410,code:'VAULT_DELETED'});
+    expect((error as Error).message).toContain('Local files and keys are preserved');
+  }
+  expect(env.calls.filter(call => call === 'POST /v1/objects/presence')).toHaveLength(1);
+  env.database.close();
 });

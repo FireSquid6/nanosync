@@ -1,4 +1,4 @@
-import { constants, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import { constants, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 
@@ -10,13 +10,19 @@ export function privateDirectory(path: string): string {
     throw new Error("directory must be owned, real, and mode 0700");
   return absolute;
 }
-export function secureRead(path: string, limit = 4096): Buffer {
+/** When durable, flush the same protected descriptor read here and its private parent before returning. */
+export function secureRead(path: string, limit = 4096, durable = false): Buffer {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const st = fstatSync(fd);
     if (!st.isFile() || st.nlink !== 1 || st.uid !== process.getuid!() || st.mode & 0o177 || st.size > limit || st.size === 0)
       throw new Error("secret file must be owned, regular, mode 0600 and bounded");
-    return readFileSync(fd);
+    const value = readFileSync(fd);
+    if (durable) {
+      fsyncSync(fd);
+      syncPrivateDirectory(dirname(resolve(path)));
+    }
+    return value;
   } finally { closeSync(fd); }
 }
 export function secureCreate(path: string, value: string): void {
@@ -44,4 +50,12 @@ export function provisionSecret(path: string): string {
   const value = secureRead(path, 64).toString("utf8");
   if (!/^[0-9a-f]{64}$/.test(value)) throw new Error("secret file must contain 32 hex-encoded random bytes");
   return value;
+}
+
+/** Atomically update an already protected state file; fsync content and directory. */
+export function secureReplace(path: string, value: string): void {
+  secureRead(path, 1_000_000);
+  const stage = `${path}.${randomBytes(16).toString("hex")}.stage`;
+  secureCreate(stage, value);
+  renameSync(stage, path); syncPrivateDirectory(dirname(resolve(path)));
 }

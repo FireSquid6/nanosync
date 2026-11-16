@@ -1,3 +1,4 @@
+import { parseOwnerActor, parseDeviceId, enrollmentVerificationCode, type OwnerActor } from "@nanosync/protocol";
 import { timingSafeEqual } from "node:crypto";
 import type {
   DeviceId,
@@ -51,6 +52,7 @@ export class AuthRepositoryError extends Error {
       | "UNAUTHORIZED"
       | "FORBIDDEN"
       | "CONFLICT"
+      | "VAULT_DELETED"
       | "LIMIT"
       | "LOCKED"
       | "INVARIANT",
@@ -303,7 +305,7 @@ export class AuthenticationRepository {
         )?.count ?? 0;
       if (pending >= MAX_PENDING_ENROLLMENTS)
         throw new AuthRepositoryError("LIMIT", "Too many pending enrollments");
-      if (tx.get("SELECT 1 FROM devices WHERE display_name = ? COLLATE NOCASE AND state IN ('pending','active') AND device_id <> ?", [input.displayName, input.deviceId]))
+      if (tx.get("SELECT 1 FROM devices d WHERE d.device_id<>? AND ((d.state='active' AND d.display_name=? COLLATE NOCASE) OR EXISTS (SELECT 1 FROM enrollment_requests e WHERE e.device_id=d.device_id AND e.state='pending' AND e.expires_at_ms>? AND e.display_name=? COLLATE NOCASE))", [input.deviceId, input.displayName, nowMs, input.displayName]))
         throw new AuthRepositoryError("CONFLICT", "Device name is already registered");
       const current = tx.get<DeviceRow>(
         "SELECT * FROM devices WHERE device_id = ?",
@@ -470,9 +472,11 @@ export class AuthenticationRepository {
       .map(view);
   }
 
-  approve(actor: DeviceId | null, target: DeviceId, nowMs: number): EnrollmentStatus {
+  approve(actor: DeviceId | OwnerActor | null, target: DeviceId, nowMs: number): EnrollmentStatus {
     return this.database.writeTransaction((tx) => {
-      if (actor) requireActiveAdministrator(tx, actor);
+      parseDeviceId(target);
+      if (typeof actor === "string") requireActiveAdministrator(tx, actor);
+      else if (actor) parseOwnerActor(actor);
       const request = tx.get<any>(
         "SELECT * FROM enrollment_requests WHERE device_id=?",
         [target],
@@ -505,9 +509,11 @@ export class AuthenticationRepository {
     });
   }
 
-  revoke(actor: DeviceId | null, target: DeviceId, nowMs: number): void {
+  revoke(actor: DeviceId | OwnerActor | null, target: DeviceId, nowMs: number): void {
     this.database.writeTransaction((tx) => {
-      if (actor) requireActiveAdministrator(tx, actor);
+      parseDeviceId(target);
+      if (typeof actor === "string") requireActiveAdministrator(tx, actor);
+      else if (actor) parseOwnerActor(actor);
       if (actor === target)
         throw new AuthRepositoryError(
           "FORBIDDEN",
@@ -519,7 +525,7 @@ export class AuthenticationRepository {
       );
       if (!device || device.state !== "active")
         throw new AuthRepositoryError("CONFLICT", "Device is not active");
-      if (device.role === "administrator") {
+      if (device.role === "administrator" && (typeof actor === "string" || actor === null)) {
         const admins =
           tx.get<{ count: number }>(
             "SELECT count(*) AS count FROM devices WHERE state='active' AND role='administrator'",
@@ -539,7 +545,25 @@ export class AuthenticationRepository {
     });
   }
 
+  deny(actor: OwnerActor, target: DeviceId, nowMs: number): void {
+    parseOwnerActor(actor); parseDeviceId(target);
+    this.database.writeTransaction(tx => {
+      const request = tx.get<{ state: string; expires_at_ms: number }>("SELECT state,expires_at_ms FROM enrollment_requests WHERE device_id=?", [target]);
+      if (request?.state === 'denied') return;
+      if (!request || request.state !== 'pending' || request.expires_at_ms <= nowMs) throw new AuthRepositoryError('CONFLICT', 'Enrollment is unavailable');
+      tx.run("UPDATE enrollment_requests SET state='denied',decided_at_ms=? WHERE device_id=?", [nowMs,target]);
+      audit(tx, 'enrollment.denied', nowMs, actor, target);
+    });
+  }
+
+  pendingRequests(nowMs: number): (DeviceView & { verificationCode: string; requestedAtMs: number; expiresAtMs: number })[] {
+    return this.database.all<DeviceRow & { request_fingerprint: Uint8Array; requested_at_ms: number; expires_at_ms: number }>(
+      "SELECT d.*,e.display_name,e.platform,e.client_version,e.fingerprint AS request_fingerprint,e.created_at_ms AS requested_at_ms,e.expires_at_ms FROM devices d JOIN enrollment_requests e ON e.device_id=d.device_id WHERE e.state='pending' AND e.expires_at_ms>? ORDER BY e.created_at_ms,d.device_id", [nowMs]
+    ).map(row => ({ ...view(row), verificationCode: enrollmentVerificationCode(row.device_id, Buffer.from(row.request_fingerprint).toString('base64url')), requestedAtMs: row.requested_at_ms, expiresAtMs: row.expires_at_ms }));
+  }
+
   recoveryWrap(vaultId?: VaultId): RecoveryWrapV1 {
+    if (vaultId && this.database.get("SELECT 1 FROM vault_deletions WHERE vault_id=?", [vaultId])) throw new AuthRepositoryError("VAULT_DELETED", "Vault is permanently deleted");
     const row = this.database.get<{
       wrap_version: number;
       algorithm: string;
@@ -583,12 +607,12 @@ function audit(
   tx: MetadataTransaction,
   type: string,
   now: number,
-  actor: DeviceId | null,
+  actor: DeviceId | OwnerActor | null,
   subject: DeviceId | null,
 ): void {
   tx.run(
-    "INSERT INTO audit_events(event_type, actor_device_id, subject_device_id, occurred_at_ms, details_json) VALUES (?, ?, ?, ?, '{}')",
-    [type, actor, subject, now],
+    "INSERT INTO audit_events(event_type, actor_device_id, subject_device_id, occurred_at_ms, details_json, origin, actor_id, target_id) VALUES (?, ?, ?, ?, '{}', ?, ?, ?)",
+    [type, typeof actor === "string" ? actor : null, subject, now, typeof actor === "object" && actor ? actor.origin : actor ? "device" : "server-local", typeof actor === "object" && actor ? actor.actorId : actor, subject],
   );
 }
 function blob(value: unknown): Uint8Array {

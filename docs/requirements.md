@@ -80,7 +80,7 @@ Provide CLI commands for owner-password initialization/runtime, server-wide enro
 ## Security requirements
 
 - File contents and manifests are encrypted by clients.
-- The server does not possess the vault master key.
+- The running synchronization server does not possess the vault master key. Offline server-local provisioning may handle keys transiently, without persisting plaintext keys, as described in the security and owner-operation contracts.
 - The account password authenticates the user but is not the sole source of the vault encryption key.
 - Each approved device receives a unique server credential.
 - A new device requires password authentication, administrator approval, and the recovery key before it can decrypt the vault.

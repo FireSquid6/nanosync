@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { OBJECT_FRAME_HEADER_BYTES, parseObjectFrameHeader } from "@nanosync/protocol";
 import { GC_GRACE_MS, MaintenanceRepository, type ObjectCatalogRow } from "@nanosync/server-metadata";
 import { ObjectStorageError, type Filesystem } from "@nanosync/server-object-storage";
+import { withVaultStorage } from "./vault-storage.ts";
 import { objectKey } from "./object-service.ts";
 
 export interface OfflineOperatorControl {
@@ -15,6 +16,33 @@ function assertTime(now: number): void {
 
 export class ServerMaintenance {
   constructor(private readonly metadata: MaintenanceRepository, private readonly storage: Filesystem) {}
+
+  /** Explicit deletion overrides retention; attempt every vault, then report failures for retry. */
+  async cleanupDeleted(): Promise<void> {
+    const failures: Error[] = [];
+    for (const deletion of this.metadata.deletedVaults()) {
+      if (deletion.cleanupState === "complete") continue;
+      try {
+        await withVaultStorage(this.storage, deletion.vaultId, async () => {
+          const prefixes = this.metadata.legacyVault(deletion.vaultId)
+            ? ["objects/v1/chunk/", "objects/v1/manifest/", "objects/v1/revision-private/"]
+            : [`objects/v1/${deletion.vaultId}/`];
+          for (const prefix of prefixes) {
+            let cursor: string | undefined;
+            do {
+              const page = await this.storage.list(prefix.slice(0, -1), { cursor, limit: 100 });
+              for (const key of page.keys) { if (key.startsWith(prefix)) await this.storage.delete(key); }
+              cursor = page.cursor ?? undefined;
+            } while (cursor);
+          }
+          this.metadata.finishDeletion(deletion.vaultId);
+        });
+      } catch (cause) {
+        failures.push(new Error(`Vault ${deletion.vaultId}: ${cause instanceof Error ? cause.message : String(cause)}`, { cause }));
+      }
+    }
+    if (failures.length) throw new AggregateError(failures, failures.map(error => error.message).join("; "));
+  }
 
   /** Full ciphertext frame SHA-256; never buffers the entire object. */
   async scan(nowMs: number, signal?: AbortSignal): Promise<ScanCounts> {

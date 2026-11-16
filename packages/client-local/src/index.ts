@@ -34,7 +34,8 @@ const schema3 = `CREATE TABLE file_identity(entry_id TEXT PRIMARY KEY, device TE
 const schema4 = `CREATE TABLE hydration(id TEXT PRIMARY KEY, entry_id TEXT NOT NULL REFERENCES entries(id), revision TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence>0), direction TEXT NOT NULL CHECK(direction IN ('evict','download')), root_device TEXT NOT NULL, root_inode TEXT NOT NULL, file_device TEXT, file_inode TEXT, CHECK((direction='evict' AND file_device IS NOT NULL AND file_inode IS NOT NULL) OR (direction='download' AND file_device IS NULL AND file_inode IS NULL))) STRICT;`;
 const schema5 = `CREATE TABLE restores(singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision TEXT NOT NULL, base_revision TEXT NOT NULL) STRICT;`;
 const schema6 = `CREATE TABLE ignored_entries(entry_id TEXT PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE) STRICT;`;
-const migrations = [schema1, schema2, schema3, schema4, schema5, schema6];
+const schema7 = `ALTER TABLE entries ADD COLUMN executable INTEGER CHECK(executable IN (0,1));`;
+const migrations = [schema1, schema2, schema3, schema4, schema5, schema6, schema7];
 const schemaDigest = (db: Database) => hash(db.query<{ sql: string }, []>("SELECT sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY type,name").all().map(r => r.sql).join("\n"));
 let expectedSchema: string | undefined;
 function expectedDigest(): string {
@@ -69,7 +70,8 @@ function all<T>(db: Database, sql: string, ...params: (string | number)[]): T[] 
 function run(db: Database, sql: string, ...params: (string | number | Uint8Array | null)[]) { db.query(sql).run(...params); }
 
 export type { Head, HydrationIntent } from "@nanosync/sync-core";
-export interface Entry { id: string; path: string; kind: "file" | "directory" | "tombstone"; fingerprint: string | null; hydration: "downloaded" | "evicted"; revision: string | null }
+/** executable records applied manifest metadata (0/1); absent/null means unknown, not clean. */
+export interface Entry { executable?: 0 | 1 | null; id: string; path: string; kind: "file" | "directory" | "tombstone"; fingerprint: string | null; hydration: "downloaded" | "evicted"; revision: string | null }
 export interface Work { id: string; state: "pending" | "running" | "done" | "blocked" }
 export class ClientLocal implements ChunkJournal {
   private readonly db: Database;
@@ -179,9 +181,9 @@ export class ClientLocal implements ChunkJournal {
     if (entry.revision) uuid(entry.revision);
     if (entry.fingerprint !== null) hex(entry.fingerprint);
     if (!["file","directory","tombstone"].includes(entry.kind) || !["downloaded","evicted"].includes(entry.hydration)) throw new Error("invalid entry");
-    this.write(() => run(this.db, `INSERT INTO entries VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,kind=excluded.kind,fingerprint=excluded.fingerprint,hydration=excluded.hydration,revision=excluded.revision`, entry.id, entry.path, entry.kind, entry.fingerprint, entry.hydration, entry.revision));
+    this.write(() => run(this.db, `INSERT INTO entries VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,kind=excluded.kind,fingerprint=excluded.fingerprint,hydration=excluded.hydration,revision=excluded.revision,executable=excluded.executable`, entry.id, entry.path, entry.kind, entry.fingerprint, entry.hydration, entry.revision, entry.executable ?? null));
   }
-  entry(id: string): Entry | null { uuid(id); return row<Entry>(this.db, "SELECT id,path,kind,fingerprint,hydration,revision FROM entries WHERE id=?", id); }
+  entry(id: string): Entry | null { uuid(id); return row<Entry>(this.db, "SELECT id,path,kind,fingerprint,hydration,revision,executable FROM entries WHERE id=?", id); }
   entries(): Entry[] { return all<Entry>(this.db, "SELECT * FROM entries ORDER BY path"); }
   identities(): { entryId: string; device: string; inode: string }[] {
     return all<{ entryId: string; device: string; inode: string }>(this.db, "SELECT entry_id entryId,device,inode FROM file_identity");
@@ -244,7 +246,7 @@ export class ClientLocal implements ChunkJournal {
       run(this.db, "DELETE FROM hydration WHERE id=?", intent.id);
     });
   }
-  /** Call only after a plan has been accepted/applied. Replaces identities atomically. */
+  /** Replace identities atomically after acceptance, or under a durable reconciliation intent. */
   recordScan(entries: Entry[], identities: { entryId: string; device: string; inode: string }[]) {
     for (const entry of entries) { uuid(entry.id); this.path(entry.path); if (entry.fingerprint !== null) hex(entry.fingerprint); if (entry.revision) uuid(entry.revision); }
     for (const identity of identities) { uuid(identity.entryId); if (!/^\d+$/.test(identity.device) || !/^\d+$/.test(identity.inode)) throw new Error("invalid filesystem identity"); }
@@ -259,7 +261,7 @@ export class ClientLocal implements ChunkJournal {
         if (referenced) run(this.db, "UPDATE entries SET path=?,kind='tombstone',fingerprint=NULL,hydration='downloaded' WHERE id=?", `.retired-${old.id}`, old.id);
         else run(this.db, "DELETE FROM entries WHERE id=?", old.id);
       }
-      for (const entry of entries) run(this.db, `INSERT INTO entries VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,kind=excluded.kind,fingerprint=excluded.fingerprint,hydration=excluded.hydration,revision=excluded.revision`, entry.id, entry.path, entry.kind, entry.fingerprint, entry.hydration, entry.revision);
+      for (const entry of entries) run(this.db, `INSERT INTO entries VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,kind=excluded.kind,fingerprint=excluded.fingerprint,hydration=excluded.hydration,revision=excluded.revision,executable=excluded.executable`, entry.id, entry.path, entry.kind, entry.fingerprint, entry.hydration, entry.revision, entry.executable ?? null);
       for (const item of identities) run(this.db, "INSERT INTO file_identity VALUES(?,?,?)", item.entryId, item.device, item.inode);
     });
   }
@@ -298,6 +300,17 @@ export class ClientLocal implements ChunkJournal {
       throw new Error("apply requires accepted head");
     this.work("operations", id, ["apply", null, "pending", JSON.stringify({ revision, sequence, ...(plan === undefined ? {} : { plan }) })]);
   }
+  updateApplyPlan(id: string, plan: string): void {
+    uuid(id);
+    if (typeof plan !== "string" || !plan.length || Buffer.byteLength(plan) > 8_000_000) throw new Error("invalid apply plan");
+    this.write(() => {
+      const intent = row<{ detail: string }>(this.db, "SELECT detail FROM operations WHERE id=? AND kind='apply' AND state IN ('pending','running')", id);
+      if (!intent) throw new Error("missing pending apply intent");
+      const detail = JSON.parse(intent.detail) as { revision: string; sequence: number };
+      uuid(detail.revision); integer(detail.sequence);
+      run(this.db, "UPDATE operations SET detail=? WHERE id=?", JSON.stringify({ ...detail, plan }), id);
+    });
+  }
   applyPlan(id: string): string | null {
     uuid(id);
     const r = row<{ detail: string }>(this.db, "SELECT detail FROM operations WHERE id=? AND kind='apply'", id);
@@ -334,7 +347,7 @@ export class ClientLocal implements ChunkJournal {
           run(this.db, "UPDATE entries SET path=?,kind='tombstone',fingerprint=NULL,hydration='downloaded' WHERE id=?", `.retired-${old.id}`, old.id);
         else run(this.db, "DELETE FROM entries WHERE id=?", old.id);
       }
-      for (const e of entries) run(this.db, "INSERT INTO entries VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,kind=excluded.kind,fingerprint=excluded.fingerprint,hydration=excluded.hydration,revision=excluded.revision", e.id, e.path, e.kind, e.fingerprint, e.hydration, e.revision);
+      for (const e of entries) run(this.db, "INSERT INTO entries VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,kind=excluded.kind,fingerprint=excluded.fingerprint,hydration=excluded.hydration,revision=excluded.revision,executable=excluded.executable", e.id, e.path, e.kind, e.fingerprint, e.hydration, e.revision, e.executable ?? null);
       for (const item of identities) run(this.db, "INSERT INTO file_identity VALUES(?,?,?)", item.entryId, item.device, item.inode);
       for (const e of entries) if (e.kind === "file" && e.hydration === "downloaded")
         run(this.db, "INSERT INTO suppression VALUES(?,?,?) ON CONFLICT(path) DO UPDATE SET fingerprint=excluded.fingerprint,operation_id=excluded.operation_id", e.path, e.fingerprint, id);
@@ -462,6 +475,38 @@ export class ClientLocal implements ChunkJournal {
     });
   }
   clearProposal() { this.write(() => { const p = this.proposal(); if (p && p.state !== "accepted") throw new Error("unresolved proposal cannot be discarded"); run(this.db, "DELETE FROM proposals"); }); }
+  reconciliation(): { baseRevision: string; localRevision: string } | null {
+    const intents = all<{ detail: string }>(this.db, "SELECT detail FROM operations WHERE kind='merge' AND state<>'done'");
+    if (intents.length > 1) throw new Error("multiple reconciliation intents");
+    if (!intents.length) return null;
+    const value = JSON.parse(intents[0]!.detail) as { baseRevision: string; localRevision: string };
+    uuid(value.baseRevision); uuid(value.localRevision);
+    return { baseRevision: value.baseRevision, localRevision: value.localRevision };
+  }
+  /** Preserve the on-disk branch before discarding any stale proposal or changing the inventory. */
+  beginReconciliation(baseRevision: string, localRevision: string) {
+    uuid(baseRevision); uuid(localRevision);
+    this.write(() => {
+      const current = this.reconciliation();
+      if (current) {
+        if (current.baseRevision !== baseRevision || current.localRevision !== localRevision) throw new Error("reconciliation already pending");
+        return;
+      }
+      const proposal = this.proposal();
+      if (this.head("applied").revisionId !== baseRevision || proposal?.state !== "prepared" ||
+          proposal.request.proposedRevision.revisionId !== localRevision) throw new Error("reconciliation branch changed");
+      run(this.db, "INSERT INTO operations VALUES(?,'merge',NULL,'running',?)", localRevision, JSON.stringify({ baseRevision, localRevision }));
+    });
+  }
+  finishReconciliation() {
+    this.write(() => {
+      const intent = this.reconciliation(), proposal = this.proposal();
+      if (!intent || proposal?.state !== "accepted" || this.head("applied").revisionId !== proposal.request.proposedRevision.revisionId)
+        throw new Error("reconciliation not applied");
+      run(this.db, "UPDATE operations SET state='done',detail='{}' WHERE id=? AND kind='merge'", intent.localRevision);
+      run(this.db, "DELETE FROM proposals");
+    });
+  }
   /** Only a definitive stale-head response permits replacing a prepared request. */
   discardStaleProposal(revisionId: string) {
     uuid(revisionId);

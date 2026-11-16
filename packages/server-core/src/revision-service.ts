@@ -58,8 +58,14 @@ export class RevisionService {
     if (!this.repositoryCall(() => this.options.revisions.parentIdsExist(context.vaultId, parents))) return json(invalid("PARENT_NOT_FOUND"));
     const missing = new Set<ObjectId>(this.repositoryCall(() => this.options.revisions.missingCatalogReferences(context.vaultId, request.proposedRevision)));
     const candidates = request.proposedRevision.references.filter((reference) => !missing.has(reference.objectId));
-    for (const id of await verifyReferenceStorage(this.options.filesystem, candidates,
-      this.options.revisions.legacyVault(context.vaultId) ? undefined : context.vaultId)) missing.add(id);
+    try {
+      for (const id of await verifyReferenceStorage(this.options.filesystem, candidates,
+        this.options.revisions.legacyVault(context.vaultId) ? undefined : context.vaultId)) missing.add(id);
+    } catch (error) {
+      this.repositoryCall(() => this.options.revisions.requireVault(context.vaultId));
+      throw error;
+    }
+    this.repositoryCall(() => this.options.revisions.requireVault(context.vaultId));
     if (missing.size) return json({ status: "missingObjects", objectIds: [...missing].sort() } satisfies AdvanceHeadResult);
 
     const result = this.repositoryCall(() => this.options.revisions.advance({
@@ -78,6 +84,7 @@ export class RevisionService {
     try { return callback(); }
     catch (error) {
       if (error instanceof RevisionRepositoryError) {
+        if (error.code === "VAULT_DELETED") throw new ApiError(410, "VAULT_DELETED", "Vault is permanently deleted");
         if (error.code === "IDEMPOTENCY_KEY_REUSE") throw new ApiError(409, "IDEMPOTENCY_KEY_REUSE", "Idempotency key was used for another request");
         if (error.code === "VAULT_CONFLICT") throw new ApiError(403, "FORBIDDEN", "Authenticated vault is not available");
         if (error.code === "SERVER_UNINITIALIZED") throw new ApiError(503, "UNAVAILABLE", "Server vault is not initialized");

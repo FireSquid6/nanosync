@@ -1,5 +1,6 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { hashRaw, type Options as Argon2Options } from "@node-rs/argon2";
+import { ApiError } from "./http.ts";
 import type { PasswordVerifierRecord } from "@nanosync/server-metadata";
 
 // @node-rs/argon2 declares these as ambient const enums, which cannot be imported
@@ -36,7 +37,11 @@ function validateRecord(value: PasswordVerifierRecord): void {
   if (value.algorithm !== "argon2id" || value.version !== 19 || !Number.isSafeInteger(value.memoryKiB) || value.memoryKiB < 1 || value.memoryKiB > 1_048_576 || !Number.isSafeInteger(value.iterations) || value.iterations < 1 || value.iterations > 10 || !Number.isSafeInteger(value.parallelism) || value.parallelism < 1 || value.parallelism > 8 || !(value.salt instanceof Uint8Array) || value.salt.length < 16 || value.salt.length > 64 || !(value.hash instanceof Uint8Array) || value.hash.length < 32 || value.hash.length > 64) throw new TypeError("Password verifier is invalid");
 }
 class Semaphore {
-  private active = 0; private readonly waiting: Array<() => void> = [];
+  private active = 0;
   constructor(private readonly maximum: number) {}
-  async run<T>(work: () => Promise<T>): Promise<T> { if (this.active >= this.maximum) await new Promise<void>((resolve) => this.waiting.push(resolve)); this.active++; try { return await work(); } finally { this.active--; this.waiting.shift()?.(); } }
+  async run<T>(work: () => Promise<T>): Promise<T> {
+    if (this.active >= this.maximum) throw new ApiError(429, "RATE_LIMITED", "Password hashing is temporarily unavailable", { "retry-after": "1" }, 1);
+    this.active++;
+    try { return await work(); } finally { this.active--; }
+  }
 }

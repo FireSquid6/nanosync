@@ -1,5 +1,5 @@
 import { missingRuntimeFeatures, nativeConveniences, randomUUID } from "./compatibility.ts";
-import { decodeRecoverySecret, unwrapMasterKey, HttpRemote, SyncEngine } from "../../../packages/sync-core/src/index.ts";
+import { decodeRecoverySecret, unwrapMasterKey, HttpRemote, RemoteError, SyncEngine } from "../../../packages/sync-core/src/index.ts";
 import { Bridge, nativeFetch, type NativeHost } from "./bridge.ts";
 import { Journal } from "./journal.ts";
 import { Scanner } from "./scanner.ts";
@@ -33,7 +33,13 @@ export function install(host: NativeHost, target: { Nanosync?: unknown; Nanosync
         const recoveryText = context.vault.recoveryKey; delete context.vault.recoveryKey;
         secret = await decodeRecoverySecret(recoveryText);
         const response = await transport(new Request(`${context.server.baseUrl.replace(/\/$/, "")}/v1/recovery-wrap`, { headers: { authorization: `Bearer ${context.server.token}`, "x-nanosync-vault-id": context.vault.vaultId } }));
-        if (response.status !== 200) throw new Error("cannot fetch recovery wrap");
+        if (response.status !== 200) {
+          if (response.status === 410) {
+            const error = await response.json() as { code?: string };
+            if (error.code === "VAULT_DELETED") throw new RemoteError(410, "VAULT_DELETED", "Vault deleted on server");
+          }
+          throw new Error("cannot fetch recovery wrap");
+        }
         const body = await response.json() as { recoveryWrap: unknown };
         key = await unwrapMasterKey(body.recoveryWrap, secret, context.vault.vaultId);
         host.finish(JSON.stringify({ masterKeyHex: hex(key) })); return;
@@ -54,7 +60,10 @@ export function install(host: NativeHost, target: { Nanosync?: unknown; Nanosync
       });
       const result = await engine.syncOnce();
       host.finish(JSON.stringify({ ...result, conflicts: journal.state.conflicts, exclusionsActive: scanner.exclusionsActive, pendingUploads: 0, pendingDownloads: 0 }));
-    } catch (error) { host.fail(error instanceof Error ? error.message : String(error)); }
+    } catch (error) {
+      if (error instanceof RemoteError && error.status === 410 && error.code === "VAULT_DELETED") host.finish(JSON.stringify({ terminal: "vault-deleted" }));
+      else host.fail(error instanceof Error ? error.message : String(error));
+    }
     finally { key?.fill(0); secret?.fill(0); delete context.vault.recoveryKey; delete context.vault.masterKeyHex; running = false; }
   };
   target.Nanosync = { run }; return { run, bridge };

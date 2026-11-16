@@ -26,6 +26,7 @@ stdenv.mkDerivation {
   installPhase = ''
     runHook preInstall
     install -Dm755 dist/nanosync "$out/libexec/nanosync"
+    install -Dm644 packages/admin-ui/PAPER-UI-NOTICE.md "$out/share/doc/nanosync/PAPER-UI-NOTICE.md"
     mkdir -p "$out/bin"
     # Bun's compiled ELF has no glibc RUNPATH and may request /lib64's loader.
     # Rewriting it with patchelf corrupts its appended payload, so use the

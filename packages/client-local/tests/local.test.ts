@@ -17,6 +17,24 @@ const dirs: string[] = [];
 function directory() { const dir = mkdtempSync(join(tmpdir(), "nanosync-client-")); chmodSync(dir, 0o700); dirs.push(dir); return dir; }
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
+test("apply checkpoints preserve identity and state even after acceptance advances", () => {
+  const dir = directory(); let local = new ClientLocal(dir, vault, device);
+  local.recordHead("accepted", { revisionId: rev, sequence: 1 });
+  local.prepareApply(other, rev, 1, '{"phase":"staging"}');
+  expect(() => local.updateApplyPlan(other, "")).toThrow(/invalid/);
+  expect(() => local.updateApplyPlan(other, "x".repeat(8_000_001))).toThrow(/invalid/);
+  expect(() => local.updateApplyPlan(rev, "{}")).toThrow(/missing/);
+  local.recordHead("accepted", { revisionId: other, sequence: 2 });
+  local.updateApplyPlan(other, '{"phase":"ready"}');
+  local.transition("operations", other, "running"); local.close();
+  local = new ClientLocal(dir, vault, device);
+  expect(local.applyPlan(other)).toBe('{"phase":"ready"}');
+  expect(local.pendingApplies()).toEqual([{ id: other, revision: rev, sequence: 1, state: "running" }]);
+  local.finishApply(other, { revisionId: rev, sequence: 1 }, [], []);
+  expect(() => local.updateApplyPlan(other, "{}")).toThrow(/missing/);
+  local.close();
+});
+
 test("apply intent survives restart and commits applied head, entries and suppression atomically", () => {
   const dir = directory(); let db = new ClientLocal(dir, vault, device);
   db.recordHead("accepted", { revisionId: rev, sequence: 1 });
@@ -48,7 +66,7 @@ test("older durable apply intent can finish after accepted head advances without
 
 test("reopens durable identity, heads, entries, work and watcher suppression without rolling back", () => {
   const dir = directory(); let db = new ClientLocal(dir, vault, device);
-  expect(db.pragmas()).toEqual({ synchronous: 2, version: 6 });
+  expect(db.pragmas()).toEqual({ synchronous: 2, version: 7 });
   const entry = { id: other, path: "notes/plan.md", kind: "file" as const, fingerprint: "a".repeat(64), hydration: "evicted" as const, revision: rev };
   db.upsertEntry(entry);
   db.enqueueOperation(rev, "evict", entry.id);
@@ -60,7 +78,7 @@ test("reopens durable identity, heads, entries, work and watcher suppression wit
   db.recordHead("applied", { revisionId: rev, sequence: 1 });
   db.transition("operations", rev, "running"); db.close();
   db = new ClientLocal(dir, vault, device);
-  expect(db.entry(other)).toEqual(entry);
+  expect(db.entry(other)).toEqual({ ...entry, executable: null });
   expect(db.head("applied")).toEqual({ revisionId: rev, sequence: 1 });
   expect(db.listWork("operations")[0]?.state).toBe("running");
   db.enqueueOperation(rev, "evict", other);
@@ -139,9 +157,9 @@ test("fails closed on unsafe modes, symlinks, altered migration and future schem
 test("migrates an interrupted pre-v2 installation and rejects modified schema", () => {
   const dir = directory(); let db = new ClientLocal(dir, vault, device); db.close();
   const filename = join(dir, "local.sqlite"); let sql = new Database(filename);
-  sql.exec("DROP TABLE ignored_entries; DROP TABLE restores; DROP TABLE hydration; DROP TABLE file_identity; DROP TABLE suppression; DELETE FROM migrations WHERE version>=2; PRAGMA user_version=1"); sql.close();
+  sql.exec("ALTER TABLE entries DROP COLUMN executable; DROP TABLE ignored_entries; DROP TABLE restores; DROP TABLE hydration; DROP TABLE file_identity; DROP TABLE suppression; DELETE FROM migrations WHERE version>=2; PRAGMA user_version=1"); sql.close();
   db = new ClientLocal(dir, vault, device);
-  expect(db.pragmas().version).toBe(6);
+  expect(db.pragmas().version).toBe(7);
   db.enqueueOperation(rev, "scan");
   db.suppress("hello", "a".repeat(64), rev);
   db.close();

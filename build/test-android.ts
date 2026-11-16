@@ -3,11 +3,10 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
-import { runServer } from "../packages/cli/src/server.ts";
-import { api, bootstrapWorkflow, credentials, joinVault } from "../packages/cli/src/client.ts";
-import { main } from "../packages/cli/src/main.ts";
+import { initializeServerOwner, approveLocalDevice, localOwner, withLocalOwner, runServer } from "../packages/cli/src/server.ts";
+import { provisionLocalVault } from "../packages/cli/src/local-provision.ts";
 import { SyncRunner } from "../packages/cli/src/sync-runner.ts";
-import { createVault, key as vaultKey } from "../packages/cli/src/vault-client.ts";
+import { enrollServer, pendingEnrollments, servers, unlockVault, key as vaultKey } from "../packages/cli/src/vault-client.ts";
 
 // Explicit device selection prevents accidentally installing a test APK on a different phone.
 const serial = process.env.ANDROID_SERIAL;
@@ -46,25 +45,23 @@ if (!address || typeof address === "string") throw new Error("Could not allocate
 const port = address.port;
 await new Promise<void>((resolve, reject) => listener.close(error => error ? reject(error) : resolve()));
 writeFileSync(join(serverDirectory, "pepper.hex"), randomBytes(32).toString("hex"), { mode: 0o600 });
+const password = randomBytes(24).toString("base64url");
+await initializeServerOwner(serverDirectory, password);
+let recovery = "";
+const created = await provisionLocalVault(serverDirectory, "Android fixture", async secret => { recovery = secret; });
 const server = await runServer({ directory: serverDirectory, port, scanIntervalMs: 3_600_000 });
 const deviceRoot = `/sdcard/Download/nanosync-test-${randomUUID()}`;
 const coordinatorRoot = `/sdcard/Download/nanosync-coordinator-test-${randomUUID()}`;
 let reversed = false;
 try {
-  let recovery = "";
-  const password = randomBytes(24).toString("base64url");
-  await bootstrapWorkflow(owner, server.url, join(serverDirectory, "bootstrap.hex"), password, async value => { recovery = value; });
-  const deviceId = randomUUID();
-  if ((await joinVault(mobile, server.url, deviceId, password)).status !== "pending") throw new Error("Test enrollment was not pending");
-  if (await main(["approve", deviceId, "--client-dir", owner])) throw new Error("Could not approve disposable test device");
-  if ((await joinVault(mobile, server.url, deviceId, undefined, recovery)).status !== "approved") throw new Error("Test enrollment failed");
-  const first = credentials(owner), second = credentials(mobile);
-  // Bootstrap's legacy singleton is not an entry in the multi-vault listing.
-  // Exercise a real registered vault, as the native Connect vault flow does.
-  const registration = { version: 1 as const, serverId: randomUUID(), baseUrl: server.url,
-    deviceId: first.deviceId, name: "Android fixture owner", token: first.token };
-  const created = await createVault(owner, registration, "Android fixture", async secret => { recovery = secret; });
-  const masterKey = vaultKey(owner, registration.serverId, created.vaultId);
+  for (const [directory, name] of [[owner, "desktop"], [mobile, "android"]] as const) {
+    if ((await enrollServer(directory, server.url, password, name, 0)).status !== "pending") throw new Error("Test enrollment was not pending");
+    approveLocalDevice(serverDirectory, pendingEnrollments(directory)[0]!.deviceId);
+    if ((await enrollServer(directory, server.url, undefined, name, 0)).status !== "approved") throw new Error("Test enrollment failed");
+  }
+  const first = servers(owner)[0]!, second = servers(mobile)[0]!;
+  await unlockVault(owner, first, created.vaultId, recovery);
+  const masterKey = vaultKey(owner, first.serverId, created.vaultId);
   if (!masterKey) throw new Error("Could not recover disposable fixture vault key");
   const options = { clientDirectory: owner, syncDirectory: files, vaultId: created.vaultId, deviceId: first.deviceId,
     masterKey, baseUrl: server.url, token: first.token,
@@ -86,12 +83,9 @@ try {
   const approval = (async () => {
     const deadline = Date.now() + 180_000;
     while (approving && Date.now() < deadline) {
-      const pending = await api(server.url, "/v1/admin/enrollments", {}, first.token);
-      for (const enrollment of pending.enrollments) {
-        if (enrollment.displayName === deviceName) {
-          await api(server.url, `/v1/admin/enrollments/${enrollment.deviceId}/approve`,
-            { method: "POST", body: JSON.stringify({ protocolVersion: 1 }) }, first.token);
-        }
+      const pending = await withLocalOwner(serverDirectory, owner => owner.pending(localOwner));
+      for (const enrollment of pending) {
+        if (enrollment.displayName === deviceName) approveLocalDevice(serverDirectory, enrollment.deviceId);
       }
       await Bun.sleep(100);
     }

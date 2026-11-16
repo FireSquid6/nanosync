@@ -73,7 +73,7 @@ test("nested download and verified replacement retain identity; old plaintext su
     async *downloadChunks() { yield Buffer.from(tampered ? "bad" : "new"); } } as unknown as HttpRemote;
   await expect(applyNewFiles(root, local, remote, next, 2, new Uint8Array(32))).rejects.toThrow(/digest/);
   expect(readFileSync(join(root, "folder/note"), "utf8")).toBe("old");
-  expect(local.pendingApplies()).toEqual([]);
+  expect(local.pendingApplies()).toHaveLength(1);
   tampered = false;
   await applyNewFiles(root, local, remote, next, 2, new Uint8Array(32));
   expect(readFileSync(join(root, "folder/note"), "utf8")).toBe("new");
@@ -352,4 +352,82 @@ test("replays nested descendants staged beneath a moved ancestor but rejects unk
   expect(statSync(join(root, "renamed/inner/note")).ino).toBe(file.ino);
   expect(reopened.pendingApplies()).toEqual([]);
   reopened.close();
+});
+
+test("process death during plaintext staging leaves a durable barrier and resumes partial downloads", async () => {
+  const { root, local, manifest } = setup();
+  const first = Buffer.alloc(4 * 1024 * 1024, "a"), complete = Buffer.concat([first, Buffer.from("def")]);
+  const references = ["a", "b"].map((c, i) => ({ objectId: c.repeat(64), objectType: "chunk",
+    ciphertextChecksum: "c".repeat(64), ciphertextLength: (i === 0 ? first.length : 3) + 96, objectFormatVersion: 1 }));
+  const next = parseManifest({ ...manifest, entries: [manifest.entries[0], {
+    id: fileId, parentId: rootId, name: "note", kind: "file", size: complete.length,
+    sha256: createHash("sha256").update(complete).digest("hex"), executable: false,
+    chunks: references.map((r, i) => ({ objectId: r.objectId, length: i === 0 ? first.length : 3 })),
+  }] });
+  local.close();
+  const child = Bun.spawn([process.execPath, "--eval", `
+    import { ClientLocal } from ${JSON.stringify(import.meta.resolve("@nanosync/client-local"))};
+    import { applyNewFiles } from ${JSON.stringify(import.meta.resolve("../src/apply.ts"))};
+    const local = new ClientLocal(${JSON.stringify(join(root, "..", "private"))}, ${JSON.stringify(vault)}, ${JSON.stringify(device)});
+    const manifest = ${JSON.stringify(next)};
+    const remote = { manifest: async () => ({ manifest, revision: { references: ${JSON.stringify(references)} } }),
+      async *downloadChunks() { yield Buffer.alloc(4 * 1024 * 1024, "a"); process.exit(73); } };
+    await applyNewFiles(${JSON.stringify(root)}, local, remote, manifest, 1, new Uint8Array(32));
+  `], { stdout: "pipe", stderr: "pipe" });
+  expect(await child.exited).toBe(73);
+  const reopened = new ClientLocal(join(root, "..", "private"), vault, device);
+  try {
+    expect(reopened.pendingApplies()).toHaveLength(1);
+    const intent = reopened.pendingApplies()[0]!;
+    const plan = JSON.parse(reopened.applyPlan(intent.id)!);
+    expect(readFileSync(join(root, plan.stages[fileId]))).toEqual(first);
+    expect(() => lstatSync(join(root, "note"))).toThrow();
+    const remote = { manifest: async () => ({ manifest: next, revision: { references } }),
+      async *downloadChunks() { yield first; yield Buffer.from("def"); } } as unknown as HttpRemote;
+    await applyNewFiles(root, reopened, remote, next, 1, new Uint8Array(32));
+    expect(readFileSync(join(root, "note"))).toEqual(complete);
+    expect(reopened.pendingApplies()).toEqual([]);
+  } finally { reopened.close(); }
+});
+
+test.each(["before", "after"] as const)("resumes directory staging when interrupted %s its identity checkpoint", async boundary => {
+  const { root, local, manifest } = setup();
+  const next = parseManifest({ ...manifest, entries: [
+    { id: rootId, parentId: null, name: "", kind: "directory" },
+    { id: dirId, parentId: rootId, name: "created", kind: "directory" },
+    { ...manifest.entries[1], parentId: dirId },
+  ] });
+  const remote = { manifest: async () => ({ manifest: next, revision: { references: [] } }),
+    async *downloadChunks() {} } as unknown as HttpRemote;
+  const checkpoint = local.updateApplyPlan.bind(local);
+  local.updateApplyPlan = (id, plan) => {
+    if (JSON.parse(plan).created[dirId]) {
+      if (boundary === "after") checkpoint(id, plan);
+      throw new Error("directory checkpoint interruption");
+    }
+    checkpoint(id, plan);
+  };
+  await expect(applyNewFiles(root, local, remote, next, 1, new Uint8Array(32))).rejects.toThrow(/checkpoint interruption/);
+  const intent = local.pendingApplies()[0]!;
+  const stage = join(root, `.nanosync-${intent.id}-${dirId}-new`), identity = statSync(stage);
+  expect(() => lstatSync(join(root, "created"))).toThrow();
+  local.close();
+  const reopened = new ClientLocal(join(root, "..", "private"), vault, device);
+  try {
+    writeFileSync(join(stage, "unknown"), "keep me", { mode: 0o600 });
+    await expect(applyNewFiles(root, reopened, remote, next, 1, new Uint8Array(32))).rejects.toThrow(/local change during staging/);
+    expect(readFileSync(join(stage, "unknown"), "utf8")).toBe("keep me");
+    expect(reopened.pendingApplies()).toHaveLength(1);
+    rmSync(join(stage, "unknown"));
+    if (boundary === "after") {
+      const saved = join(root, "..", "saved-directory");
+      renameSync(stage, saved); mkdirSync(stage, { mode: 0o700 });
+      await expect(applyNewFiles(root, reopened, remote, next, 1, new Uint8Array(32))).rejects.toThrow(/directory identity conflict/);
+      rmSync(stage, { recursive: true }); renameSync(saved, stage);
+    }
+    await applyNewFiles(root, reopened, remote, next, 1, new Uint8Array(32));
+    expect(statSync(join(root, "created")).ino).toBe(identity.ino);
+    expect(readFileSync(join(root, "created/note")).length).toBe(0);
+    expect(reopened.pendingApplies()).toEqual([]);
+  } finally { reopened.close(); }
 });

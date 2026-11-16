@@ -116,6 +116,17 @@ public final class SyncCoordinator implements UiActions {
         } catch (Exception e) { throw new IllegalArgumentException("Use a valid HTTPS server URL without a path prefix, credentials, query or fragment. HTTP requires the HTTP setting."); }
     }
 
+    /** Public comparison code, never an authentication secret; identical to protocol enrollmentVerificationCode. */
+    public static String enrollmentVerificationCode(String deviceId, String fingerprint) {
+        String id = UUID.fromString(deviceId).toString();
+        byte[] bytes = Base64.decode(fingerprint, Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
+        if (bytes.length != 32 || !Base64.encodeToString(bytes, Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING).equals(fingerprint))
+            throw new IllegalArgumentException("Invalid enrollment fingerprint");
+        StringBuilder suffix = new StringBuilder();
+        for (int i = 0; i < 8; i++) suffix.append(String.format(java.util.Locale.ROOT, "%02X", bytes[i] & 255));
+        return id.toUpperCase(java.util.Locale.ROOT) + "-" + suffix;
+    }
+
     @Override public void addServer(String alias, String url, String password, String deviceName) {
         state.io.execute(() -> {
             String id = UUID.randomUUID().toString();
@@ -365,7 +376,7 @@ public final class SyncCoordinator implements UiActions {
                     JSONArray vaults = servers.getJSONObject(i).getJSONArray("vaults");
                     for (int j = 0; j < vaults.length(); j++) {
                         JSONObject vault = vaults.getJSONObject(j);
-                        vault.put("running", false).put("status", vault.optString("masterKeyHex").isEmpty()
+                        vault.put("running", false).put("status", vault.optBoolean("serverDeleted") ? "Vault deleted on server; local files preserved" : vault.optString("masterKeyHex").isEmpty()
                                 ? "Connection incomplete. Disconnect and enter the recovery key again." : "Not running");
                     }
                 }
@@ -385,7 +396,7 @@ public final class SyncCoordinator implements UiActions {
                 JSONArray vaults = servers.optJSONObject(i).optJSONArray("vaults");
                 for (int j = 0; j < vaults.length(); j++) {
                     JSONObject vault = vaults.optJSONObject(j);
-                    if (vault.optBoolean("background") && !vault.optBoolean("paused") && !vault.optString("masterKeyHex").isEmpty()) candidates.add(vault.optString("id"));
+                    if (!vault.optBoolean("serverDeleted") && vault.optBoolean("background") && !vault.optBoolean("paused") && !vault.optString("masterKeyHex").isEmpty()) candidates.add(vault.optString("id"));
                 }
             }
             lease.pending.addAll(candidates);
@@ -529,7 +540,7 @@ public final class SyncCoordinator implements UiActions {
                 return;
             }
             JSONObject config = store.snapshot(), vault = findVault(config, id), server = serverForVault(config, id);
-            if (vault == null || server == null || recovery == null && vault.optString("masterKeyHex").isEmpty()
+            if (vault == null || server == null || vault.optBoolean("serverDeleted") || recovery == null && vault.optString("masterKeyHex").isEmpty()
                     || !manual && (vault.optBoolean("paused") || !vault.optBoolean("background")
                     || (lease == null ? !serviceRunning : job != lease || lease.stopping))) { skipped(lease, id); return; }
             refreshPolicies(config);
@@ -634,6 +645,14 @@ public final class SyncCoordinator implements UiActions {
                 next.put(id, System.currentTimeMillis() + 3000);
                 return;
             }
+            if (error == null && result != null && "vault-deleted".equals(result.optString("terminal"))) {
+                failures.remove(id); next.remove(id); queued.remove(id);
+                vaultState(id, vault -> vault.put("running", false).put("serverDeleted", true)
+                        .put("status", "Vault deleted on server; local files preserved")
+                        .put("error", "This vault was permanently deleted. Local files and saved keys are preserved. Disconnect this vault or connect to another vault."));
+                notifyAction(id, "Vault deleted on server. Local files are preserved.");
+                return;
+            }
             if (error == null && recovery != null && (result == null || !result.optString("masterKeyHex").matches("[0-9a-f]{64}"))) error = "Recovery did not return a valid vault key.";
             if (error != null) {
                 String safe = recovery == null ? error : "Recovery failed. Check the recovery key and reconnect this vault.";
@@ -704,7 +723,7 @@ public final class SyncCoordinator implements UiActions {
                 JSONArray vaults = servers.optJSONObject(i).optJSONArray("vaults");
                 for (int j = 0; j < vaults.length(); j++) {
                     JSONObject vault = vaults.optJSONObject(j);
-                    if (vault.optBoolean("background") && !vault.optBoolean("paused") && !vault.optString("masterKeyHex").isEmpty()) return true;
+                    if (!vault.optBoolean("serverDeleted") && vault.optBoolean("background") && !vault.optBoolean("paused") && !vault.optString("masterKeyHex").isEmpty()) return true;
                 }
             }
             return false;
@@ -749,7 +768,7 @@ public final class SyncCoordinator implements UiActions {
                     for (int j = 0; j < vaults.length(); j++) {
                         JSONObject vault = vaults.getJSONObject(j);
                         Run active = runs.get(vault.optString("id"));
-                        if (vault.optBoolean("background") && (active == null || active.job == null)
+                        if (!vault.optBoolean("serverDeleted") && vault.optBoolean("background") && (active == null || active.job == null)
                                 && (job == null || !job.pending.contains(vault.optString("id")))) vault.put("status", "Background not running").put("error", reason);
                     }
                 }

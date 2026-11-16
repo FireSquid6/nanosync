@@ -93,9 +93,9 @@ The native Android client synchronizes a supported ordinary shared folder, with 
 
 ## CLI and foreground sync
 
-The CLI initializes an owner password locally (`server init`), enrolls server-wide devices (`enroll` and local `approve NAME --server-dir DIR`), creates/lists/renames vaults (`vault`), connects directories (`setup`), and synchronizes (`sync` or `sync --watch`). See [CLI workflow](../packages/cli/README.md) for the commands and safe automation options. `sync` searches upward from cwd or `--path` for a secret-free `.nanosync` marker; `--watch` runs in the foreground and periodically rescans/retries. Supply your own user service manager if needed.
+The CLI initializes an owner password locally (`server init`), enrolls server-wide devices (`client connections add` and local `server devices approve --device-id UUID --server-dir DIR`), provisions vaults (`server vaults view|create|rename|delete`), connects directories (`client vaults connect`), and synchronizes (`client sync` or `client sync --watch`). See [CLI workflow](../packages/cli/README.md) for the commands and safe automation options. `sync` searches upward from cwd or `--path` for a secret-free `.nanosync` marker; `--watch` runs in the foreground and periodically rescans/retries. Supply your own user service manager if needed.
 
-Each connection has its own global-state journal, cache, pending proposals, and lock. Keep sync roots separate from global private state and each other. Initial sync reconciles existing local files against the verified empty genesis even when another replica has already published remote data; it never treats untracked local files as implicit deletions. On each run, interrupted hydration/apply and frozen proposals resume before new edits. The CLI has no local IPC, status, history, restore, conflict-resolution, eviction, or download controls. Successful one-shot commands print `{revisionId,sequence}` and exit 0; pending enrollment exits 3; other failures report structured errors on stderr.
+Each connection has its own global-state journal, cache, pending proposals, and lock. Keep sync roots separate from global private state and each other. Initial sync reconciles existing local files against the verified empty genesis even when another replica has already published remote data; it never treats untracked local files as implicit deletions. On each run, interrupted hydration/apply and frozen proposals resume before new edits. The CLI has no local IPC, status, history, restore, conflict-resolution, eviction, or download controls. With `--json`, successful commands print `{ok:true,code,data}` and exit 0; pending enrollment exits 3, denied/expired enrollment exits 4, remote errors exit 5, local/input errors exit 2, and interruption exits 130. Errors are structured on stderr; see the CLI README for the stable contract.
 
 Integrators of other clients can use `sync-core`, `client-local`, and `linux-client` directly. The portable library APIs remain available for history, merge, restoration, conflicts and hydration; these are not separate CLI commands.
 
@@ -123,29 +123,46 @@ The server should create storage with restrictive permissions and refuse to star
 
 ## Administration
 
-Current multi-vault initialization uses:
+This release intentionally breaks old command names and stored client/server setup state.
+There is no supported migration or legacy bootstrap CLI. Back up old metadata,
+objects, recovery material and plaintext before resetting; do not delete your only
+copy. Initialize a new private server directory and client state directory, provision
+new vaults, and deliberately reconnect/import retained files. Do not reuse an old
+`.nanosync` marker with new credentials. Disconnect with the matching old tool/state
+first, or archive the old root and import a separate plaintext copy.
 
-1. `server init` to establish one owner password, even when the server has no vaults.
-2. `enroll` on each device, followed by `approve NAME --server-dir DIR` locally on the server.
-3. `vault create` from any approved device; protect the independent per-vault recovery secret.
-4. `setup` to select a server, vault and directory. A missing local key requires that vault's recovery secret.
+1. `nanosync server init --server-dir DIR` establishes the owner password.
+2. Provision locally while the runtime is stopped:
+   `nanosync server vaults create --server-dir DIR --name documents`.
+   Save and acknowledge the newly delivered recovery secret.
+3. `nanosync server run --server-dir DIR --web-ui` serves sync and optional owner UI.
+4. `nanosync client connections add --url URL --alias home` enrolls a device.
+   Compare the printed request code and approve its exact UUID in `/admin` or with
+   `nanosync server devices approve --server-dir DIR --device-id UUID`.
+5. `nanosync client vaults connect --server home --vault documents --path DIRECTORY`
+   binds without transfer; `nanosync client sync --path DIRECTORY` starts transfer.
 
-The legacy single-vault bootstrap protocol remains available for pre-existing deployments; its historical sequence was:
+Local owner operations require possession of the private server directory; browser
+operations require the owner password. Use the browser for live provisioning. Stop
+the runtime before local storage provisioning or offline maintenance. Initialization,
+local creation/replay (including recovery delivery), and `server run` enforce this
+with the same process-identity `.sync-owner` gate in the private server root.
+The runtime holds ownership through completed shutdown; another runtime or local
+provisioning attempt fails before mutation. Stop the runtime and retry the same
+name/output path: contention preserves encrypted receipts and recovery output.
+Failures release ownership; definitively dead owners are recovered automatically,
+not by manually deleting a live lock. Device view/approve/deny/revoke and vault
+view/rename/delete are metadata-only and remain usable while serving.
+Multiple approved devices and multiple
+nonoverlapping directory replicas are supported; each replica has its own lock/journal.
 
-1. Start an uninitialized server on a trusted local interface.
-2. Create the sole account.
-3. Initialize the encrypted vault from the first client.
-4. Generate and confirm storage of the recovery key.
-5. Mark the first device approved.
-6. Disable bootstrap endpoints permanently unless the server is reset through an offline administrative procedure.
-
-The v1 implementation stages steps 2–5: an explicitly bootstrap-authorized initialize request records the account verifier, opaque recovery wrap, singleton vault, and designated first-device identity; bootstrap-authorized encrypted objects are then streamed through the ordinary validated object path; completion atomically publishes the zero-parent genesis and seals bootstrap. Status is public but reveals only `uninitialized`, `initializedWithoutHead`, or `sealed`. A crash before completion leaves no head and permits repair/retry. Sealing is irreversible through the network API. First-device credential issuance, password login, approval, enrollment, and revocation are provided by the normal authentication API, not by bootstrap mutations.
-
-The private client checkpoint contains the vault master key and exact encrypted genesis but no password or password-derived verifier; the recovery secret is displayed and confirmed once, not stored in the checkpoint. On retry, bootstrap completion uses the operator proof and saved genesis, then normal password login verifies the supplied password. A wrong password may seal an in-progress bootstrap before login rejects it; the checkpoint remains intact for retry with the correct password. Protect this owner-only file and its backups as a vault key until durable client credentials replace it.
-
-After sealing, the designated first device obtains a password session and submits enrollment with a separate `X-Nanosync-Bootstrap-Authorization` operator proof. Operators should provision this proof through the same protected local/secret mechanism used by the injected bootstrap authorizer and make it one-time where practical. The server strips the password-session `Authorization` header before invoking that authorizer. This handoff activates only the exact persisted initial identity and does not re-enable initialize, bootstrap object upload, or completion. If the activation response is lost, the same enrolled session can safely retry without consuming another proof.
-
-Migration 2 treats an empty migration-1 database as uninitialized and ready for bootstrap. A legacy migration-1 database that already contains `server_state` but lacks the migration-2 account/device/recovery/bootstrap identity set fails bootstrap status and initialization closed; it requires an offline operator migration or reset rather than guessing identities through the network API.
+Remove/disconnect changes local configuration and preserves files; revoke removes
+future server access without erasing retained files or keys; delete destroys the
+server vault, not client plaintext. Explicit deletion overrides retention only for
+that UUID, immediately rejects access with HTTP 410 `VAULT_DELETED`, and schedules
+restart-safe cleanup. Successful deletion means tombstoned, not necessarily reclaimed.
+Backups may still hold deleted data and revoked credentials; control their retention
+separately. Recovery secrets alone cannot restore deleted ciphertext.
 
 Administrative capabilities include:
 
@@ -156,9 +173,9 @@ Administrative capabilities include:
 - Trigger integrity scans.
 - Export diagnostics that exclude secrets and plaintext names.
 
-Administration is CLI-only; local access to the server's private metadata directory authorizes name-based approval and revocation without a sync client, while legacy HTTP admin routes remain available for legacy administrators.
+Local access to the server's private metadata directory authorizes exact-UUID owner approval, denial, revocation and vault administration without a sync client. Browser owner administration is separately opt-in; existing device-admin HTTP routes retain their distinct authority and safeguards.
 
-With an approved administrator's client directory, run `nanosync admin storage`, `nanosync admin retention-dry-run`, `nanosync admin gc-dry-run`, `nanosync admin scan`, or `nanosync admin diagnostics` (optionally `--json`). Reports are aggregate-only: no keys, tokens, object IDs, or plaintext names. Each `admin scan` verifies at most 100 catalog entries; repeat until `done: true` (scan position resets on server restart). Retention reports reject more than 10,000 revisions rather than silently truncating. No live GC execution command exists.
+On the server, run `nanosync server admin storage`, `nanosync server admin retention-dry-run`, `nanosync server admin gc-dry-run`, `nanosync server admin scan`, or `nanosync server admin diagnostics`, supplying `--server-dir DIR` (or selecting it interactively), optionally `--json`. Stop the serving runtime before these offline reports: their storage initialization/recovery shares the exclusive runtime/provisioning ownership gate, and scan reads ciphertext. Device view/approve/deny/revoke and vault view/rename/delete are metadata-only and remain available while serving, including during staged uploads. Reports are aggregate-only: no keys, tokens, object IDs, or plaintext names. Each `admin scan` verifies at most 100 catalog entries; repeat until `done: true` (scan position resets on server restart). Retention reports reject more than 10,000 revisions rather than silently truncating. No live GC execution command exists.
 
 ## Backup and restore
 
@@ -168,7 +185,7 @@ With an approved administrator's client directory, run `nanosync admin storage`,
 
 The production server entrypoint starts `PeriodicIntegrityScanner` with `ServerMaintenance` and awaits its stop on shutdown. It uses a positive interval and a batch size of at most 1,000 (one bounded catalog page per tick), reporting scan failures to stderr. Only one batch runs at once, errors do not crash the scheduler, and shutdown aborts an in-flight scan. A concurrent reupload that resets integrity state prevents an older scan result from overwriting it when the previous status/check time differs; the catalog has no generation counter for indistinguishable same-state writes.
 
-`ServerMaintenance.gcDryRun` reports already marked candidates and their grace eligibility without changing state. The only executable GC is `collectOffline(control, nowMs)`, not an HTTP route, scheduler or live admin command. Stop every API instance and writer first; take operator-exclusive control of **both** the database and object-store paths (including other hosts and backup/restore jobs), hold that control through the entire run, and implement `assertExclusiveOffline` to fail if exclusivity is lost. SQLite transaction locks alone do not serialize physical deletion against uploads. No shipped server-wide lease exists: **never run this against a live server**. A first offline pass transactionally marks verified unreferenced catalog objects older than 24 hours; a later pass after an additional full 24-hour marking grace rechecks catalog identity, integrity, revision references (including prepared), head and active uploads before physical deletion. A failed deletion leaves a durable candidate for re-evaluation. Uncataloged files and uncertain/corrupt objects are deliberately not collected; investigate manually. GC is useful for cataloged abandoned uploads only, not retention-based historical reclamation. Review dry-run results and secure a verified backup before any offline collection.
+`ServerMaintenance.gcDryRun` reports already marked candidates and their grace eligibility without changing state. The only executable GC is `collectOffline(control, nowMs)`, not an HTTP route, scheduler or live admin command. Stop every API instance and writer first; take operator-exclusive control of **both** the database and object-store paths (including other hosts and backup/restore jobs), hold that control through the entire run, and implement `assertExclusiveOffline` to fail if exclusivity is lost. SQLite transaction locks alone do not serialize physical deletion against uploads. The shipped CLI runtime/provisioning ownership gate does not wrap this programmatic GC API or coordinate other hosts/external writers: **never run this against a live server**. A first offline pass transactionally marks verified unreferenced catalog objects older than 24 hours; a later pass after an additional full 24-hour marking grace rechecks catalog identity, integrity, revision references (including prepared), head and active uploads before physical deletion. A failed deletion leaves a durable candidate for re-evaluation. Uncataloged files and uncertain/corrupt objects are deliberately not collected; investigate manually. GC is useful for cataloged abandoned uploads only, not retention-based historical reclamation. Review dry-run results and secure a verified backup before any offline collection.
 
 ### Backup and restore checklist
 
@@ -226,3 +243,51 @@ Metrics labels must avoid unbounded identifiers such as chunk IDs, revision IDs,
 - Rate-limit authentication and expensive presence queries.
 - Enforce configured limits before accepting large request bodies.
 - Use temporary files and atomic publication for local object writes.
+
+### Browser API runtime options
+
+Browser administration is disabled by default. Enable with
+`nanosync server run --server-dir <dir> --web-ui`. For an existing HTTPS proxy,
+add `--external-origin https://sync.example --trusted-proxy <exact-peer-IP>`.
+The insecure-sync exposure acknowledgement never permits public browser HTTP.
+No forwarded headers establish trust. See [security.md](security.md) before
+exposing the backend listener. The runtime embeds the React/Paper UI HTML and content-hashed JS/CSS in the
+source asset map and standalone executable. No adjacent assets, CDN, or frontend
+service is needed. Unknown assets have no fallback. HTML/API are no-store; exact
+hashed assets are immutable. The programmatic `adminAssets` map is an explicit
+override for integrators/tests.
+Client provisioning mutations and legacy CLI aliases have been removed. Use `server vaults create|rename|delete` locally, or the owner browser API, for provisioning. The CLI no longer exposes a bootstrap workflow; historical protocol fixtures remain test-only.
+
+
+### Reverse proxy example
+
+For a TLS terminator on the same machine:
+
+```sh
+nanosync server run --server-dir /srv/nanosync --host 127.0.0.1 --port 8787 \
+  --web-ui --external-origin https://sync.example.com --trusted-proxy 127.0.0.1
+```
+
+Configure the proxy's HTTPS virtual host for **only** `sync.example.com`, forward
+all paths to `http://127.0.0.1:8787`, preserve the browser Origin/custom CSRF header,
+and disable shared caching for `/admin` HTML/API. Serve assets on that same origin.
+Forwarded/X-Forwarded-* headers are neither needed nor trusted. Restrict backend
+access to the proxy; a shared trusted source IP is not an identity boundary.
+For a remote proxy use its exact observed socket IP, firewall the backend, and add
+`--acknowledge-exposure` when binding nonloopback. Proxy body/time limits must allow
+streamed sync uploads; do not log Authorization, cookies, passwords or request bodies.
+A VPN or insecure-sync acknowledgement alone does not permit nonloopback browser HTTP.
+
+### Secret delivery and automation
+
+Use hidden prompts, `NANOSYNC_PASSWORD`/`NANOSYNC_RECOVERY_SECRET`, or protected
+`--password-file`/`--recovery-file` inputs, never literal secret arguments. For
+scripted creation use `--recovery-output /private/new-secret` in a private 0700
+parent; the new output is owner-only 0600. Retry the same name and absolute output
+path after interruption to replay the encrypted receipt. Do not change/delete the
+output before retry. Deliver it securely/offline to the client and remove the
+operator copy after durable independent backup. This explicit delivery file is
+not ordinary server key persistence. Browser creation acknowledges backup, stores
+only an encrypted receipt, and requires secret reentry after refresh before publish.
+There is no recovery-secret retrieval API. See the [CLI contract](../packages/cli/README.md)
+for complete JSON/exit and confirmation rules.

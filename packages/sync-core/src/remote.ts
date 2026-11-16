@@ -10,6 +10,7 @@ import {
   type EncryptedObject,
 } from "./index.ts";
 import { parseManifest, validateManifestReferences, type ManifestV1 } from "./manifest.ts";
+import { fetchWithDeadline } from "./request.ts";
 export class IntegrityError extends Error {
   constructor(message: string) {
     super(message);
@@ -46,6 +47,7 @@ export interface RemoteOptions {
   fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   journal?: ChunkJournal;
   retries?: number;
+  signal?: AbortSignal;
 }
 
 function exact(value: unknown, fields: string[]): Record<string, unknown> {
@@ -189,15 +191,17 @@ export class HttpRemote {
     const headers = new Headers(init.headers);
     if (authenticated) headers.set("authorization", `Bearer ${this.options.token}`);
     if (authenticated && this.options.vaultId) headers.set("x-nanosync-vault-id", this.options.vaultId);
-    // Preserve raw BodyInit for transports on WebViews that cannot construct a
-    // streaming Request. Standard fetch accepts the same URL/init contract.
-    return this.options.fetch(`${this.base}${path}`, { ...init, headers });
+    // Keep main's cancellation and body-read deadline without requiring newer
+    // AbortSignal static methods or streaming Request support on Android 12.
+    return fetchWithDeadline(this.options.fetch, `${this.base}${path}`, { ...init, headers }, this.options.signal);
   }
 
   private async body(response: Response, statuses: number[] = [200]): Promise<unknown> {
     if (!statuses.includes(response.status)) {
       const envelope = parseProtocolErrorEnvelope(await json(response, 2048));
-      throw new RemoteError(response.status, envelope.code, envelope.message, envelope.retryAfterSeconds);
+      throw new RemoteError(response.status, envelope.code, envelope.code === "VAULT_DELETED"
+        ? "Vault permanently deleted on server. Local files and keys are preserved. Disconnect this binding or connect to a different vault."
+        : envelope.message, envelope.retryAfterSeconds);
     }
     return json(response);
   }

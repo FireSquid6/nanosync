@@ -253,3 +253,52 @@ Active upload sessions, recent unreferenced objects, and revisions used as merge
 ## Protocol evolution
 
 Every stored object and API request carries a format or protocol version. New readers may support older objects, but a client must not publish a format the server has not advertised. Capability negotiation should be explicit rather than inferred from server version strings.
+
+## Owner browser API (opt-in)
+
+`webAdministration: { enabled: boolean, url?: string }` is required in
+`GET /v1/capabilities`. A URL, when present, is a configured trustworthy
+HTTPS (or loopback HTTP) `/admin` link, without credentials/query/fragment.
+It is absent when disabled or no external origin was configured.
+
+Browser routes live exclusively under `/admin/api`; they require memory-only
+owner sessions, not bearer credentials. See [security.md](security.md) for
+transport, origin, cookie and CSRF rules. JSON results include
+`protocolVersion: 1`; errors use the existing protocol error envelope.
+
+| Method/path | JSON input / result |
+| --- | --- |
+| POST session | `{password}` → `{authenticated:true,csrfToken}` + session cookie |
+| GET session | `{authenticated:true,csrfToken}` |
+| DELETE session | logout; expire cookie |
+| GET devices | `{devices,enrollments}`; pending entries include comparison code and timestamps |
+| POST devices/:uuid/approve or deny or revoke | `{}`; exact device identity required |
+| GET vaults | `{vaults}` |
+| POST vaults | strict encrypted owner creation request (see progress contracts); replay-safe |
+| POST vaults/:uuid/rename | `{name}` |
+| POST vaults/:uuid/delete | `{confirmName,password}`; exact current name, password reauthentication; immediately tombstones |
+| GET activity?limit=100 | `{activity}`; integer limit 1–100, newest first, no secret/details/file names |
+
+All paths above are relative to `/admin/api`. Mutation bodies use
+`application/json` and reject unknown/duplicate fields. GET/DELETE session
+require no body. Login needs a nonempty custom `X-Nanosync-CSRF` header;
+subsequent mutations use the returned random `csrfToken` in that header.
+Activity is the only endpoint accepting query parameters. Responses are
+noncacheable. Invalid sessions return 401, origin/CSRF/transport violations 403,
+invalid input 400, conflicts 409, rate limits 429 with Retry-After. Owner-deleted
+vault creation IDs return 410 VAULT_DELETED. Deletion acknowledges durable
+unavailability, not completed physical reclamation; the runtime cleanup worker
+performs that asynchronously.
+
+Approved-device `GET /v1/vaults` and `/v1/recovery-wrap` remain available.
+Device-authorized vault create/rename routes are removed (404). Existing
+`/v1/admin` device-admin operations retain their separate bearer authentication
+and device self/last-administrator safeguards.
+
+Successful recent owner activity records `{sequence,action,occurredAtMs,origin,
+actorId,targetId}`. Origins distinguish `browser` from `server-local`; actions
+include `enrollment.approved`, `enrollment.denied`, `device.revoked`,
+`vault.created`, `vault.renamed`, `vault.deleted`. They are provenance, not client
+supplied authorization. Files, secret material and audit details are excluded.
+All deleted-vault sync/recovery/object/publication operations return HTTP 410
+`VAULT_DELETED`; this is not a retryable outage or an empty remote manifest.

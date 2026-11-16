@@ -1,59 +1,75 @@
+import { adminAssets } from '../../admin-ui/generated/assets.ts';
+import { parseDeviceId } from "@nanosync/protocol";
 import { timingSafeEqual, randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { createServerConfig, startServer, AuthenticationService, PeriodicIntegrityScanner, ServerMaintenance, Argon2idPasswordHasher } from "@nanosync/server-core";
+import { OwnerMetadataOperations, OwnerOperations, type AdminAssets, createServerConfig, startServer, AuthenticationService, PeriodicIntegrityScanner, ServerMaintenance, Argon2idPasswordHasher } from "@nanosync/server-core";
 import { AuthenticationRepository, BootstrapRepository, MaintenanceRepository, ObjectCatalogRepository, RevisionRepository, ServerMetadataDatabase, VaultRepository } from "@nanosync/server-metadata";
 import { LocalFilesystem } from "@nanosync/server-object-storage";
 import { privateDirectory, provisionSecret, secureRead } from "./security.ts";
+import { acquireServerStorage } from './server-ownership.ts';
 
-export interface RunServerOptions { directory: string; host?: string; port?: number; acknowledgeExposure?: boolean; scanIntervalMs?: number }
+export interface RunServerOptions { webUi?: boolean; externalOrigin?: string; trustedProxyAddresses?: string[]; adminAssets?: AdminAssets; directory: string; host?: string; port?: number; acknowledgeExposure?: boolean; scanIntervalMs?: number }
 export async function initializeServerOwner(directory: string, password: string): Promise<void> {
   if (!password || Buffer.byteLength(password) > 1024) throw new Error("password must be 1..1024 bytes");
-  const root = privateDirectory(directory), bytes = new TextEncoder().encode(password);
-  const database = new ServerMetadataDatabase(join(root, "metadata.sqlite"));
+  const root = privateDirectory(directory), release = acquireServerStorage(root);
+  const bytes = new TextEncoder().encode(password);
   try {
-    const verifier = await new Argon2idPasswordHasher().hash(bytes);
-    new BootstrapRepository(database).initializeOwner(randomUUID(), verifier, Date.now());
-  } finally { bytes.fill(0); database.close(); }
+    provisionSecret(join(root, 'pepper.hex'));
+    const database = new ServerMetadataDatabase(join(root, "metadata.sqlite"));
+    try {
+      const verifier = await new Argon2idPasswordHasher().hash(bytes);
+      new BootstrapRepository(database).initializeOwner(randomUUID(), verifier, Date.now());
+    } finally { database.close(); }
+  } finally { bytes.fill(0); release(); }
 }
 /** The server's private metadata directory is the administrative authority. */
-export function approveLocalDevice(directory: string, name: string): string {
-  const root = privateDirectory(directory), db = new ServerMetadataDatabase(join(root, "metadata.sqlite"));
-  try {
-    const auth = new AuthenticationRepository(db);
-    const matches = auth.listPending(Date.now()).filter(item => item.displayName === name);
-    if (matches.length !== 1) throw new Error("pending device name is unavailable or ambiguous");
-    auth.approve(null, matches[0]!.deviceId, Date.now());
-    return matches[0]!.deviceId;
-  } finally { db.close(); }
-}
-export function localDevices(directory: string) {
+export function approveLocalDevice(directory: string, deviceId: string): string {
   const db = new ServerMetadataDatabase(join(privateDirectory(directory), "metadata.sqlite"));
-  try { return new AuthenticationRepository(db).listDevices(); } finally { db.close(); }
-}
-export function revokeLocalDevice(directory: string, name: string): string {
-  const root = privateDirectory(directory), db = new ServerMetadataDatabase(join(root, "metadata.sqlite"));
   try {
-    const auth = new AuthenticationRepository(db);
-    const matches = auth.listDevices().filter(item => item.state === "active" && (item.displayName === name || item.deviceId === name));
-    if (matches.length !== 1) throw new Error("active device name is unavailable or ambiguous");
-    auth.revoke(null, matches[0]!.deviceId, Date.now());
-    return matches[0]!.deviceId;
+    new AuthenticationRepository(db).approve({origin:"server-local", actorId:null}, parseDeviceId(deviceId), Date.now());
+    return deviceId;
   } finally { db.close(); }
 }
 export async function localAdminReport(directory: string, name: string): Promise<unknown> {
-  const root = privateDirectory(directory), db = new ServerMetadataDatabase(join(root, "metadata.sqlite"));
+  const root = privateDirectory(directory);
+  secureRead(join(root, "pepper.hex"), 64);
+  // Reports initialize/recover storage (scan also reads ciphertext), so require
+  // the same exclusive ownership as every other offline storage accessor.
+  const release = acquireServerStorage(root);
   try {
-    const maintenance = new ServerMaintenance(new MaintenanceRepository(db), new LocalFilesystem(join(root, "objects")));
-    if (name === "storage") return maintenance.storageStatus();
-    if (name === "retention-dry-run") return maintenance.retentionDryRun(Date.now());
-    if (name === "gc-dry-run") return maintenance.gcDryRun(Date.now());
-    if (name === "scan") return maintenance.scanBatch(Date.now());
-    return { storage: maintenance.storageStatus(), retention: maintenance.retentionDryRun(Date.now()), gc: maintenance.gcDryRun(Date.now()) };
-  } finally { db.close(); }
+    const db = new ServerMetadataDatabase(join(root, "metadata.sqlite"));
+    try {
+      const storage = new LocalFilesystem(join(root, "objects"));
+      await storage.existsBatch([]);
+      const maintenance = new ServerMaintenance(new MaintenanceRepository(db), storage);
+      if (name === "storage") return maintenance.storageStatus();
+      if (name === "retention-dry-run") return maintenance.retentionDryRun(Date.now());
+      if (name === "gc-dry-run") return maintenance.gcDryRun(Date.now());
+      if (name === "scan") return await maintenance.scanBatch(Date.now());
+      return { storage: maintenance.storageStatus(), retention: maintenance.retentionDryRun(Date.now()), gc: maintenance.gcDryRun(Date.now()) };
+    } finally { db.close(); }
+  } finally { release(); }
 }
 export async function runServer(options: RunServerOptions): Promise<{ stop(): Promise<void>; url: string }> {
   const directory = privateDirectory(options.directory);
+  const release = acquireServerStorage(directory);
+  try {
+    const running = await startOwnedServer(options, directory);
+    let stopping: Promise<void> | undefined;
+    return {
+      url: running.url,
+      stop: () => stopping ??= (async () => {
+        try { await running.stop(); } finally { release(); }
+      })(),
+    };
+  } catch (error) { release(); throw error; }
+}
+
+async function startOwnedServer(options: RunServerOptions, directory: string): Promise<{ stop(): Promise<void>; url: string }> {
   const config = createServerConfig({
+    webUi: options.webUi,
+    externalOrigin: options.externalOrigin,
+    trustedProxyAddresses: options.trustedProxyAddresses,
     hostname: options.host,
     port: options.port,
     acknowledgeInsecureNonLoopback: options.acknowledgeExposure,
@@ -88,6 +104,8 @@ export async function runServer(options: RunServerOptions): Promise<{ stop(): Pr
       onError: () => console.error("integrity scan failed; investigate storage"),
     });
     const server = startServer({
+      owner: new OwnerOperations(database, filesystem),
+      adminAssets: options.adminAssets ?? adminAssets,
       filesystem,
       catalog: new ObjectCatalogRepository(database),
       revisions: new RevisionRepository(database),
@@ -98,17 +116,40 @@ export async function runServer(options: RunServerOptions): Promise<{ stop(): Pr
       authorizeBootstrap,
       config,
     });
+    // Cleanup is mandatory even when an integrity scan fails. Each pass is single-flight.
+    let cleanupFlight: Promise<void> | undefined;
+    const cleanup = () => {
+      if (!cleanupFlight) cleanupFlight = maintenance.cleanupDeleted()
+        .catch(() => console.error("vault deletion cleanup failed; will retry"))
+        .finally(() => { cleanupFlight = undefined; });
+    };
+    cleanup();
+    const cleanupTimer = setInterval(cleanup, 1_000);
     scanner.start();
     return {
       url: server.url.href,
       stop: async () => {
-        server.stop(true);
-        await scanner.stop();
-        database.close();
+        clearInterval(cleanupTimer);
+        try {
+          await server.stop(true);
+          await cleanupFlight;
+          await scanner.stop();
+        } finally { database.close(); }
       },
     };
   } catch (error) {
     database.close();
     throw error;
   }
+}
+
+export const localOwner = { origin: "server-local", actorId: null } as const;
+export async function withLocalOwner<T>(directory: string, operation: (owner: OwnerMetadataOperations) => T | Promise<T>): Promise<T> {
+  const root = privateDirectory(directory);
+  // Administration must not silently initialize a mistyped server directory.
+  secureRead(join(root, "pepper.hex"), 64);
+  const db = new ServerMetadataDatabase(join(root, "metadata.sqlite"));
+  try {
+    return await operation(new OwnerMetadataOperations(db));
+  } finally { db.close(); }
 }

@@ -23,14 +23,20 @@ export interface SyncJournal {
   finishRestoreProposal(): void;
   pendingApplies(): { id: string; revision: string; sequence: number; state: string }[];
   pendingHydration(): HydrationIntent | null;
-  entry(id: string): { path: string } | null;
+  /** Intent must survive stale proposal removal, scan commit, and apply crashes. */
+  reconciliation(): { baseRevision: string; localRevision: string } | null;
+  beginReconciliation(baseRevision: string, localRevision: string): void;
+  /** Atomically complete the intent and clear its accepted proposal after apply. */
+  finishReconciliation(): void;
+  /** Inventory revision identifies an already committed local reconciliation branch. */
+  entry(id: string): { path: string; revision?: string | null } | null;
 }
 
 export interface ScanPlan {
   manifest: ManifestV1;
   /** Reopen/verify sources on every call, including frozen-publication repair. */
   chunks(knownObjectIds?: ReadonlySet<string>): AsyncGenerator<EncryptedObject>;
-  /** Commit only after acceptance or before applying a verified merge. */
+  /** Commit only after acceptance or under a durable reconciliation intent. */
   commit(): void | Promise<void>;
   suppressed: string[];
 }
@@ -58,6 +64,7 @@ export interface SyncEngineOptions {
   hydrate(manifest: ManifestV1, revision: RevisionEnvelope, key: Uint8Array, intent: HydrationIntent, path: string): Promise<unknown>;
 }
 
+const MAX_ANCESTRY_NODES = 16_384;
 type Verified = { manifest: ManifestV1; revision: RevisionEnvelope; sequence: number | null };
 function sameTree(a: ManifestV1, b: ManifestV1): boolean {
   return JSON.stringify(a.entries) === JSON.stringify(b.entries);
@@ -182,6 +189,7 @@ export class SyncEngine {
     }
     if (response.status !== "staleHead" || !response.currentRevisionId) throw new Error(`proposal not accepted: ${response.status}`);
     const local = await this.verified(request.proposedRevision.revisionId);
+    if (!this.local.reconciliation()) this.local.beginReconciliation(this.local.head("applied").revisionId!, request.proposedRevision.revisionId);
     this.local.discardStaleProposal(request.proposedRevision.revisionId);
     return { stale: await this.verified(response.currentRevisionId), local };
   }
@@ -206,6 +214,7 @@ export class SyncEngine {
     }
     if (result.status !== "staleHead" || !result.currentRevisionId) throw new Error(`publication failed: ${result.status}`);
     const local = await this.verified(plan.manifest.revisionId);
+    this.local.beginReconciliation(previous.manifest.revisionId, plan.manifest.revisionId);
     this.local.discardStaleProposal(plan.manifest.revisionId);
     return { stale: await this.verified(result.currentRevisionId), local };
   }
@@ -245,7 +254,6 @@ export class SyncEngine {
     // A frequently edited vault can accumulate far more than 64 revisions
     // while a device is offline. Bound hostile graph traversal without making
     // ordinary long-running histories unsynchronizable.
-    const maxAncestryNodes = 16_384;
     if (base.sequence === null || head.sequence === null || head.sequence <= base.sequence)
       throw new Error("remote head does not advance applied sequence");
     const seen = new Set<string>();
@@ -256,7 +264,7 @@ export class SyncEngine {
       }
       if (acceptedOnly && node.sequence === null) return null;
       if (seen.has(node.manifest.revisionId)) return null;
-      if (seen.size >= maxAncestryNodes) throw new Error("remote ancestry traversal limit exceeded");
+      if (seen.size >= MAX_ANCESTRY_NODES) throw new Error("remote ancestry traversal limit exceeded");
       seen.add(node.manifest.revisionId);
       for (const id of node.manifest.parents) {
         const parent = await this.verified(id);
@@ -282,7 +290,7 @@ export class SyncEngine {
 
   private async reconcile(base: Verified, local: Verified, current: Verified): Promise<Verified> {
     let concurrentStales = 0, steps = 0;
-    while (steps++ < 64) {
+    while (steps++ < MAX_ANCESTRY_NODES) {
       const path = await this.remotePath(base, current, true);
       const child = path[0]!;
       if (!local.manifest.parents.includes(base.manifest.revisionId) || !child.manifest.parents.includes(base.manifest.revisionId))
@@ -304,6 +312,8 @@ export class SyncEngine {
 
   private async run(): Promise<void> {
     await this.remote.capabilities();
+    // Check availability before replaying journals or applying local filesystem work.
+    await this.remote.head();
     await this.recoverHydration();
     // A partially applied filesystem is never scanned or overwritten.
     for (const pending of this.local.pendingApplies()) {
@@ -315,6 +325,29 @@ export class SyncEngine {
     const applied = this.local.head("applied");
     const base = applied.revisionId ? await this.verified(applied.revisionId) : null;
     if (base && base.sequence !== applied.sequence) throw new Error("applied sequence mismatch");
+    const reconciliation = this.local.reconciliation();
+    if (reconciliation) {
+      if (proposed && !stale && this.local.proposal()?.state === "accepted" && applied.revisionId === proposed.manifest.revisionId) {
+        this.local.finishReconciliation();
+      } else {
+        if (applied.revisionId !== reconciliation.baseRevision) throw new Error("reconciliation base changed");
+        const original = await this.verified(reconciliation.localRevision);
+        const originalBase = await this.verified(reconciliation.baseRevision);
+        const root = original.manifest.entries.find(entry => entry.parentId === null)!;
+        const committed = this.local.entry(root.id)?.revision === original.manifest.revisionId;
+        const scan = await this.scanner.plan(committed ? original.manifest : originalBase.manifest,
+          committed ? this.options.randomUUID() : original.manifest.revisionId, this.device, this.key, original.manifest);
+        if (!sameTree(scan.manifest, original.manifest)) throw new Error("local edits changed after frozen proposal");
+        if (!committed) await scan.commit();
+        if (!proposed || stale) {
+          const head = stale ?? await this.verified((await this.remote.head()).revisionId!);
+          proposed = await this.reconcile(originalBase, original, head);
+        }
+        await this.options.apply(proposed.manifest, proposed.sequence!, this.key);
+        this.local.finishReconciliation();
+      }
+      return this.run();
+    }
     const restore = this.local.restoreProposal();
     if (restore && proposed && !stale) {
       if (base?.manifest.revisionId !== restore.baseRevision && applied.revisionId !== restore.revision) throw new Error("restore base changed during recovery");
@@ -347,15 +380,6 @@ export class SyncEngine {
         this.local.clearProposal();
       }
       proposed = null;
-    }
-    if (stale && proposed) {
-      if (!base) throw new Error("cannot merge without applied base");
-      const scan = await this.scanner.plan(base.manifest, proposed.manifest.revisionId, this.device, this.key, proposed.manifest);
-      if (!sameTree(scan.manifest, proposed.manifest)) throw new Error("local edits changed after frozen proposal");
-      await scan.commit();
-      proposed = await this.reconcile(base, proposed, stale);
-      await this.options.apply(proposed.manifest, proposed.sequence!, this.key);
-      this.local.clearProposal();
     }
     const head = await this.remote.head();
     this.local.recordHead("observed", head);
@@ -398,13 +422,10 @@ export class SyncEngine {
       }
       return;
     }
-    let next = await this.publish(scan, prior);
+    const next = await this.publish(scan, prior);
     if (!next.stale && next.local) { await this.finishLocal(scan, next.local); return; }
-    await scan.commit();
     if (!next.stale || !next.local) throw new Error("missing stale merge inputs");
-    const resolved = await this.reconcile(prior, next.local, next.stale);
-    await this.options.apply(resolved.manifest, resolved.sequence!, this.key);
-    this.local.clearProposal();
+    return this.run();
   }
 
 }

@@ -69,8 +69,10 @@ production signing key or password belongs in Git or build logs.
    **Settings → Allow unencrypted HTTP** is enabled globally. HTTPS certificate
    validation remains enabled. Path-prefixed reverse-proxy URLs are not supported;
    use a dedicated origin. HTTP exposes authentication credentials to the network.
-3. Approve the displayed device on the server using the existing administrator
-   workflow. Resume/check approval after interruption without creating a new identity.
+3. Compare the displayed verification code with the server's pending request,
+   then approve the exact device in `/admin` (when enabled) or with
+   `nanosync server devices approve --device-id UUID --server-dir DIRECTORY`.
+   Resume/check approval after interruption without creating a new identity.
 4. Expand the server and choose **Connect existing vault**. Select a remote vault,
    grant Android **All files access**, choose a supported folder and enter its
    recovery key. Existing files participate in safe reconciliation.
@@ -98,7 +100,11 @@ allowed. Local LAN servers do not require public Internet validation.
 Conflicts preserve both versions and list affected paths; resolve them in your
 external application. Disconnect/remove stops work and forgets private connection
 state and unneeded keys while leaving shared files alone. This is not remote
-revocation or secure erasure.
+revocation or secure erasure. If the server permanently deletes a vault, Nanosync
+stops that connection with a terminal status, preserving its shared files, keys
+and journal; it does not translate remote deletion into local file removal or
+keep retrying it as a temporary outage. Disconnect it explicitly or connect a
+different existing vault.
 
 ## Recovery and platform limits
 

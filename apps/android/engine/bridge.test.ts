@@ -22,3 +22,20 @@ test("bridge errors and timed-out requests reject without accepting late complet
   await expect(bridge.call("list")).rejects.toThrow("timed out");
   bridge.complete("unknown", { ok: true, value: null });
 });
+
+test("native HTTP respects pre-aborted and in-flight request signals and ignores late success", async () => {
+  let requestId = "", calls = 0;
+  const bridge = new Bridge({ sync: () => '{"ok":true,"value":{}}', request(_method, _json, id) { calls++; requestId = id; }, event() {}, finish() {}, fail() {} });
+  const fetcher = nativeFetch(bridge, "https://example.org"), before = new AbortController();
+  before.abort(new Error("cancelled before native IO"));
+  await expect(fetcher("https://example.org/v1/test", { signal: before.signal })).rejects.toThrow("cancelled before native IO");
+  expect(calls).toBe(0);
+  const during = new AbortController();
+  const pending = fetcher(new Request("https://example.org/v1/test", { signal: during.signal }));
+  await Promise.resolve();
+  expect(calls).toBe(1);
+  during.abort(new Error("deadline reached"));
+  await expect(pending).rejects.toThrow("deadline reached");
+  bridge.complete(requestId, { ok: true, value: { status: 200, headers: {} } });
+  expect(calls).toBe(1);
+});

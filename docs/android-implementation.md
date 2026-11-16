@@ -28,7 +28,7 @@ must distinguish verified behavior from unavailable device acceptance.
   provided working JDK 21, Gradle 9.8.2, Bun and Android tools. Compile/target API 37,
   minimum API 31. Existing Linux binary outputs/pins were preserved.
 - Debug application/test APK assembly and Android lint passed without a lint baseline.
-- Android 12/API 31 and Android 17/API 37 emulators each passed 33 platform tests;
+- Android 12/API 31 and Android 17/API 37 emulators each passed 35 platform tests;
   two host-fixture cases intentionally skip in this plain instrumentation run.
 - Those two cases separately passed on **both** emulators against a disposable real
   server and a second existing client: recovery crypto, native password enrollment
@@ -37,7 +37,7 @@ must distinguish verified behavior from unavailable device acceptance.
   exceptions without preference mutation, screen-off foreground synchronization/notification,
   actual bounded JobService fallback, file-preserving disconnect, and replica
   convergence. This is not a static dashboard or a mock server demonstration.
-- Host suite: **270 passed, 0 failed** across 29 files; workspace and Android
+- Host suite: **346 passed, 0 failed** across 39 files; workspace and Android
   runtime/test/harness strict typechecks passed. Linux installer fixtures passed.
 - Host regression tests cover protocol/crypto, portable-engine adapter extraction,
   real-server Android/CLI interoperability, initial imports, rename identity,
@@ -55,6 +55,14 @@ must distinguish verified behavior from unavailable device acceptance.
 - Linux Nix package build passed after regenerating its offline dependency map for
   the Android workspace. The Android CI job builds validation APKs and runs host,
   type and lint checks; emulator tests remain separate reproducible commands.
+- Updated against main's owner/browser administration and breaking CLI redesign
+  (`b92568e`). Native enrollment shows matching verification codes; Android
+  fixtures use current owner provisioning/enrollment/connection APIs. Portable
+  orchestration retains main's reconciliation intent, ancestry bounds, apply
+  preparation and deleted-vault preflight. Request cancellation/deadlines remain
+  active through body reads without relying on newer AbortSignal APIs unavailable
+  in Android 12 WebView. Deleted vaults stop natively without removing local data.
+- All six browser administration/journey tests passed after this integration.
 
 Exact final command results are also recorded in the implementation PR. See the [Android guide](../apps/android/README.md) for reproduction commands.
 

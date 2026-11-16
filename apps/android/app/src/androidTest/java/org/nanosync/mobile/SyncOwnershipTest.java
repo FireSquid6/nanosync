@@ -85,6 +85,30 @@ public final class SyncOwnershipTest {
         }
     }
 
+    @Test public void deletedVaultStopsManualAndScheduledRetriesWithoutDiscardingKeyOrJournal() throws Exception {
+        try (Fixture f = new Fixture(1, 60_000)) {
+            String id = f.ids.get(0);
+            File journal = f.store.journalDirectory(id);
+            assertTrue(new File(journal, "durable-progress").createNewFile());
+            f.coordinator.syncNow(id, false);
+            await(() -> f.runs.size() == 1);
+            FakeRun run = f.runs.get(id);
+            run.listener.onFinished(new JSONObject().put("terminal", "vault-deleted"));
+            await(() -> f.vault(0).optBoolean("serverDeleted"));
+            assertFalse(f.vault(0).optBoolean("running"));
+            assertEquals("a".repeat(64), f.vault(0).optString("masterKeyHex"));
+            assertTrue(new File(journal, "durable-progress").exists());
+            f.coordinator.syncNow(id, true);
+            java.util.concurrent.atomic.AtomicBoolean drained = new java.util.concurrent.atomic.AtomicBoolean();
+            f.coordinator.startJob(new Object(), 60_000, () -> drained.set(true));
+            await(drained::get);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            assertSame(run, f.runs.get(id));
+            assertFalse(f.coordinator.hasBackground());
+            assertFalse(f.tombstone(id));
+        }
+    }
+
     @Test public void backgroundJobBudgetWaitsForDrainAndPreservesPreferencesAndJournal() throws Exception {
         try (Fixture f = new Fixture(1, 60_000)) {
             Object owner = new Object();

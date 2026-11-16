@@ -1,14 +1,15 @@
 import { randomUUID } from "./compatibility.ts";
 import { manifestPaths, type Head, type ManifestV1, type SyncJournal, type ChunkJournal } from "../../../packages/sync-core/src/index.ts";
-import type { AdvanceHeadRequest, VisibleObjectReference } from "@nanosync/protocol";
+import { parseRevisionId, type AdvanceHeadRequest, type VisibleObjectReference } from "@nanosync/protocol";
 import { Bridge, fromBase64, toBase64 } from "./bridge.ts";
 export interface Metadata { path: string; directory: boolean; size: number; modified: number; fileKey?: string; symlink?: boolean }
-export interface SavedEntry { path: string; metadata?: Metadata; sha256?: string }
+export interface SavedEntry { path: string; metadata?: Metadata; sha256?: string; revision?: string }
 export interface ApplyFile { id: string; path: string; offset: number; expected: { size: number; modified: number; fileKey?: string } | { missing: true }; done?: boolean }
 export interface ApplyIntent { id: string; revision: string; sequence: number; state: string; files: Record<string, ApplyFile>; baseline: Record<string, SavedEntry>; mutated?: boolean; removed?: string[]; ignorePolicy?: string }
 interface State {
   version: 1; heads: Record<"observed" | "accepted" | "applied", Head>;
   proposal: { request: AdvanceHeadRequest; frame: string; state: "prepared" | "accepted"; acceptedSequence: number | null } | null;
+  reconciliation: { baseRevision: string; localRevision: string } | null;
   entries: Record<string, SavedEntry>; conflicts: string[];
   applies: ApplyIntent[]; chunks: Record<string, { id: string; reference: VisibleObjectReference }>;
   garbage: string[];
@@ -20,8 +21,9 @@ export class Journal implements SyncJournal, ChunkJournal {
     if (!Number.isSafeInteger(cacheBytes) || cacheBytes < 0) throw new Error("invalid cache budget");
     const saved = bridge.sync<Partial<State>>("journalRead");
     if (Object.keys(saved).length && saved.version !== 1) throw new Error("unsupported Android journal");
-    this.state = Object.keys(saved).length ? saved as State : { version: 1, heads: { observed: emptyHead(), accepted: emptyHead(), applied: emptyHead() }, proposal: null, entries: {}, conflicts: [], applies: [], chunks: {}, garbage: [] };
+    this.state = Object.keys(saved).length ? saved as State : { version: 1, heads: { observed: emptyHead(), accepted: emptyHead(), applied: emptyHead() }, proposal: null, reconciliation: null, entries: {}, conflicts: [], applies: [], chunks: {}, garbage: [] };
     this.state.garbage ??= [];
+    this.state.reconciliation ??= null;
   }
   save() { this.bridge.sync("journalWrite", { state: this.state }); }
   head(kind: "observed" | "accepted" | "applied"): Head { return { ...this.state.heads[kind] }; }
@@ -45,7 +47,32 @@ export class Journal implements SyncJournal, ChunkJournal {
     p.state = "accepted"; p.acceptedSequence = sequence; this.state.heads.accepted = { revisionId, sequence }; this.save();
   }
   clearProposal() { this.state.proposal = null; this.save(); }
-  discardStaleProposal(id: string) { if (this.state.proposal?.request.proposedRevision.revisionId !== id) throw new Error("wrong stale proposal"); this.clearProposal(); }
+  reconciliation(): { baseRevision: string; localRevision: string } | null {
+    const current = this.state.reconciliation;
+    return current ? { baseRevision: parseRevisionId(current.baseRevision), localRevision: parseRevisionId(current.localRevision) } : null;
+  }
+  beginReconciliation(baseRevision: string, localRevision: string) {
+    parseRevisionId(baseRevision); parseRevisionId(localRevision);
+    const current = this.reconciliation();
+    if (current) {
+      if (current.baseRevision !== baseRevision || current.localRevision !== localRevision) throw new Error("reconciliation already pending");
+      return;
+    }
+    const proposal = this.state.proposal;
+    if (this.head("applied").revisionId !== baseRevision || proposal?.state !== "prepared" ||
+        proposal.request.proposedRevision.revisionId !== localRevision) throw new Error("reconciliation branch changed");
+    this.state.reconciliation = { baseRevision, localRevision }; this.save();
+  }
+  finishReconciliation() {
+    const proposal = this.state.proposal;
+    if (!this.reconciliation() || proposal?.state !== "accepted" || this.head("applied").revisionId !== proposal.request.proposedRevision.revisionId)
+      throw new Error("reconciliation not applied");
+    this.state.reconciliation = null; this.state.proposal = null; this.save();
+  }
+  discardStaleProposal(id: string) {
+    if (this.state.proposal?.state !== "prepared" || this.state.proposal.request.proposedRevision.revisionId !== id) throw new Error("wrong stale proposal");
+    this.clearProposal();
+  }
   restoreProposal() { return null; }
   discardStaleRestore() { throw new Error("Android restore unsupported"); }
   finishRestoreProposal() { throw new Error("Android restore unsupported"); }
@@ -56,7 +83,7 @@ export class Journal implements SyncJournal, ChunkJournal {
     const entries: Record<string, SavedEntry> = {}, metadata = new Map(inventory.map(e => [e.path, e]));
     for (const [path, entry] of manifestPaths(manifest)) if (entry.kind !== "tombstone") {
       const previous = this.state.entries[entry.id], current = metadata.get(path);
-      entries[entry.id] = !current && previous?.path === path ? structuredClone(previous) : { path, metadata: current, sha256: entry.sha256 };
+      entries[entry.id] = !current && previous?.path === path ? { ...structuredClone(previous), revision: manifest.revisionId } : { path, metadata: current, sha256: entry.sha256, revision: manifest.revisionId };
     }
     this.state.entries = entries; this.save();
   }

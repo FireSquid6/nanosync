@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { ClientLocal } from "@nanosync/client-local";
 import { applyNewFiles, hydrateFile, LinuxScanner, LinuxWatcher, type ScanOptions } from "@nanosync/linux-client";
-import { HttpRemote, SyncEngine, type RemoteOptions } from "@nanosync/sync-core";
+import { HttpRemote, RemoteError, SyncEngine, type RemoteOptions } from "@nanosync/sync-core";
 import { parseDeviceId, parseVaultId } from "@nanosync/protocol";
 import { acquireSyncLock } from "./sync-lock.ts";
 import { privateDirectory } from "./security.ts";
@@ -34,6 +34,8 @@ export class SyncRunner {
   private watcher?: LinuxWatcher;
   private active?: Promise<{ revisionId: string; sequence: number }>;
   private stopped = false;
+  private stopping?: Promise<void>;
+  private readonly cancellation = new AbortController();
 
   private constructor(options: SyncOptions, unlock: () => void) {
     this.unlock = unlock;
@@ -47,7 +49,7 @@ export class SyncRunner {
     try {
       this.scanner = new LinuxScanner(options.syncDirectory, this.local, options.scan);
       const remote = new HttpRemote({ baseUrl: options.baseUrl, token: options.token, vaultId: this.vault,
-        fetch: options.fetch ?? fetch, journal: this.local });
+        fetch: options.fetch ?? fetch, journal: this.local, signal: this.cancellation.signal });
       this.engine = new SyncEngine({ vaultId: this.vault, deviceId: this.device, masterKey: this.key,
         local: this.local, scanner: this.scanner, remote, randomUUID, now: () => new Date().toISOString(),
         apply: (manifest, sequence, key) => applyNewFiles(this.scanner.root, this.local, remote, manifest, sequence, key),
@@ -71,16 +73,18 @@ export class SyncRunner {
     catch (error) { unlock(); throw error; }
   }
 
-  async stop(): Promise<void> {
-    if (this.stopped) return;
-    this.stopped = true;
-    try {
-      this.watcher?.close();
-      await this.active?.catch(() => {});
-    } finally {
-      try { this.local.close(); }
-      finally { this.key.fill(0); this.unlock(); }
-    }
+  stop(): Promise<void> {
+    return this.stopping ??= (async () => {
+      this.stopped = true;
+      this.cancellation.abort();
+      try {
+        this.watcher?.close();
+        await this.active?.catch(() => {});
+      } finally {
+        try { this.local.close(); }
+        finally { this.key.fill(0); this.unlock(); }
+      }
+    })();
   }
 
   syncOnce(): Promise<{ revisionId: string; sequence: number }> {
@@ -98,29 +102,45 @@ export class SyncRunner {
 
   /** Foreground loop: watcher events are hints; periodic full passes catch missed notifications. */
   async watch(signal: AbortSignal, onSuccess: (head: { revisionId: string; sequence: number }) => void,
-    onError: (error: unknown) => void): Promise<void> {
-    let lastPoll = 0;
-    while (!signal.aborted && !this.stopped) {
-      const now = Date.now();
-      let shouldSync = now - lastPoll >= this.pollMs;
-      if (this.watcher) {
-        try { shouldSync = this.watcher.ready(now) || shouldSync; }
-        catch (error) { if (shouldSync) onError(error); }
-      }
-      if (shouldSync) {
-        lastPoll = Date.now();
-        try {
-          const head = await this.syncOnce();
-          if (!signal.aborted && !this.stopped) {
-            if (!this.watcher) { this.watcher = new LinuxWatcher(this.scanner); this.watcher.start(); }
-            onSuccess(head);
+    onError: (error: unknown) => void,
+    timing = { now: Date.now, wait: (signal: AbortSignal) => delay(250, undefined, { signal }) }): Promise<void> {
+    const abort = () => { void this.stop(); };
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+    try {
+      let lastPoll = -Infinity;
+      while (!signal.aborted && !this.stopped) {
+        const now = timing.now();
+        let shouldSync = now - lastPoll >= this.pollMs;
+        if (this.watcher) {
+          try { shouldSync = this.watcher.ready(now) || shouldSync; }
+          catch (error) { if (shouldSync) onError(error); }
+        }
+        if (shouldSync) {
+          lastPoll = timing.now();
+          try {
+            const head = await this.syncOnce();
+            if (!signal.aborted && !this.stopped) {
+              if (!this.watcher) { this.watcher = new LinuxWatcher(this.scanner); this.watcher.start(); }
+              onSuccess(head);
+            }
+          } catch (error) {
+            if (signal.aborted || this.stopped) break;
+            onError(error);
+            if (error instanceof RemoteError && error.code === "VAULT_DELETED") {
+              this.watcher?.close();
+              throw error;
+            }
           }
-        } catch (error) { onError(error); }
+        }
+        if (!signal.aborted && !this.stopped) {
+          try { await timing.wait(signal); }
+          catch (error) { if (!signal.aborted) throw error; }
+        }
       }
-      if (!signal.aborted && !this.stopped) {
-        try { await delay(250, undefined, { signal }); }
-        catch (error) { if (!signal.aborted) throw error; }
-      }
+    } finally {
+      signal.removeEventListener("abort", abort);
+      if (signal.aborted) await this.stop();
     }
   }
 

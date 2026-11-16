@@ -171,6 +171,11 @@ public final class MainActivity extends Activity {
             if (!open) continue;
             text(content, server.optString("baseUrl"), 14);
             text(content, "Device: " + server.optString("deviceId") + "\nFingerprint: " + server.optString("fingerprint"), 14);
+            if (!"approved".equals(server.optString("enrollmentStatus"))) {
+                try { text(content, "Verification code: " + SyncCoordinator.enrollmentVerificationCode(server.getString("deviceId"), server.getString("fingerprint"))
+                        + "\nCompare this exact code with the server owner before approval.", 14); }
+                catch (Exception ignored) { /* Older/incomplete records can still be removed and enrolled again. */ }
+            }
             String error = server.optString("error", "");
             if (!error.isEmpty()) text(content, "Server error: " + error + "\nCheck the server address, connectivity and approval, then retry.", 16);
             button(content, "Resume / check device approval", () -> serverCommand(id, () -> actions.resumeEnrollment(id)));

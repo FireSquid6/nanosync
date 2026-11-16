@@ -3,9 +3,11 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
-import { bootstrapWorkflow, credentials, joinVault } from "../../../packages/cli/src/client.ts";
+import { enrollServer, pendingEnrollments, servers as registrations, unlockVault, key } from "../../../packages/cli/src/vault-client.ts";
+import { createConnection } from "../../../packages/cli/src/connections.ts";
+import { provisionLocalVault } from "../../../packages/cli/src/local-provision.ts";
 import { main } from "../../../packages/cli/src/main.ts";
-import { runServer } from "../../../packages/cli/src/server.ts";
+import { initializeServerOwner, approveLocalDevice, localOwner, withLocalOwner, runServer } from "../../../packages/cli/src/server.ts";
 import { HttpRemote } from "../../../packages/sync-core/src/index.ts";
 import { TestHost } from "./host.test-helper.ts";
 import type { RunContext } from "./runtime.ts";
@@ -17,19 +19,25 @@ async function fixture() {
   const port = (listener.address() as { port: number }).port; await new Promise<void>(r => listener.close(() => r()));
   const serverDir = temp(), cliDir = temp(), cliFiles = temp(), androidFiles = temp(), androidPrivate = temp(), enrollment = temp();
   writeFileSync(join(serverDir, "pepper.hex"), "a".repeat(64), { mode: 0o600 });
-  const server = await runServer({ directory: serverDir, port, scanIntervalMs: 3600000 }); servers.push(server);
+  await initializeServerOwner(serverDir, "test password");
   let recovery = "";
-  await bootstrapWorkflow(cliDir, server.url, join(serverDir, "bootstrap.hex"), "test password", async text => { recovery = text; });
-  const androidId = crypto.randomUUID();
-  await joinVault(enrollment, server.url, androidId, "test password");
-  expect(await main(["approve", androidId, "--client-dir", cliDir])).toBe(0);
-  await joinVault(enrollment, server.url, androidId, undefined, recovery);
-  const creds = credentials(enrollment);
+  const created = await provisionLocalVault(serverDir, "Android interop", async text => { recovery = text; });
+  const server = await runServer({ directory: serverDir, port, scanIntervalMs: 3600000 }); servers.push(server);
+  for (const [directory, name] of [[cliDir, "desktop"], [enrollment, "android"]] as const) {
+    expect((await enrollServer(directory, server.url, "test password", name, 0)).status).toBe("pending");
+    approveLocalDevice(serverDir, pendingEnrollments(directory)[0]!.deviceId);
+    expect((await enrollServer(directory, server.url, undefined, name, 0)).status).toBe("approved");
+    await unlockVault(directory, registrations(directory)[0]!, created.vaultId, recovery);
+  }
+  const desktop = registrations(cliDir)[0]!, android = registrations(enrollment)[0]!;
+  const creds = { ...android, vaultId: created.vaultId, masterKey: Buffer.from(key(enrollment, android.serverId, created.vaultId)!).toString("hex") };
+  createConnection(cliDir, cliFiles, desktop.serverId, created.vaultId, desktop.deviceId);
   const context: RunContext = { server: { baseUrl: server.url, token: creds.token, deviceId: creds.deviceId }, vault: { id: crypto.randomUUID(), vaultId: creds.vaultId, rootPath: androidFiles, masterKeyHex: creds.masterKey, effectiveMobileAllowed: false }, allowHttp: true };
   const host = new TestHost(androidFiles, androidPrivate, fetch, server.url);
-  const cli = async () => { expect(await main(["sync", "--client-dir", cliDir, "--sync-dir", cliFiles])).toBe(0); };
+  const cli = async () => { expect(await main(["client", "sync", "--client-dir", cliDir, "--path", cliFiles])).toBe(0); };
   const remote = new HttpRemote({ baseUrl: server.url, token: creds.token, vaultId: creds.vaultId, fetch });
-  return { host, context, cli, cliFiles, androidFiles, androidPrivate, remote, recovery };
+  return { host, context, cli, cliFiles, androidFiles, androidPrivate, remote, recovery,
+    deleteVault: () => withLocalOwner(serverDir, owner => owner.markVaultDeleted(localOwner, created.vaultId)) };
 }
 
 test("Android populated-folder import interoperates both ways with CLI; exclusions and rename identity survive", async () => {
@@ -259,4 +267,49 @@ test("legacy Request without body streams still downloads and publishes through 
     await e.host.run(e.context);
   } finally { globalThis.Request = ModernRequest; }
   await e.cli(); expect(readFileSync(join(e.cliFiles, "phone"))).toEqual(Buffer.from([0, 255, 128, 1]));
+}, 30000);
+
+
+test("deleted vault is terminal without uploading or changing local files, journal or keys", async () => {
+  const e = await fixture();
+  writeFileSync(join(e.cliFiles, "note"), "synced"); await e.cli(); await e.host.run(e.context);
+  writeFileSync(join(e.androidFiles, "note"), "precious offline edit");
+  await e.deleteVault();
+  const before = readFileSync(join(e.androidPrivate, "state"), "utf8"), start = e.host.calls.length;
+  const result = await e.host.run(e.context);
+  expect(result).toEqual({ terminal: "vault-deleted" });
+  expect(readFileSync(join(e.androidFiles, "note"), "utf8")).toBe("precious offline edit");
+  expect(e.context.vault.masterKeyHex).toHaveLength(64);
+  const after = JSON.parse(readFileSync(join(e.androidPrivate, "state"), "utf8"));
+  expect(after.heads).toEqual(JSON.parse(before).heads);
+  expect(e.host.calls.slice(start).some(call => call.method === "http" && call.args.method !== "GET")).toBe(false);
+}, 30000);
+
+test("reconciliation survives lost merge acceptance and interrupted staging without losing the offline branch", async () => {
+  const e = await fixture();
+  writeFileSync(join(e.cliFiles, "note"), "base"); await e.cli(); await e.host.run(e.context);
+  writeFileSync(join(e.androidFiles, "note"), "offline edit");
+  writeFileSync(join(e.cliFiles, "note"), "online edit"); await e.cli();
+  let lost = false;
+  const interrupted = new TestHost(e.androidFiles, e.androidPrivate, async request => {
+    const response = await fetch(request);
+    if (!lost && new URL(request.url).pathname === "/v1/head/advance" && (await response.clone().json()).status === "accepted") {
+      lost = true; await response.arrayBuffer(); throw new Error("merge acceptance lost");
+    }
+    return response;
+  }, e.context.server.baseUrl);
+  await expect(interrupted.run(e.context)).rejects.toThrow("merge acceptance lost");
+  const branch = JSON.parse(readFileSync(join(e.androidPrivate, "state"), "utf8"));
+  expect(branch.reconciliation).not.toBeNull();
+  expect(Object.values(branch.entries).some((entry: any) => entry.revision === branch.reconciliation.localRevision)).toBe(true);
+  const staging = new TestHost(e.androidFiles, e.androidPrivate, fetch, e.context.server.baseUrl);
+  staging.failure = method => { if (method === "stageWrite") throw new Error("staging interrupted"); };
+  await expect(staging.run(e.context)).rejects.toThrow("staging interrupted");
+  expect(readFileSync(join(e.androidFiles, "note"), "utf8")).toBe("offline edit");
+  const resumed = new TestHost(e.androidFiles, e.androidPrivate, fetch, e.context.server.baseUrl);
+  const result = await resumed.run(e.context);
+  const contents = [readFileSync(join(e.androidFiles, "note"), "utf8"), ...result.conflicts.map((path: string) => readFileSync(join(e.androidFiles, path), "utf8"))];
+  expect(new Set(contents)).toEqual(new Set(["offline edit", "online edit"]));
+  const finished = JSON.parse(readFileSync(join(e.androidPrivate, "state"), "utf8"));
+  expect(finished.reconciliation).toBeNull(); expect(finished.proposal).toBeNull(); expect(finished.applies).toHaveLength(0);
 }, 30000);

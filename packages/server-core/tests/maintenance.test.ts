@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm, writeFile, chmod, mkdir, copyFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, chmod, mkdir, copyFile, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MaintenanceRepository, ServerMetadataDatabase, selectRetention } from "@nanosync/server-metadata";
@@ -242,10 +242,122 @@ test("offline staged backup restores private metadata and verifies copied cipher
     const restored = new ServerMetadataDatabase(join(stage, "metadata.sqlite"));
     try {
       const maintenance = new ServerMaintenance(new MaintenanceRepository(restored), stagedStorage);
-      expect(restored.pragmas().userVersion).toBe(5);
+      expect(restored.pragmas().userVersion).toBe(6);
       expect(await maintenance.scan(now)).toEqual({ verified: 1, missing: 0, corrupt: 0 });
       await stagedStorage.delete(objectKey("chunk", id));
       expect((await maintenance.scan(now)).missing).toBe(1);
     } finally { restored.close(); }
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("permanent cleanup reclaims uncataloged ciphertext, survives restart, and isolates namespaces", async () => {
+  const root = await mkdtemp(join(tmpdir(), "nanosync-delete-"));
+  const path = join(root, "metadata.sqlite"), second = "22345678-1234-1234-9234-123456789abc";
+  let db = new ServerMetadataDatabase(path);
+  try {
+    const storage = new LocalFilesystem(join(root, "objects"));
+    db.writeTransaction(tx => {
+      for (const id of [vault, second]) tx.run("INSERT INTO server_state(singleton,vault_id,name,current_sequence) VALUES(NULL,?,?,0)", [id,id]);
+    });
+    const { VaultRepository } = await import('@nanosync/server-metadata');
+    new VaultRepository(db).markDeleted(vault, {origin:'server-local',actorId:null}, now);
+    for (const id of [vault, second]) {
+      const bytes = frame('a'.repeat(64), id);
+      await storage.putIfAbsent(objectKey('chunk','a'.repeat(64),id), new Blob([bytes]).stream(), createHash('sha256').update(bytes).digest('hex'));
+    }
+    const extra = frame('b'.repeat(64), vault);
+    await storage.putIfAbsent(objectKey('chunk','b'.repeat(64),vault), new Blob([extra]).stream(), createHash('sha256').update(extra).digest('hex'));
+    const broken = Object.create(storage);
+    let deletes = 0;
+    broken.delete = async (key: string) => {
+      if (++deletes === 2) throw Error('disk unavailable');
+      return storage.delete(key);
+    };
+    await expect(new ServerMaintenance(new MaintenanceRepository(db), broken).cleanupDeleted()).rejects.toThrow('disk unavailable');
+    db.close(); db = new ServerMetadataDatabase(path);
+    const service = new ServerMaintenance(new MaintenanceRepository(db), storage);
+    await service.cleanupDeleted(); await service.cleanupDeleted();
+    expect(await storage.existsBatch([objectKey('chunk','a'.repeat(64),vault),objectKey('chunk','a'.repeat(64),second)])).toEqual([false,true]);
+    expect(new VaultRepository(db).deletions()[0]?.cleanupState).toBe('complete');
+    expect(db.get<{name:null;current_sequence:number}>('SELECT name,current_sequence FROM server_state WHERE vault_id=?',[vault])).toEqual({name:null,current_sequence:0});
+  } finally { db.close(); await rm(root,{recursive:true,force:true}); }
+});
+
+
+test("restart reclaims SIGKILL-interrupted staging before deletion completes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "nanosync-crashed-upload-"));
+  const storageRoot = join(root, "objects");
+  const dbPath = join(root, "metadata.sqlite");
+  let db = new ServerMetadataDatabase(dbPath);
+  const modulePath = new URL("../../server-object-storage/src/index.ts", import.meta.url).href;
+  const child = Bun.spawn([process.execPath, "--eval", `
+    import { LocalFilesystem } from ${JSON.stringify(modulePath)};
+    const storage = new LocalFilesystem(${JSON.stringify(storageRoot)});
+    const stream = new ReadableStream({ start(c) { c.enqueue(new Uint8Array(4096)); } });
+    void storage.putIfAbsent(${JSON.stringify(objectKey("chunk", "a".repeat(64)))}, stream, "0".repeat(64));
+    setInterval(() => {}, 1000);
+  `], { stdout: "pipe", stderr: "pipe" });
+  try {
+    let staged = false;
+    for (let attempt = 0; attempt < 300; attempt++) {
+      const names = await readdir(join(storageRoot, ".nanosync-tmp")).catch(() => []);
+      for (const name of names) {
+        if ((await stat(join(storageRoot, ".nanosync-tmp", name))).size === 4096) staged = true;
+      }
+      if (staged) break;
+      await Bun.sleep(10);
+    }
+    expect(staged).toBe(true);
+    await expect(new LocalFilesystem(storageRoot).list()).rejects.toMatchObject({ code: "UNSAFE_PATH" });
+    const activeNames = await readdir(join(storageRoot, ".nanosync-tmp"));
+    expect(activeNames).toHaveLength(1);
+    expect((await stat(join(storageRoot, ".nanosync-tmp", activeNames[0]!))).size).toBe(4096);
+    child.kill("SIGKILL");
+    await child.exited;
+    db.writeTransaction(tx => tx.run("INSERT INTO server_state(singleton,vault_id,current_head_revision_id,current_sequence) VALUES(1,?,NULL,0)", [vault]));
+    const { VaultRepository } = await import("@nanosync/server-metadata");
+    new VaultRepository(db).markDeleted(vault, { origin: "server-local", actorId: null }, 20);
+    db.close();
+    db = new ServerMetadataDatabase(dbPath);
+    const storage = new LocalFilesystem(storageRoot);
+    const metadata = new MaintenanceRepository(db);
+    await new ServerMaintenance(metadata, storage).cleanupDeleted();
+    expect(metadata.deletedVaults()[0]?.cleanupState).toBe("complete");
+    expect(await readdir(join(storageRoot, ".nanosync-tmp"))).toEqual([]);
+    expect((await storage.list()).keys).toEqual([]);
+  } finally {
+    child.kill("SIGKILL"); await child.exited;
+    db.close(); await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("failed deleted-vault cleanup reports failure without starving later vaults", async () => {
+  const root = await mkdtemp(join(tmpdir(), "nanosync-cleanup-isolation-"));
+  const db = new ServerMetadataDatabase(":memory:");
+  const second = "22345678-1234-1234-9234-123456789abc";
+  try {
+    const storage = new LocalFilesystem(join(root, "objects"));
+    const { VaultRepository } = await import("@nanosync/server-metadata");
+    const vaults = new VaultRepository(db);
+    for (const id of [vault, second]) {
+      db.writeTransaction(tx => tx.run("INSERT INTO server_state(singleton,vault_id,name,current_sequence) VALUES(NULL,?,?,0)", [id, id]));
+      const bytes = frame("a".repeat(64), id);
+      await storage.putIfAbsent(objectKey("chunk", "a".repeat(64), id), new Blob([bytes]).stream(), createHash("sha256").update(bytes).digest("hex"));
+      vaults.markDeleted(id, { origin: "server-local", actorId: null }, now);
+    }
+    const failing = Object.create(storage) as LocalFilesystem;
+    failing.list = async (prefix, options) => {
+      if (prefix === `objects/v1/${vault}`) throw Error("unreadable namespace");
+      return storage.list(prefix, options);
+    };
+    const service = new ServerMaintenance(new MaintenanceRepository(db), failing);
+    for (let pass = 0; pass < 2; pass++) {
+      await expect(service.cleanupDeleted()).rejects.toThrow("unreadable namespace");
+      expect(vaults.deletions().find(row => row.vaultId === vault)?.cleanupState).toBe("pending");
+      expect(vaults.deletions().find(row => row.vaultId === second)?.cleanupState).toBe("complete");
+      expect(await storage.existsBatch([objectKey("chunk", "a".repeat(64), vault), objectKey("chunk", "a".repeat(64), second)])).toEqual([true, false]);
+    }
+    await new ServerMaintenance(new MaintenanceRepository(db), storage).cleanupDeleted();
+    expect(vaults.deletions().every(row => row.cleanupState === "complete")).toBe(true);
+  } finally { db.close(); await rm(root, { recursive: true, force: true }); }
 });

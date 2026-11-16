@@ -18,6 +18,16 @@ public final class SyncCoordinatorTest {
         assertEquals("http://example.com", SyncCoordinator.canonicalServerUrl("http://example.com/", true));
     }
 
+    @Test public void verificationCodeMatchesProtocolAndUsesSavedRequestIdentity() {
+        byte[] bytes = new byte[32];
+        for (int i = 0; i < bytes.length; i++) bytes[i] = (byte) i;
+        String fingerprint = android.util.Base64.encodeToString(bytes, android.util.Base64.URL_SAFE | android.util.Base64.NO_WRAP | android.util.Base64.NO_PADDING);
+        assertEquals("123E4567-E89B-42D3-A456-426614174000-0001020304050607",
+                SyncCoordinator.enrollmentVerificationCode("123e4567-e89b-42d3-a456-426614174000", fingerprint));
+        try { SyncCoordinator.enrollmentVerificationCode("123e4567-e89b-42d3-a456-426614174000", fingerprint + "="); fail("Accepted noncanonical fingerprint"); }
+        catch (IllegalArgumentException expected) { }
+    }
+
     @Test public void disconnectRemovesOnlyConnectionAndPrivateJournal() throws Exception {
         android.content.Context context = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().getTargetContext();
         AppStore store = AppStore.get(context);

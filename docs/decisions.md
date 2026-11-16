@@ -8,7 +8,7 @@
 | Server tenancy | One owner/password and multiple independent vaults per server (including zero vaults) |
 | Topology | Central authoritative server |
 | Initial clients | Portable sync core with Linux foreground CLI adapters and native Android shared-folder dashboard/adapters |
-| Encryption | Client-side encryption; server does not have the vault master key |
+| Encryption | Client/browser-side encryption; offline server-local provisioning may handle keys transiently, never persist them |
 | Recovery | User-held recovery key; no server-side plaintext recovery |
 | Device enrollment | Password authentication, admin approval, then recovery-key entry |
 | Sharing | No multi-user sharing in version 1 |
@@ -34,7 +34,7 @@
 | Server durability | Validate checksums; operator manages backups |
 | Device revocation | Prevent future server access only |
 | Transport security | External reverse proxy, VPN, or trusted network; no built-in TLS |
-| CLI role | Server runtime, bootstrap/enrollment, device administration, maintenance reports, and foreground one-shot/continuous sync; no client service package or local IPC |
+| CLI role | Explicit server/client groups; owner-local/browser provisioning, client enrollment/bind/sync; no service installation or local IPC |
 
 ## Frozen version 1 implementation decisions
 
@@ -49,7 +49,7 @@ These choices are part of persistent format `1` and protocol `1`. Details and li
 | Metadata DB | SQLite through `bun:sqlite`, WAL, foreign keys, 5-second busy timeout, `synchronous=FULL`, and explicit `BEGIN IMMEDIATE` writes. |
 | Filesystems | Regular files/directories plus owner-executable bit only. Reject links, special files, and unsafe names visibly; no xattr, ACL, or sparse fidelity. |
 | Retention/GC | UTC buckets select newest accepted revision; 24-hour grace plus recheck; current/conflicts/transfers/needed merge bases remain protected. |
-| Network/admin | Loopback by default, acknowledged non-loopback exposure and external TLS; CLI-only administration uses the same server API. |
+| Network/admin | Loopback default; explicit nonloopback sync acknowledgement and external TLS. Opt-in embedded owner browser UI with separate sessions; local owner operations use shared services, not device authority. |
 | Bootstrap | Explicit injected authorization; staged singleton initialization, normal streaming object validation, then atomic zero-parent genesis publication and permanent sealing. No credential is issued in this stage. The external authorization boundary remains available only as an independent handoff for one-time initial-device activation; bootstrap mutations stay sealed. |
 | Authentication operations | Password sessions last 10 minutes before enrollment and 24 hours after binding. At most 64 live sessions, 32 pending enrollments, and 64 devices are retained. Five failures in 15 minutes lock login for 15 minutes. Argon2 work is limited to two concurrent jobs. Audit events are retained 365 days. Self-revocation and last-active-administrator revocation are forbidden. |
 
@@ -77,7 +77,7 @@ Keep protocol, cryptography, merge logic, and local metadata semantics in a reus
 
 ### Trusted proxies and transport deployment
 
-Define trusted-proxy address matching, accepted forwarding headers, reverse-proxy body/time limits, external TLS deployment examples, and detection/warnings for unsafe exposure.
+Exact socket-peer IP allowlist plus configured HTTPS external origin; no forwarding headers establish trust. See operations for deployment. Nonloopback browser HTTP is always forbidden.
 
 ### Database lifecycle and backups
 
@@ -119,3 +119,24 @@ Architecture is ready for implementation planning when:
 - Filesystem edge-case behavior is explicit.
 - Retention and garbage collection have executable acceptance tests.
 - A prototype validates chunked upload, interruption recovery, stale-head merge, and 50 GB streaming without loading whole files into memory.
+
+
+## Owner administration redesign (issue #5)
+
+This decision supersedes CLI-only administration and approved-client provisioning.
+Vault mutations belong to server-local or password-authenticated browser owner
+operations, never sync-device authority. Browser sessions are memory-only, scoped
+to administration, with 30-minute idle/12-hour absolute expiry, CSRF and rate limits.
+The password suffices to approve devices but does not derive any vault key.
+
+The maintained Inquirer CLI and copied Paper UI/Radix controls provide interactive
+workflows with flag alternatives. Old command aliases, bootstrap user workflow and
+stored-state migration are intentionally unsupported. Protocol/object crypto remain
+v1; reset old setup deliberately with backups, not automatic migration.
+
+Server-local provisioning is an accepted transient plaintext-key exception; explicit
+protected recovery delivery is permitted but ordinary server persistence remains
+encrypted-only. Browser crypto protects against ordinary persistence inspection,
+not malicious code served by a compromised origin. Deletion is owner-confirmed,
+tombstones immediately, overrides only that vault's retention, and retries durable
+cleanup. Removal, revocation and deletion never silently erase client plaintext.

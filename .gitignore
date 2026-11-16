@@ -41,3 +41,7 @@ local.properties
 /apps/android/app/src/main/assets/engine.js
 /apps/android/app/src/main/assets/engine.html
 /apps/android/app/src/main/assets/third-party-notices.txt
+
+# browser test reports
+test-results/
+playwright-report/
