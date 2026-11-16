@@ -416,3 +416,25 @@ Exact changed paths / key functions:
 - `packages/linux-client/src/apply.ts` — applied manifest entry metadata.
 - `packages/cli/tests/sync.test.ts` — executable-only dirty/clean disconnect CLI regressions.
 - `docs/implementation-progress.md` — contracts and evidence.
+
+## PTY process-exit race review fix (completed)
+
+### Contracts / regression
+
+- Both terminal harnesses treat PTY EOF/Linux EIO as terminal closure, not process timeout. They wait for child exit using the remaining monotonic 15-second deadline; only an actual expired wait kills and reaps the child. Unexpected read errors remain visible.
+- Hoisted the existing harness programs so the regression exercises exactly the same subprocess boundary as the interactive CLI tests. A fixture completes the prompts, closes its terminal descriptors, then stays alive for 400ms before exiting. Both successful and expected-error exit codes are preserved. No production CLI behavior changed.
+
+### Evidence
+
+- Deterministic red before the fix: the fixture produced all initialization prompts but the harness killed it and reported timeout after approximately 45ms. After the fix, both harness cases pass with their original exit codes.
+- `bun test packages/cli/tests/terminal.test.ts`: **3 passed, 0 failed**.
+- `bun test packages/cli`: **62 passed, 0 failed**, 623 assertions.
+- `bun run typecheck`: **all eight packages passed**.
+- `bun test`: **283 passed, 0 failed**, 2042 assertions.
+- `git diff --check`: passed.
+
+### Review handoff
+
+Exact changed paths / key programs:
+- `packages/cli/tests/terminal.test.ts` — `initializationScript`, `confirmationScript`, delayed-exit subprocess regression.
+- `docs/implementation-progress.md` — contracts and verification evidence.
