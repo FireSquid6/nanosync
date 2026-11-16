@@ -151,6 +151,23 @@ public final class SyncOwnershipTest {
         }
     }
 
+    @Test public void slowRetriesReserveCapacityForFreshVaults() throws Exception {
+        try (Fixture f = new Fixture(6, 1000)) {
+            for (int i = 0; i < 5; i++) f.coordinator.syncNow(f.ids.get(i), false);
+            await(() -> f.runs.size() == 4 && f.runs.values().stream().allMatch(run -> run.cancelled));
+            List<FakeRun> original = new ArrayList<>(f.runs.values());
+            for (FakeRun run : original) run.drain();
+            await(() -> f.runs.containsKey(f.ids.get(4)) && f.runs.values().stream().filter(run -> !run.cancelled).count() == 4);
+            f.runs.get(f.ids.get(4)).listener.onFinished(new JSONObject().put("revisionId", UUID.randomUUID().toString())
+                    .put("sequence", 1).put("pendingUploads", 0).put("pendingDownloads", 0));
+            await(() -> !f.vault(4).optBoolean("running"));
+            f.coordinator.syncNow(f.ids.get(5), false);
+            await(() -> f.runs.containsKey(f.ids.get(5)));
+            assertFalse(f.runs.get(f.ids.get(5)).cancelled);
+            assertTrue(f.vault(5).optBoolean("running"));
+        }
+    }
+
     @Test public void disconnectPersistsCleanupUntilDrainAndRecreationFinishesPendingCleanup() throws Exception {
         try (Fixture f = new Fixture(1, 60_000)) {
             String id = f.ids.get(0);

@@ -289,6 +289,7 @@ public final class SyncCoordinator implements UiActions {
         File root;
         String serverId, vaultId;
         long lastEvent;
+        int previousYields;
     }
     private static final class StartRequest {
         final boolean manual, override;
@@ -392,10 +393,14 @@ public final class SyncCoordinator implements UiActions {
             if (vault == null || server == null) return;
             if (recovery == null && vault.optString("masterKeyHex").isEmpty()) return;
             if (!manual && (vault.optBoolean("paused") || !vault.optBoolean("background") || !serviceRunning)) return;
-            if (runs.size() >= 4 || !dispatching && !queued.isEmpty()) {
+            // Repeatedly slow passes may use three slots, never all four. The reserved
+            // fresh-pass slot keeps healthy/new vaults responsive while large scans get
+            // progressively longer windows without monopolizing every execution slot.
+            long slowRuns = runs.values().stream().filter(run -> run.previousYields > 0).count();
+            if (runs.size() >= 4 || vault.optInt("runTimeouts") > 0 && slowRuns >= 3 || !dispatching && !queued.isEmpty()) {
                 queued.put(id, new StartRequest(manual, override, recovery));
                 vaultState(id, value -> value.put("running", false).put("status", "Queued"));
-                main.post(this::drainQueue);
+                if (!dispatching) main.post(this::drainQueue);
                 return;
             }
             boolean mobile = effectiveMobileAllowed(config, vault, override);
@@ -408,6 +413,7 @@ public final class SyncCoordinator implements UiActions {
                     return;
                 }
                 Run run = new Run(); run.manual = manual; run.override = override; run.recovery = recovery;
+                run.previousYields = vault.optInt("runTimeouts");
                 run.policy = policy(config, vault, override);
                 run.root = new File(vault.getString("rootPath"));
                 run.serverId = server.getString("id"); run.vaultId = vault.getString("vaultId");
@@ -556,7 +562,10 @@ public final class SyncCoordinator implements UiActions {
                 String id = entry.getKey(); Run run = entry.getValue(); JSONObject vault = findVault(config, id);
                 if (vault == null || !run.policy.equals(policy(config, vault, run.override))
                         || !networkAllowed(effectiveMobileAllowed(config, vault, run.override))
-                        || !run.manual && (!serviceRunning || vault.optBoolean("paused") || !vault.optBoolean("background"))) cancel(id, run);
+                        || !run.manual && (!serviceRunning || vault.optBoolean("paused") || !vault.optBoolean("background"))) {
+                    run.timedOut = false; // Explicit policy/permission stops must not requeue a yielded manual pass.
+                    cancel(id, run);
+                }
             }
             JSONArray servers = config.optJSONArray("servers");
             for (int i = 0; i < servers.length(); i++) {
