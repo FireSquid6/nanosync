@@ -1,4 +1,10 @@
-# Nanosync
+# Engineering documentation
+
+For installation, first sync, server operation, administration, ignore rules, troubleshooting, and security guidance, start with the authoritative [user documentation](../apps/site/content/docs/introduction.md).
+
+This directory retains requirements, design rationale, protocol contracts, and implementation notes. Goals, suggested configuration, mobile plans, and library capabilities below are not a list of shipped CLI features. Linux is the only shipped sync client; no CLI history or restore command exists.
+
+## Project overview
 
 Nanosync is a self-hosted, client-encrypted file synchronization system with portable client libraries and a Bun CLI for server administration and Linux synchronization. One owner can operate multiple independent vaults and local replicas on a server.
 

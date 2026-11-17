@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -462,4 +463,43 @@ test('two tabs cannot overwrite an acknowledged encrypted receipt', async ({page
  await expect(other.getByRole('heading',{name:'Create first-tab',exact:true})).toBeVisible();
  const receipt=await page.evaluate(()=>localStorage.getItem('nanosync-encrypted-creation-v1'));
  expect(JSON.parse(receipt!).name).toBe('first-tab');
+});
+
+test("Field Guide themes, responsive screens and dialog remain accessible", async ({ page }, testInfo) => {
+  await page.goto(url + "/admin");
+  await page.emulateMedia({ colorScheme: "dark" });
+  await expect(page.locator("body")).toHaveCSS("background-color", "rgb(40, 40, 40)");
+  await page.getByLabel("Theme", { exact: true }).selectOption("light");
+  await page.reload();
+  await expect(page.getByLabel("Theme", { exact: true })).toHaveValue("light");
+  expect((await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa"]).analyze()).violations).toEqual([]);
+  await page.getByLabel("Owner password", { exact: true }).fill("browser-owner-password");
+  await page.getByRole("button", { name: "Log in", exact: true }).click();
+  await expectAdminPage(page, "Clients");
+  for (const theme of ["light", "dark"]) {
+    await page.getByLabel("Theme", { exact: true }).selectOption(theme);
+    for (const width of [390, 1440]) {
+      await page.setViewportSize({ width, height: 1000 });
+      for (const section of ["Clients", "Vaults", "Activity"] as const) {
+        if (!page.url().endsWith(`/admin/${section.toLowerCase()}`)) await navigate(page, section);
+        await expectAdminPage(page, section);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+        expect((await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa"]).analyze()).violations).toEqual([]);
+        await page.screenshot({ path: testInfo.outputPath(`${section}-${theme}-${width}.png`), fullPage: true });
+      }
+    }
+  }
+  await navigate(page, "Vaults");
+  await page.getByLabel("New vault name").fill("theme-check");
+  await page.getByRole("button", { name: "Prepare recovery" }).click();
+  const secret = await page.getByTestId("recovery-secret").innerText();
+  await page.getByLabel("I saved the recovery secret").check();
+  await page.getByRole("button", { name: "Save encrypted receipt" }).click();
+  await page.getByLabel("Saved recovery secret").fill(secret);
+  await page.getByRole("button", { name: "Verify and publish" }).click();
+  await expect(page.getByRole("heading", { name: "theme-check", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Delete theme-check", exact: true }).click();
+  await expect(page.getByRole("dialog")).toHaveCSS("background-color", "rgb(40, 40, 40)");
+  expect((await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa"]).analyze()).violations).toEqual([]);
+  await page.screenshot({ path: testInfo.outputPath("delete-dialog-dark.png"), fullPage: true });
 });
