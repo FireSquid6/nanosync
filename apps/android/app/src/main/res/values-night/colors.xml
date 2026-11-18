@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="fg_bg">#282828</color>
+    <color name="fg_text">#ebdbb2</color>
+    <color name="fg_muted">#bdae93</color>
+    <color name="fg_border">#665c54</color>
+    <color name="fg_code">#32302f</color>
+    <color name="fg_link">#ff6655</color>
+    <color name="fg_heading">#fbf1c7</color>
+    <color name="fg_focus">#fe8019</color>
+    <color name="fg_selection">#665c54</color>
+    <bool name="fg_light_system_bars">false</bool>
+</resources>

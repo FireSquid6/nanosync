@@ -4,14 +4,15 @@
   "bin": {
     "nanosync": "./packages/cli/src/main.ts"
   },
-  "workspaces": [
-    "packages/*",
-    "apps/site"
-  ],
+  "workspaces": ["packages/*", "apps/android/engine", "apps/site"],
   "scripts": {
     "test": "bun test",
     "typecheck": "bun run --filter '*' typecheck && tsc -p tsconfig.tools.json --noEmit",
     "build:binary": "bash build/binary.sh",
+    "build:android": "gradle -p apps/android :app:assembleDebug :app:assembleDebugAndroidTest",
+    "typecheck:android": "tsc -p apps/android/engine/tsconfig.json --noEmit && tsc -p apps/android/engine/tsconfig.tests.json --noEmit",
+    "test:android": "gradle -p apps/android :app:connectedDebugAndroidTest",
+    "test:android:e2e": "bun run build/test-android.ts",
     "nanosync": "bun packages/cli/src/main.ts",
     "build:frontend": "bun build/frontend.ts",
     "test:browser": "bun --bun node_modules/@playwright/test/cli.js test",

@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="FieldGuideTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">monospace</item>
+        <item name="android:colorBackground">@color/fg_bg</item>
+        <item name="android:windowBackground">@color/fg_bg</item>
+        <item name="android:colorForeground">@color/fg_text</item>
+        <item name="android:textColorPrimary">@color/fg_text</item>
+        <item name="android:textColorSecondary">@color/fg_muted</item>
+        <item name="android:textColorHint">@color/fg_muted</item>
+        <item name="android:textColorLink">@color/fg_link</item>
+        <item name="android:textColorHighlight">@color/fg_selection</item>
+        <item name="android:colorAccent">@color/fg_link</item>
+        <item name="android:colorControlNormal">@color/fg_muted</item>
+        <item name="android:colorControlActivated">@color/fg_link</item>
+        <item name="android:colorControlHighlight">@color/fg_selection</item>
+        <item name="android:forceDarkAllowed">false</item>
+        <item name="android:windowLightStatusBar">@bool/fg_light_system_bars</item>
+        <item name="android:windowLightNavigationBar">@bool/fg_light_system_bars</item>
+        <item name="android:statusBarColor">@color/fg_bg</item>
+        <item name="android:navigationBarColor">@color/fg_bg</item>
+        <item name="android:textViewStyle">@style/FieldGuideText</item>
+        <item name="android:textAppearanceLarge">@style/FieldGuideHeading</item>
+        <item name="android:textAppearanceMedium">@style/FieldGuideBody</item>
+        <item name="android:buttonStyle">@style/FieldGuideButton</item>
+        <item name="android:editTextStyle">@style/FieldGuideInput</item>
+        <item name="android:checkboxStyle">@style/FieldGuideCheckBox</item>
+        <item name="android:spinnerStyle">@style/FieldGuideSpinner</item>
+        <item name="android:alertDialogTheme">@style/FieldGuideDialog</item>
+    </style>
+
+    <style name="FieldGuideText" parent="android:style/Widget.Material.TextView">
+        <item name="android:fontFamily">monospace</item>
+        <item name="android:textColor">@color/fg_text</item>
+        <item name="android:lineSpacingMultiplier">1.4</item>
+    </style>
+    <style name="FieldGuideBody" parent="android:style/TextAppearance.Material.Body1">
+        <item name="android:fontFamily">monospace</item>
+        <item name="android:textColor">@color/fg_text</item>
+        <item name="android:textSize">16sp</item>
+    </style>
+    <style name="FieldGuideHeading" parent="android:style/TextAppearance.Material.Title">
+        <item name="android:fontFamily">monospace</item>
+        <item name="android:textColor">@color/fg_heading</item>
+        <item name="android:textStyle">bold</item>
+    </style>
+    <style name="FieldGuideButton" parent="android:style/Widget.Material.Button">
+        <item name="android:fontFamily">monospace</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:textColor">@color/field_guide_action</item>
+        <item name="android:background">@drawable/field_guide_button</item>
+        <item name="android:backgroundTint">@null</item>
+        <item name="android:stateListAnimator">@null</item>
+        <item name="android:elevation">0dp</item>
+        <item name="android:minHeight">48dp</item>
+        <item name="android:minWidth">48dp</item>
+        <item name="android:paddingHorizontal">12dp</item>
+        <item name="android:paddingVertical">8dp</item>
+    </style>
+    <style name="FieldGuideInput" parent="android:style/Widget.Material.EditText">
+        <item name="android:fontFamily">monospace</item>
+        <item name="android:textSize">16sp</item>
+        <item name="android:textColor">@color/fg_text</item>
+        <item name="android:textColorHint">@color/fg_muted</item>
+        <item name="android:background">@drawable/field_guide_input</item>
+        <item name="android:backgroundTint">@null</item>
+        <item name="android:minHeight">48dp</item>
+        <item name="android:paddingHorizontal">10dp</item>
+        <item name="android:paddingVertical">8dp</item>
+    </style>
+    <style name="FieldGuideCheckBox" parent="android:style/Widget.Material.CompoundButton.CheckBox">
+        <item name="android:fontFamily">monospace</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:textColor">@color/fg_text</item>
+        <item name="android:buttonTint">@color/field_guide_action</item>
+        <item name="android:minHeight">48dp</item>
+    </style>
+    <style name="FieldGuideSpinner" parent="android:style/Widget.Material.Spinner">
+        <item name="android:popupBackground">@color/fg_bg</item>
+        <item name="android:backgroundTint">@color/fg_border</item>
+        <item name="android:minHeight">48dp</item>
+    </style>
+    <style name="FieldGuideDialog" parent="android:style/ThemeOverlay.Material.Dialog.Alert">
+        <item name="android:fontFamily">monospace</item>
+        <item name="android:colorAccent">@color/fg_link</item>
+        <item name="android:colorBackground">@color/fg_bg</item>
+        <item name="android:textColorPrimary">@color/fg_text</item>
+        <item name="android:textColorSecondary">@color/fg_muted</item>
+        <item name="android:windowBackground">@drawable/field_guide_panel</item>
+        <item name="android:buttonBarButtonStyle">@style/FieldGuideButton</item>
+    </style>
+</resources>

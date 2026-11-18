@@ -11,7 +11,7 @@ import {
   parseIdempotencyKey, parseObjectFrameHeader, parseObjectId, parseRevisionId,
   parseVaultId, type AdvanceHeadRequest, type VisibleObjectReference,
 } from "@nanosync/protocol";
-import type { ChunkJournal, ManifestV1 } from "@nanosync/sync-core";
+import type { ChunkJournal, Head, HydrationIntent, ManifestV1 } from "@nanosync/sync-core";
 
 const hash = (data: string | Uint8Array) => createHash("sha256").update(data).digest("hex");
 const hex = (value: string) => { if (!/^[0-9a-f]{64}$/.test(value)) throw new Error("invalid digest"); return value; };
@@ -69,11 +69,10 @@ function row<T>(db: Database, sql: string, ...params: (string | number)[]): T | 
 function all<T>(db: Database, sql: string, ...params: (string | number)[]): T[] { return db.query<T, (string | number)[]>(sql).all(...params); }
 function run(db: Database, sql: string, ...params: (string | number | Uint8Array | null)[]) { db.query(sql).run(...params); }
 
-export interface Head { revisionId: string | null; sequence: number }
+export type { Head, HydrationIntent } from "@nanosync/sync-core";
 /** executable records applied manifest metadata (0/1); absent/null means unknown, not clean. */
 export interface Entry { executable?: 0 | 1 | null; id: string; path: string; kind: "file" | "directory" | "tombstone"; fingerprint: string | null; hydration: "downloaded" | "evicted"; revision: string | null }
 export interface Work { id: string; state: "pending" | "running" | "done" | "blocked" }
-export interface HydrationIntent { id: string; entryId: string; revision: string; sequence: number; direction: "evict" | "download"; rootDevice: string; rootInode: string; fileDevice: string | null; fileInode: string | null }
 export class ClientLocal implements ChunkJournal {
   private readonly db: Database;
   private readonly root: string;

@@ -28,6 +28,21 @@ bun install
 bun packages/cli/src/main.ts --help
 ```
 
+To run the Linux CLI and server from source, see [packages/cli/README.md](packages/cli/README.md).
+
+## Android
+
+The native Android 12+ dashboard connects existing vaults to shared local folders,
+with manual and opt-in background synchronization. See
+[apps/android/README.md](apps/android/README.md) for the pinned Nix toolchain,
+APK builds, enrollment, permissions, and emulator/device verification.
+
+```sh
+nix develop .#android-build
+bun install --frozen-lockfile
+bun run build:android
+```
+
 ## Owner and client quick start
 
 ```sh

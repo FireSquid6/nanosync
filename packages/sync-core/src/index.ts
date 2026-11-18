@@ -230,3 +230,6 @@ export async function verifyReferenceSetMac(envelope: RevisionEnvelope, master: 
   for (let i = 0; i < 32; i++) difference |= actual[i]! ^ expected[i]!;
   return difference === 0;
 }
+
+export { SyncEngine, type SyncEngineOptions, type SyncJournal, type SyncScanner, type SyncRemote, type ScanPlan, type Head, type HydrationIntent } from "./sync-engine.ts";
+export { IGNORE_FILE, IgnoreMatcher } from "./ignore.ts";

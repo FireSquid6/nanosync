@@ -5,7 +5,8 @@ import { chmodSync, statSync, existsSync, linkSync, mkdirSync, mkdtempSync, read
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ClientLocal } from "@nanosync/client-local";
-import { HttpRemote } from "@nanosync/sync-core";
+import { applyNewFiles, hydrateFile, LinuxScanner } from "@nanosync/linux-client";
+import { SyncEngine, HttpRemote } from "@nanosync/sync-core";
 import { CHUNK_SIZE } from "@nanosync/protocol";
 import { bootstrapWorkflow, credentials, joinVault } from "./support/legacy-fixture.ts";
 import { createConnection } from "../src/connections.ts";
@@ -687,8 +688,8 @@ test("abort and stop cancel stalled sync requests and release ownership", async 
   const e = await fixture();
   for (const action of ["abort", "stop"] as const) {
     const started = Promise.withResolvers<Request>();
-    const runner = start({ ...e.a, fetch: input => {
-      const request = input as Request; started.resolve(request);
+    const runner = start({ ...e.a, fetch: (input, init) => {
+      const request = new Request(input, init); started.resolve(request);
       return new Promise<Response>((_resolve, reject) => {
         request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true });
       });
@@ -717,4 +718,76 @@ test('synchronized executable metadata permits clean disconnect for publisher an
     expect(statSync(join(root!, 'script')).mode & 0o100).toBe(0o100);
     expect(readFileSync(join(root!, 'script'), 'utf8')).toBe('#!/bin/sh\n');
   }
+});
+
+test("portable sync adapters import local files from genesis and converge without CLI lifecycle", async () => {
+  const e = await fixture();
+  writeFileSync(join(e.firstFiles, "existing"), "portable import", { mode: 0o600 });
+  writeFileSync(join(e.firstFiles, ".nanosyncignore"), "private\n", { mode: 0o600 });
+  writeFileSync(join(e.firstFiles, "private"), "not published", { mode: 0o600 });
+  const imported = await syncPortable(e.a);
+  expect(imported.sequence).toBe(2);
+  expect(await syncPortable(e.b)).toEqual(imported);
+  expect(readFileSync(join(e.secondFiles, "existing"), "utf8")).toBe("portable import");
+  expect(existsSync(join(e.secondFiles, "private"))).toBe(false);
+});
+
+async function syncPortable(options: SyncOptions, prepare?: (local: ClientLocal) => void) {
+  const local = new ClientLocal(options.clientDirectory, options.vaultId, options.deviceId);
+  try {
+    prepare?.(local);
+    const scanner = new LinuxScanner(options.syncDirectory, local, options.scan);
+    const remote = new HttpRemote({ ...options, fetch: options.fetch ?? fetch, journal: local });
+    const engine = new SyncEngine({ vaultId: options.vaultId, deviceId: options.deviceId, masterKey: options.masterKey,
+      local, scanner, remote, randomUUID, now: () => new Date().toISOString(),
+      apply: (manifest, sequence, key) => applyNewFiles(scanner.root, local, remote, manifest, sequence, key),
+      hydrate: (manifest, revision, key, intent, path) => hydrateFile(scanner.root, local, remote, manifest, revision, key, intent.direction, path, intent),
+    });
+    const head = await engine.syncOnce();
+    expect(local.head("applied")).toEqual(head);
+    expect(local.pendingApplies()).toEqual([]);
+    expect(local.proposal()).toBeNull();
+    return head;
+  } finally { local.close(); }
+}
+
+test("portable adapters recover a persisted interrupted apply before scanning", async () => {
+  const e = await fixture();
+  writeFileSync(join(e.firstFiles, "remote"), "durable remote bytes", { mode: 0o600 });
+  const published = await syncPortable(e.a);
+  await expect(syncPortable(e.b, local => {
+    // Crash after filesystem mutation but before durable applied-head completion.
+    local.finishApply = () => { throw new Error("interrupted apply completion"); };
+  })).rejects.toThrow("interrupted apply completion");
+  const local = new ClientLocal(e.b.clientDirectory, e.b.vaultId, e.b.deviceId);
+  try {
+    expect(local.pendingApplies()).toHaveLength(1);
+    expect(local.head("accepted")).toEqual(published);
+    expect(local.head("applied").revisionId).toBeNull();
+  } finally { local.close(); }
+  expect(await syncPortable(e.b)).toEqual(published);
+  expect(readFileSync(join(e.secondFiles, "remote"), "utf8")).toBe("durable remote bytes");
+});
+test("portable adapters replay exact frozen publication bytes after a lost accepted response", async () => {
+  const e = await fixture();
+  await syncPortable(e.a);
+  writeFileSync(join(e.firstFiles, "published"), "frozen bytes", { mode: 0o600 });
+  const requests: string[] = [];
+  const transport: NonNullable<SyncOptions["fetch"]> = async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    if (new URL(request.url).pathname !== "/v1/head/advance") return fetch(request);
+    requests.push(await request.clone().text());
+    const response = await fetch(request);
+    if (requests.length === 1) {
+      await response.arrayBuffer();
+      throw new Error("lost accepted response");
+    }
+    return response;
+  };
+  await expect(syncPortable({ ...e.a, fetch: transport })).rejects.toThrow("lost accepted response");
+  const recovered = await syncPortable({ ...e.a, fetch: transport });
+  expect(requests).toHaveLength(2);
+  expect(requests[1]).toBe(requests[0]);
+  expect(await syncPortable(e.b)).toEqual(recovered);
+  expect(readFileSync(join(e.secondFiles, "published"), "utf8")).toBe("frozen bytes");
 });

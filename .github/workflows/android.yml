@@ -1,0 +1,45 @@
+name: Android build and protocol checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Build and check using the pinned Android toolchain
+        run: |
+          nix develop .#android-build --command bash -euc '
+            bun install --frozen-lockfile
+            bun test
+            bun run typecheck
+            bun run typecheck:android
+            gradle --no-daemon -p apps/android :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
+          '
+      - name: Upload validation APKs (debug signing, not production releases)
+        uses: actions/upload-artifact@v4
+        with:
+          name: nanosync-android-debug
+          path: |
+            apps/android/app/build/outputs/apk/debug/app-debug.apk
+            apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+      - name: Upload lint reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-lint
+          path: apps/android/app/build/reports/lint-results-debug.*
+          if-no-files-found: ignore

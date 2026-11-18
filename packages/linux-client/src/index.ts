@@ -7,7 +7,7 @@ import { resolve } from "node:path";
 import { CHUNK_SIZE, parseDeviceId, parseRevisionId, parseVaultId } from "@nanosync/protocol";
 import {
   encryptChunk, manifestPaths, MAX_FILE_BYTES, parseManifest,
-  type EncryptedObject, type ManifestEntry, type ManifestV1,
+  type EncryptedObject, type ManifestEntry, type ManifestV1, type ScanPlan,
 } from "@nanosync/sync-core";
 import { ClientLocal, type Entry } from "@nanosync/client-local";
 import { IgnoreRules } from "./ignore.ts";
@@ -24,14 +24,7 @@ type CachedContent = { stamp: string; context: string; content: Content };
 type Identity = { entryId: string; device: string; inode: string };
 type Found = { path: string; kind: "file" | "directory"; stat: Stats; identity: string };
 export interface ScanOptions { debounceMs?: number; stabilityMs?: number; maxBatch?: number; maxConcurrent?: number }
-export interface ScanPlan {
-  manifest: ManifestV1;
-  /** A factory, not a one-shot iterator. Open and verify files again in manifest order for Step 9. */
-  chunks(knownObjectIds?: ReadonlySet<string>): AsyncGenerator<EncryptedObject>;
-  /** Commit after acceptance, or after durably journaling the uploaded local branch for reconciliation. */
-  commit(): void;
-  suppressed: string[];
-}
+export type { ScanPlan } from "@nanosync/sync-core";
 function validName(name: string): void {
   if (!name || name === "." || name === ".." || name.normalize("NFC") !== name || Buffer.byteLength(name) > 255 ||
       /[\u0000-\u001f\u007f-\u009f\/\\:*?"<>|]/u.test(name) || /[. ]$/u.test(name) ||

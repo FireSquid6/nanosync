@@ -10,6 +10,7 @@ import {
   type EncryptedObject,
 } from "./index.ts";
 import { parseManifest, validateManifestReferences, type ManifestV1 } from "./manifest.ts";
+import { fetchWithDeadline } from "./request.ts";
 export class IntegrityError extends Error {
   constructor(message: string) {
     super(message);
@@ -191,13 +192,9 @@ export class HttpRemote {
     const headers = new Headers(init.headers);
     if (authenticated) headers.set("authorization", `Bearer ${this.options.token}`);
     if (authenticated && this.options.vaultId) headers.set("x-nanosync-vault-id", this.options.vaultId);
-    const signal = AbortSignal.any([
-      AbortSignal.timeout(30_000),
-      ...(this.options.signal ? [this.options.signal] : []),
-      ...(init.signal ? [init.signal] : []),
-    ]);
-    signal.throwIfAborted();
-    return this.options.fetch(new Request(`${this.base}${path}`, { ...init, headers, signal }));
+    // Keep main's cancellation and body-read deadline without requiring newer
+    // AbortSignal static methods or streaming Request support on Android 12.
+    return fetchWithDeadline(this.options.fetch, `${this.base}${path}`, { ...init, headers }, this.options.signal);
   }
 
   private async body(response: Response, statuses: number[] = [200]): Promise<unknown> {

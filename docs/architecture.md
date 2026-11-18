@@ -57,7 +57,7 @@ flowchart LR
 
 ## Architectural principles
 
-The version 1 server, Linux adapters, and CLI use Bun and TypeScript. Portable shared code is restricted to Web Crypto and WHATWG interfaces rather than Bun APIs; Android integration is later platform-adapter work. The foreground CLI runner is not a separately packaged service, and no desktop UI or startup integration is shipped.
+The version 1 server, Linux adapters, and CLI use Bun and TypeScript. Portable shared code is restricted to Web Crypto and WHATWG interfaces rather than Bun APIs. Native Android UI, scheduling, private journals and shared-folder adapters host the portable engine in a restricted bundled WebView computation worker; see [mobile architecture](mobile.md). The foreground CLI runner is not a separately packaged service, and no desktop UI or startup integration is shipped.
 
 ### Immutable data, mutable pointers
 

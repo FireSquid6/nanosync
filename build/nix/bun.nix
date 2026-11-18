@@ -202,6 +202,7 @@
     hash = "sha512-/IA8q2nyjgyl0NGSjqiRXB8gh3We7Pzx9C0c+6Zoolu905jFc79anerrUG7+n65+qs310DRK43yi2WDI8nY59A==";
   };
   "@nanosync/admin-ui" = copyPathToStore ../../packages/admin-ui;
+  "@nanosync/android-engine" = copyPathToStore ../../apps/android/engine;
   "@nanosync/cli" = copyPathToStore ../../packages/cli;
   "@nanosync/client-local" = copyPathToStore ../../packages/client-local;
   "@nanosync/linux-client" = copyPathToStore ../../packages/linux-client;
@@ -523,6 +524,10 @@
   "cookie@1.1.1" = fetchurl {
     url = "https://registry.npmjs.org/cookie/-/cookie-1.1.1.tgz";
     hash = "sha512-ei8Aos7ja0weRpFzJnEA9UHJ/7XQmqglbRwnf2ATjcB9Wq874VKH9kfjjirM6UhU2/E5fFYadylyhFldcqSidQ==";
+  };
+  "core-js-pure@3.51.0" = fetchurl {
+    url = "https://registry.npmjs.org/core-js-pure/-/core-js-pure-3.51.0.tgz";
+    hash = "sha512-NE4SFDJ+qzQeqHG2vVSNwopzS6zZNPYJ5kinIqs+OofTqGzOmICgT89E/yvS9XY7rwb3eU1utWXTJ9nVFqv74A==";
   };
   "csstype@3.2.3" = fetchurl {
     url = "https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz";
@@ -1075,6 +1080,10 @@
   "use-sidecar@1.1.3" = fetchurl {
     url = "https://registry.npmjs.org/use-sidecar/-/use-sidecar-1.1.3.tgz";
     hash = "sha512-Fedw0aZvkhynoPYlA5WXrMCAMm+nSWdZt6lzJQ7Ok8S6Q+VsHmHpRWndVRJ8Be0ZbkfPc5LRYH+5XrzXcEeLRQ==";
+  };
+  "uuid@13.0.2" = fetchurl {
+    url = "https://registry.npmjs.org/uuid/-/uuid-13.0.2.tgz";
+    hash = "sha512-vzi9uRZ926x4XV73S/4qQaTwPXM2JBj6/6lI/byHH1jOpCzb0zDbfytgA9LcN/hzb2l7WQSQnxITOVx5un/wGw==";
   };
   "vfile-message@4.0.4" = fetchurl {
     url = "https://registry.npmjs.org/vfile-message/-/vfile-message-4.0.4.tgz";
