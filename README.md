@@ -1,9 +1,31 @@
 # nanosync
 
-To install dependencies:
+Self-hosted, client-encrypted file synchronization for Linux. One executable provides the server, Linux client, and optional browser administration. Sync is not backup; keep independent copies of important data and offline recovery material.
 
-```bash
+## User documentation
+
+The authoritative user guides live in [`apps/site/content/docs`](apps/site/content/docs/introduction.md):
+
+1. [Introduction](apps/site/content/docs/introduction.md)
+2. [Installation from source](apps/site/content/docs/installation.md)
+3. [First sync with demo folders](apps/site/content/docs/first-sync.md)
+4. [Server and HTTPS proxy setup](apps/site/content/docs/server.md)
+5. [Administration and backups](apps/site/content/docs/administration.md)
+6. [Ignore rules](apps/site/content/docs/ignore-rules.md)
+7. [Troubleshooting](apps/site/content/docs/troubleshooting.md)
+8. [Security](apps/site/content/docs/security.md)
+
+**No release exists yet.** Use the source-build installation guide, not the release installer. Linux is the only shipped sync client; there are no CLI history or restore commands. This command/state redesign has no supported migration from old setup state. Preserve old data, plaintext, and secrets before deliberately starting fresh.
+
+The [CLI reference](packages/cli/README.md) documents flags, JSON/exit codes, and automation contracts. [Engineering documentation](docs/README.md) covers implementation, protocol formats, and future platform work; it is not a list of shipped user features.
+
+## Contributor setup and builds
+
+Use `nix develop` for the pinned Bun and Node development tools, then install workspace dependencies from the repository root. Bun 1.4.2 is verified; the older Bun 1.3.3 fails SQLite close operations in the CLI journey.
+
+```sh
 bun install
+bun packages/cli/src/main.ts --help
 ```
 
 To run the Linux CLI and server from source, see [packages/cli/README.md](packages/cli/README.md).
@@ -25,7 +47,7 @@ bun run build:android
 
 ```sh
 nanosync server init --server-dir "$HOME/nanosync-server"
-# Provision locally while the runtime is stopped; save/acknowledge the secret.
+# Provision locally while the runtime is stopped; save/acknowledge the vault recovery key.
 nanosync server vaults create --server-dir "$HOME/nanosync-server" --name documents
 nanosync server run --server-dir "$HOME/nanosync-server" --web-ui
 # In another terminal/on the client:
@@ -35,76 +57,44 @@ nanosync client vaults connect --server home --vault documents --path "$HOME/Syn
 nanosync client sync --path "$HOME/Sync"
 ```
 
+The **vault recovery key** (previously called the recovery secret) unlocks the
+vault’s encryption key on new devices. It is not the owner password or a backup
+of your files. Save it in a password manager or offline: anyone with this key and
+the encrypted vault data can decrypt your files. If you lose both this key and all
+clients’ saved vault keys, the owner password cannot recover your data.
+
 Create the destination directory first. Browser administration is **off by default**;
 `--web-ui` embeds `/admin` on the existing listener, with no adjacent assets or
 frontend service. Remote browser access requires an HTTPS reverse proxy with explicit
 [external origin/proxy configuration](docs/clients-and-operations.md#reverse-proxy-example).
 The browser trusts served code; malicious server JavaScript is not resisted.
 
-This is a **breaking command/state redesign**, without aliases or automatic state
-migration. Back up old data and recovery material before deliberately initializing
-new state. See [operations](docs/clients-and-operations.md#administration) and the
-[CLI contract](packages/cli/README.md) for secrets, JSON/exit codes, confirmations,
-retry and reset guidance. Disconnect/remove preserves files; revoke removes access;
-permanent deletion destroys server data, never silently erases client plaintext.
+To produce the Linux x86-64 single-file executable, including browser administration assets, CLI, server, workspace packages, and Bun runtime:
 
-Before importing a documents folder, put a local `.nanosyncignore` at its root to
-exclude virtual environments (for example `.venv/`), caches, and other data that
-cannot safely be synced. Excluded paths are never followed, uploaded, downloaded,
-or treated as deletions; rules are device-local, not `.gitignore` rules. See the
-[ignore file guide](packages/cli/README.md#local-ignore-file) for syntax, limits,
-and how to handle already-tracked entries.
-
-To produce the distributable Linux x86-64 single-file executable (including the CLI,
-server, workspace packages, and Bun runtime):
-
-```bash
+```sh
 bun run build:binary
 ./dist/nanosync --help
 ```
 
-Packaging scripts should take the executable from `dist/nanosync`. It is ignored by
-Git and can be copied and run without a separate Bun installation or `node_modules`.
-Build on a Linux x86-64 host with `bun install` completed first; the compiled
-executable targets Linux x86-64 and still requires the host's standard Linux
-system libraries. Runtime data (server state and client credentials) remains in
-the directories supplied to the CLI, not alongside the executable.
+Build on Linux x86-64 after installing dependencies. Packaging scripts should take `dist/nanosync`, which is ignored by Git. It runs outside the checkout without adjacent assets, a separate Bun installation, or `node_modules`, but still requires standard Linux system libraries. State lives in the CLI-selected directories, not beside the executable.
 
-## Install from a GitHub release (no checkout or Bun required)
+The public Next.js site runs separately: `bun run dev:site`, or `bun run build:site` followed by `bun run --cwd apps/site start`. See [site development](apps/site/README.md) for documentation authoring and design ownership.
 
-On Linux x86-64, after a version-tagged GitHub release has been published:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/FireSquid6/nanosync/main/build/install.sh | bash
-```
-
-This installs the latest release to `~/.local/bin/nanosync` and verifies the
-download against the release's SHA-256 file. Ensure `~/.local/bin` is on your
-`PATH`. To pin a release or change the destination:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/FireSquid6/nanosync/main/build/install.sh | NANOSYNC_VERSION=v1.0.0 NANOSYNC_INSTALL_DIR=/your/bin bash
-```
-
-The installer requires `curl` and `sha256sum`; it does not fetch source or
-build anything. **No release exists yet**, so the command will fail until one
-is published. Inspect the script before piping it into a shell if desired.
+See [Nix packaging](build/nix/README.md) for the offline package build and dependency-expression maintenance.
 
 ## Publish a release
 
-Merge the release workflow and installer into `main` first. Run the tests and
-typecheck, then create and push a `v`-prefixed version tag (for example,
-`git tag v1.0.0 && git push origin v1.0.0`). The tag-triggered workflow runs
-the tests and typecheck again, builds the Linux x86-64 binary, checks it,
-and publishes `nanosync-linux-x64` and `nanosync-linux-x64.sha256` to the
-GitHub release. The installer uses those assets for either `latest` or an
-explicit `NANOSYNC_VERSION`; it will not fall back to building from `main`.
+Merge the release workflow and installer into `main` first. Run the tests and typecheck, then create and push a `v`-prefixed version tag (for example, `git tag v1.0.0 && git push origin v1.0.0`). The tag-triggered workflow runs tests and typecheck again, builds and checks the Linux x86-64 binary, and publishes `nanosync-linux-x64` and `nanosync-linux-x64.sha256` to the GitHub release.
+
+`build/install.sh` downloads published assets and checks their SHA-256 file. It requires `curl` and `sha256sum`, defaults to `~/.local/bin/nanosync`, and accepts `NANOSYNC_VERSION` and `NANOSYNC_INSTALL_DIR` overrides. It does not fall back to building source. Do not recommend it as a working installation method before a release is published.
 
 ## Acceptance checks
 
 ```sh
 bun test
 bun run typecheck
+bun run build:site
+bun run test:site      # production website, real Chromium; set CHROMIUM_PATH
 bun run test:browser   # real Chromium; set CHROMIUM_PATH if needed
 bun test packages/cli/tests/terminal.test.ts  # real Python PTY
 bash build/test-install.sh
@@ -113,5 +103,4 @@ bash build/test-standalone.sh  # copies the binary outside the checkout; no adja
 NANOSYNC_TEST_BINARY="$PWD/dist/nanosync" bun run test:browser
 ```
 
-See [implementation evidence](docs/implementation-progress.md) for requirement
-coverage and [Nix packaging](build/nix/README.md) for the offline package build.
+See [implementation evidence](docs/implementation-progress.md) for core requirement coverage and [website verification](docs/website-implementation.md) for the site/admin redesign checks.

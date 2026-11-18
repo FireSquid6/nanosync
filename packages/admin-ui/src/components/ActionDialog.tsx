@@ -31,11 +31,10 @@ function ActionDialog({ action, close, trigger }: {
       onOpenChange={(open) => { if (!open && !busy) close(); }}
       title={action ? `${action.kind === "delete" ? "Delete" : action.kind === "revoke" ? "Revoke" : "Rename"} ${action.name}` : ""}
       description={action?.kind === "delete"
-        ? "Permanent deletion destroys metadata, history, encrypted objects and recovery wraps. Recovery secrets cannot restore deleted data without a server backup. Offline and connected clients may have unsynced work. Client files are not erased."
+        ? "Permanent deletion destroys metadata, history, encrypted objects and recovery wraps. Recovery keys cannot restore deleted data without a server backup. Offline and connected clients may have unsynced work. Client files are not erased."
         : action?.kind === "revoke"
           ? "Revocation prevents future server access. It does not erase downloaded ciphertext, plaintext or keys."
           : "Change the vault display name."}
-      theme="light"
       triggerRef={trigger}
     >
       <form className="nv-stack" onSubmit={(event) => {

@@ -59,6 +59,9 @@
       };
     in {
       devShells.${system} = {
+        default = pkgs.mkShell {
+          packages = [ pkgs.bun pkgs.nodejs ];
+        };
         # nix develop .#android --command bash -c 'cd apps/android && gradle assembleDebug'
         # Use avdmanager to create writable AVDs; the SDK itself is immutable.
         android = mkAndroidShell { };

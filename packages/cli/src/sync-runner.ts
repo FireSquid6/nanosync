@@ -20,6 +20,7 @@ export interface SyncOptions {
   fetch?: RemoteOptions["fetch"];
   pollMs?: number;
   scan?: ScanOptions;
+  onProgress?: (message: string) => void;
 }
 
 export class SyncRunner {
@@ -31,6 +32,8 @@ export class SyncRunner {
   private readonly device: string;
   private readonly pollMs: number;
   private readonly unlock: () => void;
+  private readonly onProgress: SyncOptions["onProgress"];
+  private readonly transfers = { upload: { count: 0, bytes: 0 }, download: { count: 0, bytes: 0 } };
   private watcher?: LinuxWatcher;
   private active?: Promise<{ revisionId: string; sequence: number }>;
   private stopped = false;
@@ -39,6 +42,7 @@ export class SyncRunner {
 
   private constructor(options: SyncOptions, unlock: () => void) {
     this.unlock = unlock;
+    this.onProgress = options.onProgress;
     this.vault = parseVaultId(options.vaultId);
     this.device = parseDeviceId(options.deviceId);
     if (!(options.masterKey instanceof Uint8Array) || options.masterKey.length !== 32) throw new Error("invalid vault key");
@@ -49,7 +53,16 @@ export class SyncRunner {
     try {
       this.scanner = new LinuxScanner(options.syncDirectory, this.local, options.scan);
       const remote = new HttpRemote({ baseUrl: options.baseUrl, token: options.token, vaultId: this.vault,
-        fetch: options.fetch ?? fetch, journal: this.local, signal: this.cancellation.signal });
+        fetch: options.fetch ?? fetch, journal: this.local, signal: this.cancellation.signal,
+        onTransfer: (direction, bytes) => {
+          const total = this.transfers[direction];
+          total.count++; total.bytes += bytes;
+          if (total.count === 1 || total.count % 25 === 0) {
+            const verb = direction === "download" ? "Downloaded" : "Uploaded";
+            const size = (total.bytes / 1_048_576).toFixed(1);
+            this.onProgress?.(`${verb} ${total.count} encrypted objects (${size} MiB).`);
+          }
+        } });
       this.engine = new SyncEngine({ vaultId: this.vault, deviceId: this.device, masterKey: this.key,
         local: this.local, scanner: this.scanner, remote, randomUUID, now: () => new Date().toISOString(),
         apply: (manifest, sequence, key) => applyNewFiles(this.scanner.root, this.local, remote, manifest, sequence, key),
@@ -91,8 +104,13 @@ export class SyncRunner {
     if (this.stopped) return Promise.reject(new Error("sync runner stopped"));
     if (this.active) return this.active;
     const work = (async () => {
+      this.transfers.upload = { count: 0, bytes: 0 };
+      this.transfers.download = { count: 0, bytes: 0 };
+      this.onProgress?.("Connecting to server and checking sync state...");
+      this.onProgress?.("Scanning local files for changes...");
       const head = await this.engine.syncOnce();
       this.watcher?.refresh();
+      this.onProgress?.("Sync complete.");
       return head;
     })();
     this.active = work;

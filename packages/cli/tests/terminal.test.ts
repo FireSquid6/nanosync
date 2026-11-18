@@ -131,8 +131,11 @@ test('terminal recovery acknowledgement failure publishes nothing and deletion r
   }
   try {
     await run(['server','init']);
-    const failed = await terminal(['server','vaults','create','--name','not-published'],'Retype recovery secret','wrong-secret');
+    const failed = await terminal(['server','vaults','create','--name','not-published'],'Retype vault recovery key','wrong-secret');
     expect(failed.code).toBe(2);
+    expect(failed.terminal).toContain('unlocks this vault’s encryption key on new devices');
+    expect(failed.terminal).toContain('not your owner password or a backup of your files');
+    expect(failed.terminal).toContain('Anyone with this key and the encrypted vault data can decrypt your files');
     expect((await run(['server','vaults','view'])).vaults).toHaveLength(0);
     const created = await run(['server','vaults','create','--name','typed-vault','--recovery-output',join(directory,'recovery')]);
     const args = ['server','vaults','delete','--vault',created.vaultId,'--yes'];

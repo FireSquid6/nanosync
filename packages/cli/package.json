@@ -13,6 +13,8 @@
     "@nanosync/server-metadata": "workspace:*",
     "@nanosync/server-object-storage": "workspace:*",
     "@nanosync/sync-core": "workspace:*",
-    "commander": "^14.0.2"
+    "commander": "^14.0.2",
+    "ora": "^10.0.0",
+    "picocolors": "^1.1.1"
   }
 }

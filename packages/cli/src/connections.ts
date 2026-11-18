@@ -63,10 +63,15 @@ function missingRoot(path: string): boolean {
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return true; throw error; }
 }
 function overlaps(a: string, b: string): boolean { return a === b || a.startsWith(b + sep) || b.startsWith(a + sep); }
-function ancestorMarker(path: string): boolean {
+function hasMarker(path: string, globalDirectory: string): boolean {
+  const file = join(path, MARKER);
+  // The default private-state directory shares the marker's name, not its role.
+  return file !== resolve(globalDirectory) && existsSync(file);
+}
+function ancestorMarker(path: string, globalDirectory: string): boolean {
   let current = dirname(path);
   while (true) {
-    if (existsSync(join(current, MARKER))) return true;
+    if (hasMarker(current, globalDirectory)) return true;
     const parent = dirname(current);
     if (parent === current) return false;
     current = parent;
@@ -82,7 +87,7 @@ export function discoverConnection(globalDirectory: string, from: string, allowM
   }
   let current = rootPath(from);
   while (true) {
-    if (existsSync(join(current, MARKER))) {
+    if (hasMarker(current, globalDirectory)) {
       const found = marker(current);
       let connection: Connection;
       try { connection = record(globalDirectory, found.connectionId); }
@@ -113,7 +118,7 @@ export function connectRegisteredVault(globalDirectory: string, destination: str
 function createLocked(globalDirectory: string, destination: string, serverId: string, vaultId: string, deviceId: string, confirmNonempty: boolean): Connection {
   const global = privateDirectory(globalDirectory), root = rootPath(destination);
   if (overlaps(root, global)) throw new Error("sync destination overlaps private global state");
-  if (ancestorMarker(root)) throw new Error("sync destination is nested under a marked sync root");
+  if (ancestorMarker(root, global)) throw new Error("sync destination is nested under a marked sync root");
   if (records(global).some(item => overlaps(root, item.root))) throw new Error("sync roots may not overlap or already be bound");
   if (existsSync(join(root, MARKER))) throw new Error("destination already has a marker; use explicit move or copy repair");
   if (readdirSync(root).length && !confirmNonempty) throw new Error("destination contains files; confirm that existing files participate in synchronization");
@@ -133,7 +138,7 @@ export function repairConnection(globalDirectory: string, destination: string, m
 }
 function repairLocked(globalDirectory: string, destination: string, mode: "move" | "copy", confirmNonempty: boolean): Connection {
   const global = privateDirectory(globalDirectory), root = rootPath(destination);
-  if (overlaps(global, root) || ancestorMarker(root) || records(global).some(item => overlaps(root, item.root)))
+  if (overlaps(global, root) || ancestorMarker(root, global) || records(global).some(item => overlaps(root, item.root)))
     throw new Error("sync destination overlaps an existing connection");
   const source = marker(root), old = record(global, source.connectionId);
   if (old.root === root) throw new Error("connection is already bound to this directory");

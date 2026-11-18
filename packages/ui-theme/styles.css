@@ -1,0 +1,39 @@
+/* Dark links are slightly lighter than the mockup red to meet AA on code backgrounds. */
+:root {
+  color-scheme: light;
+  --fg-bg: #fbf1c7; --fg-text: #3c3836; --fg-muted: #665c54;
+  --fg-border: #bdae93; --fg-code: #f2e5bc; --fg-link: #9d0006;
+  --fg-heading: #282828; --fg-focus: #af3a03;
+  --fg-selection: #d5c4a1;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --fg-bg: #282828; --fg-text: #ebdbb2; --fg-muted: #bdae93;
+    --fg-border: #665c54; --fg-code: #32302f; --fg-link: #ff6655;
+    --fg-heading: #fbf1c7; --fg-focus: #fe8019; --fg-selection: #665c54;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --fg-bg: #282828; --fg-text: #ebdbb2; --fg-muted: #bdae93;
+  --fg-border: #665c54; --fg-code: #32302f; --fg-link: #ff6655;
+  --fg-heading: #fbf1c7; --fg-focus: #fe8019; --fg-selection: #665c54;
+}
+* { box-sizing: border-box; }
+body { margin: 0; scrollbar-color: var(--fg-muted) var(--fg-bg); background: var(--fg-bg); color: var(--fg-text); font: 15px/1.75 'DejaVu Sans Mono', 'Liberation Mono', Consolas, monospace; }
+button, input, select, textarea { font: inherit; }
+a { color: var(--fg-link); text-underline-offset: 4px; }
+a:hover { color: var(--fg-heading); }
+:focus-visible { outline: 2px solid var(--fg-focus); outline-offset: 5px; }
+::selection { background: var(--fg-selection); color: var(--fg-heading); }
+h1, h2, h3 { color: var(--fg-heading); line-height: 1.4; }
+h1 { font-size: 30px; line-height: 1.4; margin: 0 0 20px; }
+h2 { font-size: 18px; margin: 36px 0 10px; }
+h3 { font-size: 15px; margin: 28px 0 10px; }
+p { margin: 0 0 18px; }
+code, pre { font-family: inherit; }
+pre { background: var(--fg-code); padding: 18px 20px; overflow-x: auto; line-height: 1.65; }
+.theme-control { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--fg-muted); }
+.theme-control select { background: var(--fg-bg); color: var(--fg-text); border: 1px solid var(--fg-border); padding: 3px; }
+@media (max-width: 700px) { body { font-size: 14px; } h1 { font-size: 26px; } pre { font-size: 12px; padding: 14px; } }

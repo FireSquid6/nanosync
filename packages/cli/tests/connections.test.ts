@@ -61,6 +61,23 @@ test("nearest marker, independent replicas, and overlapping-root rejection", () 
   expect(() => discoverConnection(e.global, e.base)).toThrow(/client vaults connect/);
 });
 
+test("private .nanosync state is not an ancestor marker during setup, discovery or repair", () => {
+  const e = fixture(), global = join(e.base, ".nanosync");
+  mkdirSync(global, { mode: 0o700 });
+  const connection = createConnection(global, e.first, "server", e.vault, e.device);
+  expect(discoverConnection(global, e.first)).toEqual(connection);
+  expect(() => discoverConnection(global, e.second)).toThrow(/client vaults connect/);
+  expect(() => createConnection(global, global, "server", e.vault, e.device)).toThrow(/private global state/);
+  cpSync(join(e.first, ".nanosync"), join(e.second, ".nanosync"));
+  const copy = repairConnection(global, e.second, "copy", true);
+  expect(discoverConnection(global, e.second)).toEqual(copy);
+  const movedRoot = join(e.base, "moved");
+  renameSync(e.first, movedRoot);
+  const moved = repairConnection(global, movedRoot, "move");
+  expect(moved.connectionId).toBe(connection.connectionId);
+  expect(discoverConnection(global, movedRoot)).toEqual(moved);
+});
+
 test("nonempty confirmation, copied marker refusal and explicit independent copy", () => {
   const e = fixture();
   writeFileSync(join(e.first, "existing"), "present");
