@@ -28,7 +28,7 @@ test("CLI help lists foreground sync and rejects removed local service commands"
     expect(stdout.mock.calls.flat().join("")).toContain("--watch");
     for (const name of ["daemon", "status", "pause", "resume", "history", "restore", "resolve", "conflicts", "doctor", "evict", "download"]) {
       expect(help).not.toMatch(new RegExp(`^\\s+${name}\\s`, "m"));
-      expect(await main([name])).toBe(2);
+      expect(await main([name, '--json'])).toBe(2);
       expect(JSON.parse(String(stderr.mock.lastCall?.[0]))).toMatchObject({ ok: false, exitCode: 2 });
     }
   } finally { stdout.mockRestore(); stderr.mockRestore(); }
@@ -48,7 +48,7 @@ test("Commander help and validation preserve structured errors across repeated m
       ["--client-dir", "/unused", "devices", "--client-dir", "/unused"],
       ["admin", "scan", "--client-dir"], ["approve"], ["revoke", "one", "two"]
     ]) {
-      expect(await main(args)).toBe(2);
+      expect(await main(args.includes('--json') ? args : [...args, '--json'])).toBe(2);
       expect(JSON.parse(String(stderr.mock.lastCall?.[0]))).toMatchObject({ ok: false, exitCode: 2 });
     }
     const prior = process.env.NANOSYNC_PASSWORD;
