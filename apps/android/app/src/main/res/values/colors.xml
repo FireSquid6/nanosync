@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Keep these tokens aligned with packages/ui-theme/styles.css. -->
+    <color name="fg_bg">#fbf1c7</color>
+    <color name="fg_text">#3c3836</color>
+    <color name="fg_muted">#665c54</color>
+    <color name="fg_border">#bdae93</color>
+    <color name="fg_code">#f2e5bc</color>
+    <color name="fg_link">#9d0006</color>
+    <color name="fg_heading">#282828</color>
+    <color name="fg_focus">#af3a03</color>
+    <color name="fg_selection">#d5c4a1</color>
+    <bool name="fg_light_system_bars">true</bool>
+</resources>

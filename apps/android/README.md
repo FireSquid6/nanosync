@@ -62,6 +62,13 @@ to `apps/android/app/build/outputs/apk/release/app-release.apk`. Back up the sig
 key securely; future releases need the same key to update installed copies. No
 production signing key or password belongs in Git or build logs.
 
+## Appearance
+
+The native dashboard and dialogs use the website/admin **Field Guide** styling:
+monospace type, warm Gruvbox colors, square outlined controls and section dividers.
+Light/dark colors follow the Android system setting. Palette regression tests keep
+Android's resource tokens aligned with `packages/ui-theme/styles.css`.
+
 ## Connect and operate
 
 1. Choose the global mobile-data default in the first-launch popup.

@@ -154,7 +154,7 @@ public final class MainActivity extends Activity {
         LinearLayout header = row(content);
         TextView title = text(header, "Nanosync", 26);
         title.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1));
-        button(header, "Add new server", this::addServer);
+        button(header, "Add new server", this::addServer).setMaxWidth(dp(164));
         button(content, "Settings · network & mobile data", this::settings);
         String globalError = value(config, "error", "");
         if (!globalError.isEmpty()) text(content, "Action error: " + globalError + "\nResolve the issue above and retry the action.", 16);
@@ -162,6 +162,7 @@ public final class MainActivity extends Activity {
         if (servers.length() == 0) text(content, "Add a server to connect an existing remote vault to a folder on this device.", 16);
         for (int i = 0; i < servers.length(); i++) {
             JSONObject server = servers.optJSONObject(i);
+            divider(content);
             String id = server.optString("id");
             boolean open = expanded.contains(id);
             button(content, (open ? "▾ " : "▸ ") + label(server, "alias", "Server") + " · " + server.optString("enrollmentStatus"), () -> {
@@ -205,6 +206,7 @@ public final class MainActivity extends Activity {
                 + "\nProgress: " + value(vault, "progress", "Not reported"), 16);
         String error = value(vault, "error", "");
         if (!error.isEmpty()) text(content, "Error: " + error + "\nCheck network access, folder permissions and device approval, then try Sync now.", 16);
+        divider(content);
         JSONArray conflicts = vault.optJSONArray("conflicts");
         text(content, "Conflicts", 18);
         if (conflicts == null || conflicts.length() == 0) text(content, "None reported", 16);
@@ -215,6 +217,7 @@ public final class MainActivity extends Activity {
         check(content, "Paused (automatic sync)", vault.optBoolean("paused"), checked -> editVault(id, v -> put(v, "paused", checked)));
         check(content, "Background sync (opt in for this vault)", vault.optBoolean("background"), checked -> backgroundChanged(id, checked));
         text(content, "Background sync can continue the initial download while the app is closed. Android shows an ongoing notification while running; notification permission may be requested.", 14);
+        divider(content);
         text(content, "Mobile data policy", 18);
         Spinner policy = new Spinner(this);
         String inherited = config.optBoolean("defaultMobile") ? "allowed" : "Wi-Fi only";
@@ -575,9 +578,21 @@ public final class MainActivity extends Activity {
     private LinearLayout column() {
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
-        int padding = (int) (16 * getResources().getDisplayMetrics().density);
+        int padding = dp(20);
         layout.setPadding(padding, padding, padding, padding);
         return layout;
+    }
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private void divider(LinearLayout parent) {
+        View line = new View(this);
+        line.setBackgroundColor(getColor(R.color.fg_border));
+        LinearLayout.LayoutParams spacing = new LinearLayout.LayoutParams(-1, dp(1));
+        spacing.setMargins(0, dp(18), 0, dp(18));
+        parent.addView(line, spacing);
     }
 
     private LinearLayout row(LinearLayout parent) {
@@ -597,19 +612,26 @@ public final class MainActivity extends Activity {
     private TextView text(LinearLayout parent, String value, int size) {
         TextView view = new TextView(this);
         view.setText(value);
+        view.setTextAppearance(size >= 18 ? R.style.FieldGuideHeading : R.style.FieldGuideBody);
         view.setTextSize(size);
-        view.setPadding(0, 8, 0, 8);
+        if (size < 16) view.setTextColor(getColor(R.color.fg_muted));
+        view.setPadding(0, dp(6), 0, dp(6));
         view.setTextIsSelectable(true);
         parent.addView(view);
         return view;
     }
 
-    private void button(LinearLayout parent, String label, Runnable action) {
+    private Button button(LinearLayout parent, String label, Runnable action) {
         Button view = new Button(this);
         view.setText(label);
         view.setAllCaps(false);
+        view.setSingleLine(false);
         view.setOnClickListener(v -> action.run());
-        parent.addView(view);
+        int width = parent.getOrientation() == LinearLayout.VERTICAL ? -1 : -2;
+        LinearLayout.LayoutParams spacing = new LinearLayout.LayoutParams(width, -2);
+        spacing.setMargins(0, dp(4), 0, dp(8));
+        parent.addView(view, spacing);
+        return view;
     }
 
     private CheckBox check(LinearLayout parent, String label, boolean checked, Consumer<Boolean> change) {
@@ -633,7 +655,9 @@ public final class MainActivity extends Activity {
             view.setSaveEnabled(false);
             view.setLongClickable(false);
         }
-        parent.addView(view);
+        LinearLayout.LayoutParams spacing = new LinearLayout.LayoutParams(-1, -2);
+        spacing.setMargins(0, dp(6), 0, dp(10));
+        parent.addView(view, spacing);
         return view;
     }
 

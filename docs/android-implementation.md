@@ -28,7 +28,7 @@ must distinguish verified behavior from unavailable device acceptance.
   provided working JDK 21, Gradle 9.8.2, Bun and Android tools. Compile/target API 37,
   minimum API 31. Existing Linux binary outputs/pins were preserved.
 - Debug application/test APK assembly and Android lint passed without a lint baseline.
-- Android 12/API 31 and Android 17/API 37 emulators each passed 35 platform tests;
+- Android 12/API 31 and Android 17/API 37 emulators each passed 39 platform tests;
   two host-fixture cases intentionally skip in this plain instrumentation run.
 - Those two cases separately passed on **both** emulators against a disposable real
   server and a second existing client: recovery crypto, native password enrollment
@@ -37,7 +37,7 @@ must distinguish verified behavior from unavailable device acceptance.
   exceptions without preference mutation, screen-off foreground synchronization/notification,
   actual bounded JobService fallback, file-preserving disconnect, and replica
   convergence. This is not a static dashboard or a mock server demonstration.
-- Host suite: **346 passed, 0 failed** across 39 files; workspace and Android
+- Host suite: **377 passed, 0 failed** across 44 files; workspace and Android
   runtime/test/harness strict typechecks passed. Linux installer fixtures passed.
 - Host regression tests cover protocol/crypto, portable-engine adapter extraction,
   real-server Android/CLI interoperability, initial imports, rename identity,
@@ -63,6 +63,12 @@ must distinguish verified behavior from unavailable device acceptance.
   active through body reads without relying on newer AbortSignal APIs unavailable
   in Android 12 WebView. Deleted vaults stop natively without removing local data.
 - All six browser administration/journey tests passed after this integration.
+- Merged website/admin main (`0ea2e2b`), retaining CLI transfer progress with the
+  portable engine. Native screens and dialogs use the shared Field Guide palettes
+  and monospace styling, following system light/dark mode. Palette parity and
+  native theme tests passed; both emulators reran real-server and platform checks.
+  Initial background opt-in no longer interrupts the manual download, and sync
+  reports download paths/saved bytes and verification phases.
 
 Exact final command results are also recorded in the implementation PR. See the [Android guide](../apps/android/README.md) for reproduction commands.
 
