@@ -84,7 +84,8 @@ export class TestHost implements NativeHost {
       default: throw new Error(`unknown native method ${method}`);
     }
   }
-  event(_json: string) {}
+  readonly events: { phase?: string; progress?: string }[] = [];
+  event(json: string) { this.events.push(JSON.parse(json)); }
   finish(json: string) { this.result = JSON.parse(json); }
   fail(message: string) { this.error = message; }
   async run(context: RunContext) {

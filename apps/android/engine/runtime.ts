@@ -50,6 +50,7 @@ export function install(host: NativeHost, target: { Nanosync?: unknown; Nanosync
       key = Uint8Array.from(master.match(/../g)!, pair => parseInt(pair, 16));
       const journal = new Journal(bridge), scanner = new Scanner(bridge, journal);
       await journal.prepareStorage();
+      bridge.progress("scanning", "Scanning local files…");
       await scanner.refresh();
       const remote = new HttpRemote({ baseUrl: context.server.baseUrl, token: context.server.token, vaultId: context.vault.vaultId, fetch: transport, journal });
       const applier = new Applier(bridge, journal, scanner, remote);
@@ -58,6 +59,7 @@ export function install(host: NativeHost, target: { Nanosync?: unknown; Nanosync
         apply: (manifest, sequence, borrowedKey) => applier.apply(manifest, sequence, borrowedKey),
         hydrate: async () => { throw new Error("Android hydration intents unsupported"); },
       });
+      bridge.progress("reconciling", "Comparing with the server and uploading local changes…");
       const result = await engine.syncOnce();
       host.finish(JSON.stringify({ ...result, conflicts: journal.state.conflicts, exclusionsActive: scanner.exclusionsActive, pendingUploads: 0, pendingDownloads: 0 }));
     } catch (error) {

@@ -85,6 +85,50 @@ public final class SyncOwnershipTest {
         }
     }
 
+    @Test public void enablingBackgroundDuringInitialManualSyncDoesNotCancelIt() throws Exception {
+        try (Fixture f = new Fixture(1, 60_000)) {
+            String id = f.ids.get(0);
+            f.store.mutate(config -> { try {
+                config.getJSONArray("servers").getJSONObject(0).getJSONArray("vaults").getJSONObject(0).put("background", false);
+            } catch (Exception e) { throw new AssertionError(e); } });
+            f.coordinator.syncNow(id, false);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            FakeRun run = f.runs.get(id);
+            assertNotNull(run);
+            assertFalse(f.vault(0).optBoolean("initialSyncComplete"));
+            f.store.mutate(config -> { try {
+                config.getJSONArray("servers").getJSONObject(0).getJSONArray("vaults").getJSONObject(0).put("background", true);
+            } catch (Exception e) { throw new AssertionError(e); } });
+            f.coordinator.settingsChanged();
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            assertSame(run, f.runs.get(id));
+            assertFalse("Opting into background must not interrupt the initial download", run.cancelled);
+            assertTrue(f.vault(0).optBoolean("background"));
+        }
+    }
+
+    @Test public void initialBackgroundSyncReportsPhaseChangesWithoutWaitingForThrottle() throws Exception {
+        try (Fixture f = new Fixture(1, 60_000)) {
+            assertFalse(f.vault(0).optBoolean("initialSyncComplete"));
+            f.coordinator.startJob(new Object(), 60_000, () -> { });
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            FakeRun run = f.runs.get(f.ids.get(0));
+            assertNotNull("Background work can start before initial sync completes", run);
+            run.listener.onEvent(new JSONObject().put("type", "runtimeCapabilities"));
+            run.listener.onEvent(new JSONObject().put("phase", "downloading").put("progress", "Downloading note: 0 / 8 bytes"));
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            assertEquals("Downloading note: 0 / 8 bytes", f.vault(0).optString("progress"));
+            run.listener.onEvent(new JSONObject().put("phase", "verifying").put("progress", "Verifying downloaded files"));
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            assertEquals("Verifying downloaded files", f.vault(0).optString("progress"));
+            run.listener.onFinished(new JSONObject().put("revisionId", UUID.randomUUID().toString())
+                    .put("sequence", 1).put("pendingUploads", 0).put("pendingDownloads", 0));
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            assertTrue(f.vault(0).optBoolean("initialSyncComplete"));
+            assertEquals("All non-ignored files verified locally", f.vault(0).optString("progress"));
+        }
+    }
+
     @Test public void deletedVaultStopsManualAndScheduledRetriesWithoutDiscardingKeyOrJournal() throws Exception {
         try (Fixture f = new Fixture(1, 60_000)) {
             String id = f.ids.get(0);

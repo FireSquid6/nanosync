@@ -23,6 +23,7 @@ export class Applier {
     return stat;
   }
   async apply(manifest: ManifestV1, sequence: number, key: Uint8Array) {
+    this.bridge.progress("preparing", "Preparing downloads and checking available storage…");
     await this.scanner.refresh();
     let intent = this.journal.state.applies.find(i => i.revision === manifest.revisionId);
     if (this.journal.state.applies.length && !intent) throw new Error("different apply already pending");
@@ -100,6 +101,10 @@ export class Applier {
         // A recorded topology removal intentionally leaves the old destination absent.
         if (!intent.removed?.includes(path)) await this.guard(path, baseline.get(path));
       }
+      const reportDownload = () => this.bridge.progress(
+        "downloading", `Downloading ${path}: ${file.offset} / ${entry.size} bytes (verified and saved)`,
+      );
+      reportDownload();
       let offset = 0;
       for (const chunk of entry.chunks!) {
         const ref = refs.get(chunk.objectId); if (!ref || ref.objectType !== "chunk") throw new Error("missing authenticated chunk reference");
@@ -113,16 +118,19 @@ export class Applier {
             if (bytes.length !== chunk.length) throw new Error("invalid plaintext chunk length");
             await this.bridge.call("stageWrite", { id: file.id, offset, dataBase64: toBase64(bytes) });
             file.offset = offset + bytes.length; this.journal.save();
+            reportDownload();
           }
         }
         offset += chunk.length;
       }
       if (!entry.size) await this.bridge.call("stageWrite", { id: file.id, offset: 0, dataBase64: "" });
+      this.bridge.progress("verifying-download", `Verifying downloaded file: ${path}`);
       const digest = await this.bridge.call<{ sha256: string; size: number }>("stageDigest", { id: file.id });
       if (digest.sha256 !== entry.sha256 || digest.size !== entry.size) throw new Error("reconstructed file digest mismatch");
       if (!intent.removed?.includes(path)) await this.guard(path, baseline.get(path));
     }
 
+    this.bridge.progress("applying", "Downloads verified; applying files to your folder…");
     await this.scanner.refresh();
     if (this.scanner.policySignature() !== policy) throw new Error("ignore policy changed during download; retry sync before applying");
     const mutation = async () => {
@@ -161,6 +169,7 @@ export class Applier {
       await this.bridge.call("stageCommit", { id: file.id, path, expected: file.expected });
       file.done = true; this.journal.save();
     }
+    this.bridge.progress("verifying", "Verifying all local files before completing sync…");
     await this.scanner.refresh();
     const inventory = this.scanner.snapshot() as Metadata[];
     for (const [path, entry] of target) {

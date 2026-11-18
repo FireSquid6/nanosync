@@ -78,8 +78,10 @@ localStorage or IndexedDB.
 Each vault page shows actual connection/sync state, last success, pending
 uploads/downloads, progress, errors, conflicts, folder and sync controls.
 
-- **Background sync** is explicitly enabled per vault after its first successful
+- **Background sync** is explicitly enabled per vault, including during initial
   synchronization. A consolidated ongoing notification makes active work visible.
+- Initial synchronization reports scanning, reconciliation, download paths and
+  saved byte counts, application, and final verification rather than silent waiting.
 - **Pause** stops uploads and downloads but leaves local editing available.
 - **Sync now** performs one full reconciliation, even while paused, and restores
   the existing persistent pause/background preferences afterwards.

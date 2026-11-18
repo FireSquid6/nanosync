@@ -14,6 +14,9 @@ function unwrap(result: Result): unknown {
 export class Bridge {
   private pending = new Map<string, { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>();
   constructor(readonly host: NativeHost, private timeout = 120_000) {}
+  progress(phase: string, progress: string): void {
+    this.host.event(JSON.stringify({ phase, progress }));
+  }
   sync<T>(method: string, args: unknown = {}): T { return unwrap(JSON.parse(this.host.sync(method, JSON.stringify(args)))) as T; }
   call<T>(method: string, args: unknown = {}): Promise<T> {
     if (this.pending.size >= 16) return Promise.reject(new Error("too many native requests"));

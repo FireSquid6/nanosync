@@ -76,8 +76,10 @@ production signing key or password belongs in Git or build logs.
 4. Expand the server and choose **Connect existing vault**. Select a remote vault,
    grant Android **All files access**, choose a supported folder and enter its
    recovery key. Existing files participate in safe reconciliation.
-5. Inspect initial synchronization on the vault page. Background sync is a separate
-   opt-in after initial success, with notification permission requested explicitly.
+5. Inspect initial synchronization on the vault page: progress shows the current
+   download path and saved byte count, followed by application and verification.
+   Background sync is a separate opt-in available immediately, including during
+   the initial download, with notification permission requested explicitly.
 
 The native adapter supports dedicated folders in the current user's primary
 shared storage, outside protected `Android/` directories. The picker cannot grant

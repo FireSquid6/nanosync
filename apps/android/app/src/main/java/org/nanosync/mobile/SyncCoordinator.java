@@ -269,12 +269,7 @@ public final class SyncCoordinator implements UiActions {
             state.refreshPolicies(settings);
             state.retryCleanup();
             state.reconcile();
-            if (state.hasBackground()) {
-                state.environment.scheduleResume(state.context);
-                try {
-                    state.environment.startBackgroundService(state.context);
-                } catch (RuntimeException e) { state.backgroundUnavailable("Background sync could not start. Open Nanosync and allow background operation."); }
-            }
+            state.ensureBackground();
         });
     }
     @Override public void disconnectVault(String id) { state.main.post(() -> state.disconnect(id)); }
@@ -324,6 +319,7 @@ public final class SyncCoordinator implements UiActions {
         File root;
         String serverId, vaultId;
         long lastEvent;
+        String lastPhase = "";
         int previousYields;
         long generation;
     }
@@ -462,7 +458,7 @@ public final class SyncCoordinator implements UiActions {
         }
         String policyStamp(JSONObject config, JSONObject vault) {
             return config.optBoolean("allowHttp") + ":" + config.optBoolean("defaultMobile") + ":"
-                    + vault.optString("mobilePolicy", "default") + ":" + vault.optBoolean("paused") + ":" + vault.optBoolean("background");
+                    + vault.optString("mobilePolicy", "default") + ":" + vault.optBoolean("paused");
         }
         void refreshPolicies(JSONObject config) {
             JSONArray servers = config.optJSONArray("servers");
@@ -477,7 +473,8 @@ public final class SyncCoordinator implements UiActions {
         }
         boolean currentRequest(String id, StartRequest request) {
             JSONObject config = store.snapshot(), vault = findVault(config, id);
-            return (request.job == null || job == request.job && !request.job.stopping) && vault != null && request.generation == generations.getOrDefault(id, 0L)
+            return (request.job == null || job == request.job && !request.job.stopping) && vault != null
+                    && (request.manual || vault.optBoolean("background")) && request.generation == generations.getOrDefault(id, 0L)
                     && policyStamp(config, vault).equals(policyValues.get(id));
         }
         void discardQueued(String id, StartRequest request) {
@@ -578,7 +575,8 @@ public final class SyncCoordinator implements UiActions {
                     @Override public void onFinished(JSONObject result) { main.post(() -> finish(id, run, result, null)); }
                     @Override public void onError(String error) { main.post(() -> finish(id, run, null, error)); }
                 });
-                vaultState(id, value -> value.put("running", true).put("error", "").put("status", recovery == null ? "Syncing" : "Connecting"));
+                vaultState(id, value -> value.put("running", true).put("error", "").put("status", recovery == null ? "Syncing" : "Connecting")
+                        .put("progress", recovery == null ? "Starting synchronization…" : "Recovering vault key…"));
                 run.deadline = () -> {
                     if (runs.get(id) != run || run.cancelled) return;
                     run.timedOut = true;
@@ -611,10 +609,12 @@ public final class SyncCoordinator implements UiActions {
             }
         }
         void event(String id, Run run, JSONObject event) {
-            if (runs.get(id) != run || run.cancelled) return;
+            if (runs.get(id) != run || run.cancelled || !event.has("progress")) return;
             long now = android.os.SystemClock.elapsedRealtime();
-            if (now - run.lastEvent < 1000) return;
+            String phase = event.optString("phase");
+            if (phase.equals(run.lastPhase) && now - run.lastEvent < 1000) return;
             run.lastEvent = now;
+            run.lastPhase = phase;
             // Never blindly merge bridge events (they may contain transient secrets).
             vaultState(id, vault -> {
                 for (String key : new String[]{"progress", "pendingUploads", "pendingDownloads"})
@@ -673,11 +673,12 @@ public final class SyncCoordinator implements UiActions {
             next.put(id, System.currentTimeMillis() + 5000);
             if (recovery != null) {
                 vaultState(id, vault -> vault.put("masterKeyHex", result.getString("masterKeyHex")).put("running", false).put("status", "Ready").put("error", ""));
+                ensureBackground();
                 start(id, true, run.override, null);
             } else if (result != null && result.optString("revisionId").matches("[0-9a-f-]{36}") && result.optLong("sequence", -1) >= 0
                     && result.optInt("pendingUploads", -1) == 0 && result.optInt("pendingDownloads", -1) == 0) {
                 vaultState(id, vault -> vault.put("running", false).put("status", "Up to date").put("error", "")
-                        .put("runTimeouts", 0).put("lastSuccess", java.time.Instant.now().toString()).put("initialSyncComplete", true)
+                        .put("runTimeouts", 0).put("progress", "All non-ignored files verified locally").put("lastSuccess", java.time.Instant.now().toString()).put("initialSyncComplete", true)
                         .put("conflicts", result.optJSONArray("conflicts") == null ? new JSONArray() : result.getJSONArray("conflicts"))
                         .put("conflictCount", result.optJSONArray("conflicts") == null ? 0 : result.optJSONArray("conflicts").length())
                         .put("exclusionsActive", result.optBoolean("exclusionsActive"))
@@ -758,6 +759,15 @@ public final class SyncCoordinator implements UiActions {
         String policy(JSONObject config, JSONObject vault, boolean override) {
             // Pausing a manual one-pass run already paused is allowed; changing pause cancels it.
             return config.optBoolean("allowHttp") + ":" + effectiveMobileAllowed(config, vault, override) + ":" + vault.optBoolean("paused");
+        }
+        void ensureBackground() {
+            if (!hasBackground()) return;
+            environment.scheduleResume(context);
+            try {
+                environment.startBackgroundService(context);
+            } catch (RuntimeException e) {
+                backgroundUnavailable("Background sync could not start. Open Nanosync and allow background operation.");
+            }
         }
         void backgroundUnavailable(String reason) {
             for (Map.Entry<String, Run> entry : new ArrayList<>(runs.entrySet())) if (!entry.getValue().manual && entry.getValue().job == null) cancel(entry.getKey(), entry.getValue());

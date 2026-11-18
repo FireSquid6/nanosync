@@ -183,7 +183,8 @@ public final class MainActivity extends Activity {
             JSONArray vaults = server.optJSONArray("vaults");
             for (int j = 0; j < vaults.length(); j++) {
                 JSONObject vault = vaults.optJSONObject(j);
-                button(content, "    " + label(vault, "name", "Vault") + " · " + vault.optString("status"), () -> {
+                button(content, "    " + label(vault, "name", "Vault") + " · " + vault.optString("status")
+                        + (vault.optBoolean("running") ? "\n" + vault.optString("progress") : ""), () -> {
                     detailId = vault.optString("id");
                     scroll.scrollTo(0, 0);
                     refresh();
@@ -212,10 +213,8 @@ public final class MainActivity extends Activity {
             text(content, conflict instanceof JSONObject ? ((JSONObject) conflict).toString() : String.valueOf(conflict), 14);
         }
         check(content, "Paused (automatic sync)", vault.optBoolean("paused"), checked -> editVault(id, v -> put(v, "paused", checked)));
-        CheckBox background = check(content, "Background sync (opt in for this vault)", vault.optBoolean("background"), checked -> backgroundChanged(id, checked));
-        background.setEnabled(vault.optBoolean("initialSyncComplete"));
-        text(content, "Background sync uses an ongoing Android notification while running. Notification permission may be requested.", 14);
-        if (!vault.optBoolean("initialSyncComplete")) text(content, "Complete the initial foreground sync before enabling background sync.", 14);
+        check(content, "Background sync (opt in for this vault)", vault.optBoolean("background"), checked -> backgroundChanged(id, checked));
+        text(content, "Background sync can continue the initial download while the app is closed. Android shows an ongoing notification while running; notification permission may be requested.", 14);
         text(content, "Mobile data policy", 18);
         Spinner policy = new Spinner(this);
         String inherited = config.optBoolean("defaultMobile") ? "allowed" : "Wi-Fi only";
@@ -258,7 +257,7 @@ public final class MainActivity extends Activity {
         if (onboardingVisible || store == null || store.snapshot().optBoolean("mobilePrompted")) return;
         onboardingVisible = true;
         new AlertDialog.Builder(this).setTitle("Default mobile data policy")
-                .setMessage("May vaults use mobile data by default? Each vault can override this. Background sync is a separate opt-in after initial sync.")
+                .setMessage("May vaults use mobile data by default? Each vault can override this. Background sync is a separate opt-in, including during the initial download.")
                 .setPositiveButton("Allow mobile data", (d, w) -> mobileDefault(true))
                 .setNegativeButton("Wi-Fi only", (d, w) -> mobileDefault(false))
                 .setCancelable(false).show();
@@ -456,7 +455,7 @@ public final class MainActivity extends Activity {
         if (!enabled) { editVault(id, vault -> put(vault, "background", false)); return; }
         refresh(); // Permission/confirmation is not a saved preference yet.
         JSONObject vault = findVault(store.snapshot(), id);
-        if (vault == null || !vault.optBoolean("initialSyncComplete")) return;
+        if (vault == null) return;
         confirm("Enable background sync?", "This vault may sync while the app is closed. Android displays an ongoing notification while sync runs. Mobile data and paused preferences still apply.", () -> {
             if (android.os.Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS")
                     != android.content.pm.PackageManager.PERMISSION_GRANTED) {
@@ -467,9 +466,7 @@ public final class MainActivity extends Activity {
     }
 
     private void enableBackground(String id) {
-        editVault(id, vault -> {
-            if (vault.optBoolean("initialSyncComplete")) put(vault, "background", true);
-        });
+        editVault(id, vault -> put(vault, "background", true));
     }
 
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grants) {
