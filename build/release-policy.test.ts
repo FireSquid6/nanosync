@@ -119,6 +119,27 @@ test("publication verifies drafts and never overwrites public assets", async () 
   }
 });
 
+test("release publication queues tags and waits for CLI, macOS installer, and Android checks", async () => {
+  const file = new URL("../.github/workflows/release.yml", import.meta.url);
+  const workflow = Bun.YAML.parse(await Bun.file(file).text()) as {
+    jobs: {
+      publish: { needs: string[]; concurrency: Record<string, unknown> };
+      android: { uses: string };
+      build: { steps: { name?: string; if?: string; run?: string }[] };
+    };
+  };
+  expect(workflow.jobs.publish.needs).toEqual(["checks", "build", "android"]);
+  expect(workflow.jobs.publish.concurrency).toEqual({
+    group: "nanosync-release-publication", queue: "max", "cancel-in-progress": false,
+  });
+  expect(workflow.jobs.android.uses).toBe("./.github/workflows/android.yml");
+  expect(workflow.jobs.build.steps).toContainEqual({
+    name: "Installer fixtures on macOS Bash 3.2",
+    if: "matrix.target == 'darwin-arm64'",
+    run: "/bin/bash build/test-install.sh",
+  });
+});
+
 test("binary builder preserves its default and rejects unsafe targets/outputs before building", async () => {
   const { chmod } = await import("node:fs/promises");
   const directory = await mkdtemp(join(tmpdir(), "release-builder-"));

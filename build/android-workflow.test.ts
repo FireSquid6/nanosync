@@ -3,8 +3,14 @@ import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-type Step = { name?: string; run?: string; uses?: string; with?: { name?: string; path?: string; "if-no-files-found"?: string } };
-const workflow = Bun.YAML.parse(await Bun.file(new URL("../.github/workflows/android.yml", import.meta.url)).text()) as {
+type Step = {
+  name?: string;
+  run?: string;
+  uses?: string;
+  with?: { name?: string; path?: string; "if-no-files-found"?: string };
+};
+const workflowPath = new URL("../.github/workflows/android.yml", import.meta.url);
+const workflow = Bun.YAML.parse(await Bun.file(workflowPath).text()) as {
   on: Record<string, unknown>;
   concurrency: { group: string; "cancel-in-progress": string };
   jobs: { android: { steps: Step[] } };
@@ -30,8 +36,11 @@ test("debug distribution contains only the renamed APK and a standard verified c
   const artifact = steps.find((step) => step.with?.name === "nanosync-android-debug")!;
   expect(artifact.with?.path).toBe("dist/android-debug/*");
   expect(artifact.with?.["if-no-files-found"]).toBe("error");
-  const testArtifact = steps.find((step) => step.with?.name === "nanosync-android-test")!;
-  expect(testArtifact.with?.path).toBe("apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk");
+  const testArtifact = steps.find((step) => step.with?.name === "android-instrumentation-test")!;
+  expect(testArtifact.with?.name).not.toStartWith("nanosync-");
+  expect(testArtifact.with?.path).toBe(
+    "apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk",
+  );
   expect(testArtifact.with?.["if-no-files-found"]).toBe("error");
   const prepare = steps.find((step) => step.name === "Prepare debug-signed APK (not production signed)")!;
   expect(prepare.run).toBeDefined();

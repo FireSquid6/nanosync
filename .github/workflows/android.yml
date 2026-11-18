@@ -47,7 +47,7 @@ jobs:
       - name: Upload instrumentation test APK (validation only, not distributable)
         uses: actions/upload-artifact@v4
         with:
-          name: nanosync-android-test
+          name: android-instrumentation-test
           path: apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
           if-no-files-found: error
       - name: Upload lint reports

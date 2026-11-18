@@ -44,6 +44,9 @@ jobs:
           bun-version: 1.4.2
       - run: bun install --frozen-lockfile
       - run: bash build/binary.sh '${{ matrix.target }}' 'dist/nanosync-${{ matrix.target }}'
+      - name: Installer fixtures on macOS Bash 3.2
+        if: matrix.target == 'darwin-arm64'
+        run: /bin/bash build/test-install.sh
       - name: Native Linux standalone checks
         if: startsWith(matrix.target, 'linux-')
         run: |
@@ -67,6 +70,7 @@ jobs:
     # The latest decision and draft publication must be one serialized operation across tags.
     concurrency:
       group: nanosync-release-publication
+      queue: max
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
