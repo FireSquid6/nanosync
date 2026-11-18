@@ -57,11 +57,11 @@ test('site branding, home features and sync animation', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Uncomplicate file sync');
   await expect(page.getByRole('checkbox')).toHaveCount(6);
-  for (const feature of ['Two-way sync', 'End-to-end encryption', 'Self-hostable', 'CLI']) {
+  for (const feature of ['Two-way sync', 'End-to-end encryption', 'Self-hostable', 'CLI', 'Android 12+ app (debug validation build; no iOS app)']) {
     await expect(page.getByRole('checkbox', { name: feature, exact: true })).toBeChecked();
     await expect(page.getByRole('checkbox', { name: feature, exact: true })).toBeDisabled();
   }
-  for (const feature of ['Mobile App', 'Desktop App']) {
+  for (const feature of ['Desktop App']) {
     await expect(page.getByRole('checkbox', { name: feature, exact: true })).not.toBeChecked();
     await expect(page.getByRole('checkbox', { name: feature, exact: true })).toBeDisabled();
   }
