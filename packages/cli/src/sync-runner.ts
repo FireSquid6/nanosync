@@ -22,6 +22,7 @@ export interface SyncOptions {
   fetch?: RemoteOptions["fetch"];
   pollMs?: number;
   scan?: ScanOptions;
+  onProgress?: (message: string) => void;
 }
 
 function sameTree(a: ManifestV1, b: ManifestV1): boolean {
@@ -40,6 +41,8 @@ export class SyncRunner {
   private readonly device: string;
   private readonly pollMs: number;
   private readonly unlock: () => void;
+  private readonly onProgress: SyncOptions["onProgress"];
+  private readonly transfers = { upload: { count: 0, bytes: 0 }, download: { count: 0, bytes: 0 } };
   private watcher?: LinuxWatcher;
   private active?: Promise<{ revisionId: string; sequence: number }>;
   private stopped = false;
@@ -48,6 +51,7 @@ export class SyncRunner {
 
   private constructor(options: SyncOptions, unlock: () => void) {
     this.unlock = unlock;
+    this.onProgress = options.onProgress;
     this.vault = parseVaultId(options.vaultId);
     this.device = parseDeviceId(options.deviceId);
     if (!(options.masterKey instanceof Uint8Array) || options.masterKey.length !== 32) throw new Error("invalid vault key");
@@ -58,7 +62,16 @@ export class SyncRunner {
     try {
       this.scanner = new LinuxScanner(options.syncDirectory, this.local, options.scan);
       this.remote = new HttpRemote({ baseUrl: options.baseUrl, token: options.token, vaultId: this.vault,
-        fetch: options.fetch ?? fetch, journal: this.local, signal: this.cancellation.signal });
+        fetch: options.fetch ?? fetch, journal: this.local, signal: this.cancellation.signal,
+        onTransfer: (direction, bytes) => {
+          const total = this.transfers[direction];
+          total.count++; total.bytes += bytes;
+          if (total.count === 1 || total.count % 25 === 0) {
+            const verb = direction === "download" ? "Downloaded" : "Uploaded";
+            const size = (total.bytes / 1_048_576).toFixed(1);
+            this.onProgress?.(`${verb} ${total.count} encrypted objects (${size} MiB).`);
+          }
+        } });
     } catch (error) {
       this.local.close();
       this.key.fill(0);
@@ -95,6 +108,9 @@ export class SyncRunner {
     if (this.stopped) return Promise.reject(new Error("sync runner stopped"));
     if (this.active) return this.active;
     const work = (async () => {
+      this.transfers.upload = { count: 0, bytes: 0 };
+      this.transfers.download = { count: 0, bytes: 0 };
+      this.onProgress?.("Connecting to server and checking sync state...");
       // A concurrent publisher may advance the head between the first pass and its
       // final observation. Retry a bounded number of times rather than claim success.
       for (let attempt = 0; attempt < 4; attempt++) {
@@ -108,6 +124,7 @@ export class SyncRunner {
             this.local.head("accepted").revisionId === applied.revisionId && !this.local.proposal() &&
             !this.local.pendingApplies().length) {
           this.watcher?.refresh();
+          this.onProgress?.("Sync complete.");
           return { revisionId: applied.revisionId, sequence: applied.sequence };
         }
       }
@@ -464,6 +481,7 @@ export class SyncRunner {
     if (prior.sequence !== latest.sequence) throw new Error("applied revision sequence mismatch");
     if (head.revisionId !== latest.revisionId) await this.remotePath(prior, current);
     else if (head.sequence !== latest.sequence) throw new Error("applied head sequence changed");
+    this.onProgress?.("Scanning local files for changes...");
     const scan = await this.scanner.plan(prior.manifest, randomUUID(), this.device, this.key);
     if (sameTree(scan.manifest, prior.manifest)) {
       if (head.sequence > latest.sequence) {

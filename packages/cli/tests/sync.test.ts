@@ -97,6 +97,39 @@ function controlledWatch(runner: SyncRunner, onSuccess: Parameters<SyncRunner["w
   };
 }
 
+test("sync reports transfer progress on stderr while preserving JSON stdout", async () => {
+  const e = await fixture();
+  const uploadProgress: string[] = [];
+  const publisher = start({ ...e.a, onProgress: message => uploadProgress.push(message) });
+  await publisher.syncOnce();
+  for (let index = 0; index < 26; index++) {
+    writeFileSync(join(e.firstFiles, `note-${index}`), `contents ${index}`, { mode: 0o600 });
+  }
+  uploadProgress.length = 0;
+  const head = await publisher.syncOnce();
+  expect(uploadProgress[0]).toBe("Connecting to server and checking sync state...");
+  expect(uploadProgress).toContain("Scanning local files for changes...");
+  expect(uploadProgress.some(message => message.startsWith("Uploaded 25 encrypted objects"))).toBe(true);
+  expect(uploadProgress.at(-1)).toBe("Sync complete.");
+
+  const stdout: string[] = [], stderr: string[] = [];
+  const output = spyOn(console, "log").mockImplementation(message => stdout.push(String(message)));
+  const progress = spyOn(console, "error").mockImplementation(message => stderr.push(String(message)));
+  try {
+    expect(await main([
+      "client", "sync", "--json", "--client-dir", e.secondDir, "--path", e.secondFiles,
+    ])).toBe(0);
+  } finally { output.mockRestore(); progress.mockRestore(); }
+  expect(stdout).toHaveLength(1);
+  expect(JSON.parse(stdout[0]!)).toEqual({ ok: true, code: "OK", data: head });
+  const events = stderr.map(line => JSON.parse(line));
+  expect(events.every(event => event.event === "sync-progress")).toBe(true);
+  expect(events[0].message).toBe("Connecting to server and checking sync state...");
+  expect(events.some(event => event.message.startsWith("Downloaded 25 encrypted objects"))).toBe(true);
+  expect(events.at(-1).message).toBe("Sync complete.");
+  expect(readFileSync(join(e.secondFiles, "note-25"), "utf8")).toBe("contents 25");
+});
+
 test("one-shot CLI sync converges enrolled devices, keeps rename identity, and rejects overlap", async () => {
   const e = await fixture();
   expect(await main(["client", "sync"])).toBe(2);

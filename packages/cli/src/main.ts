@@ -193,7 +193,11 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
         if (discoverConnection(dir, binding.root).connectionId !== binding.connectionId) throw new CliError('CONFLICT', 'binding changed');
         storedServer(dir, binding.serverId);
         return SyncRunner.start({clientDirectory:privateDirectory(join(privateDirectory(join(privateDirectory(dir), 'replicas')), binding.connectionId)),
-          syncDirectory:binding.root, vaultId:binding.vaultId, deviceId:binding.deviceId, masterKey:master, baseUrl:info.baseUrl, token:info.token});
+          syncDirectory:binding.root, vaultId:binding.vaultId, deviceId:binding.deviceId,
+          masterKey:master, baseUrl:info.baseUrl, token:info.token,
+          onProgress: message => {
+            console.error(opts(command).json ? JSON.stringify({event:'sync-progress', message}) : message);
+          }});
       }); }
       finally { master.fill(0); }
       try {

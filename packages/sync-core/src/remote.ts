@@ -47,6 +47,7 @@ export interface RemoteOptions {
   journal?: ChunkJournal;
   retries?: number;
   signal?: AbortSignal;
+  onTransfer?: (direction: "upload" | "download", bytes: number) => void;
 }
 
 function exact(value: unknown, fields: string[]): Record<string, unknown> {
@@ -263,7 +264,7 @@ export class HttpRemote {
         idempotencyKey.length > caps.limits.maximumIdempotencyKeyLength) throw new Error("object exceeds negotiated limits");
     const hash = await crypto.subtle.digest("SHA-256", frame.buffer);
     if (Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, "0")).join("") !== ref.ciphertextChecksum) throw new Error("upload checksum mismatch");
-    return this.retry(async () => {
+    const status = await this.retry(async () => {
       const response = await this.request(`/v1/objects/${ref.objectType}/${ref.objectId}`, {
         method: "PUT", headers: {
           "content-length": String(ref.ciphertextLength), "x-nanosync-protocol-version": "1",
@@ -278,6 +279,8 @@ export class HttpRemote {
           (response.status === 201 && result.status !== "stored")) throw new Error("invalid upload response");
       return result.status;
     });
+    this.options.onTransfer?.("upload", ref.ciphertextLength);
+    return status;
   }
 
   private async downloadFrame(reference: VisibleObjectReference, vaultIdInput: string): Promise<Uint8Array> {
@@ -286,7 +289,7 @@ export class HttpRemote {
     const caps = await this.negotiated();
     if (!caps.objectTypes.includes(stableReference.objectType) || stableReference.ciphertextLength > caps.limits.maximumObjectCiphertextBytes ||
         stableReference.ciphertextLength > MAX_FRAME) throw new Error("object exceeds bounded decrypt limit");
-    return this.retry(async () => {
+    const frame = await this.retry(async () => {
       const response = await this.request(`/v1/objects/${stableReference.objectType}/${stableReference.objectId}`);
       if (response.status !== 200) { await this.body(response); throw new Error("unexpected object status"); }
       const headers = response.headers;
@@ -314,6 +317,8 @@ export class HttpRemote {
       catch { throw new IntegrityError("download frame identity mismatch"); }
       return frame;
     });
+    this.options.onTransfer?.("download", frame.byteLength);
+    return frame;
   }
 
   async download(reference: VisibleObjectReference, master: Uint8Array, vaultIdInput: string): Promise<Uint8Array> {
