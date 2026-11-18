@@ -1,3 +1,4 @@
+import { credentialBarrier, credentialMetadata, adoptLegacyCredentials, cleanupCredentialRecords, withCredentialRegistry, withCredentialOperation, type CredentialOptions } from "./credentials.ts";
 import { ClientLocal } from '@nanosync/client-local';
 import { LinuxScanner } from '@nanosync/linux-client';
 import { ClientError } from './errors.ts';
@@ -50,6 +51,7 @@ function record(global: string, connectionId: string): Connection {
   return value;
 }
 export function records(global: string): Connection[] {
+  credentialBarrier(global);
   const directory = join(privateDirectory(global), "connections");
   if (!existsSync(directory)) return [];
   privateDirectory(directory);
@@ -80,6 +82,7 @@ function ancestorMarker(path: string, globalDirectory: string): boolean {
 
 /** The nearest marker wins. A copied marker is never allowed to share the source journal. */
 export function discoverConnection(globalDirectory: string, from: string, allowMissingRoot = false): Connection {
+  credentialBarrier(globalDirectory);
   if (allowMissingRoot && missingRoot(resolve(from))) {
     const saved = records(globalDirectory).find(connection => connection.root === resolve(from));
     if (!saved) throw new Error("no saved binding for the missing directory");
@@ -110,7 +113,7 @@ export function createConnection(globalDirectory: string, destination: string, s
 /** Client adapter: revalidate the selected server while mutation is serialized with removal. */
 export function connectRegisteredVault(globalDirectory: string, destination: string, serverId: string, vaultId: string, deviceId: string, confirmNonempty = false): Connection {
   return withConnectionRegistry(globalDirectory, () => {
-    const saved = JSON.parse(secureRead(join(globalDirectory, 'servers', `${parseVaultId(serverId)}.json`)).toString('utf8'));
+    const saved = credentialMetadata(globalDirectory, `servers/${parseVaultId(serverId)}.json`);
     if (saved.serverId !== serverId || saved.deviceId !== deviceId) throw new Error('server connection changed; select it again');
     return createLocked(globalDirectory, destination, serverId, vaultId, deviceId, confirmNonempty);
   });
@@ -199,24 +202,31 @@ function hasUnsyncedWork(replica: string, connection: Connection): boolean {
 export function withConnectionRegistry<T>(globalDirectory: string, action: () => T): T {
   const directory = privateDirectory(join(privateDirectory(globalDirectory), 'registry-lock'));
   const release = acquireSyncLock(directory);
-  try { return action(); } finally { release(); }
+  try { credentialBarrier(globalDirectory); return action(); } finally { release(); }
 }
 
-export function removeServerConnection(globalDirectory: string, serverId: string, force = false): void {
-  withConnectionRegistry(globalDirectory, () => {
-    const attached = records(globalDirectory).filter(c => c.serverId === serverId);
+export async function removeServerConnection(globalDirectory: string, serverId: string, force = false, options: CredentialOptions = {}): Promise<void> {
+  parseDeviceId(serverId);
+  return withCredentialOperation(globalDirectory, () => withCredentialRegistry(globalDirectory, async () => {
+    const attached = records(globalDirectory).filter(connection => connection.serverId === serverId);
     if (attached.length && !force) throw new ClientError('CONNECTION_IN_USE', 'Vaults remain attached; disconnect them or explicitly use --force');
-    disconnectLocked(globalDirectory, attached, force);
-    unlinkSync(join(globalDirectory, 'servers', `${serverId}.json`));
-    syncDirectory(join(globalDirectory, 'servers'));
-  });
+    disconnectLocked(globalDirectory, attached, force, () => adoptLegacyCredentials(globalDirectory));
+    const keys = join(globalDirectory, 'keys');
+    const keyPaths = existsSync(keys) ? readdirSync(privateDirectory(keys))
+      .filter(name => name.startsWith(`${serverId}-`)).map(name => `keys/${name}`) : [];
+    const pending = join(globalDirectory, 'pending');
+    const pendingPaths = existsSync(pending) ? readdirSync(privateDirectory(pending))
+      .map(name => `pending/${name}`)
+      .filter(path => credentialMetadata(globalDirectory, path).serverId === serverId) : [];
+    await cleanupCredentialRecords(globalDirectory, [`servers/${serverId}.json`, ...keyPaths, ...pendingPaths], options);
+  }));
 }
 
 /** All replica locks are acquired in UUID order before any binding is changed. */
 export function disconnectConnections(globalDirectory: string, connections: Connection[], force = false): void {
   return withConnectionRegistry(globalDirectory, () => disconnectLocked(globalDirectory, connections, force));
 }
-function disconnectLocked(globalDirectory: string, connections: Connection[], force: boolean): void {
+function disconnectLocked(globalDirectory: string, connections: Connection[], force: boolean, beforeMutation?: () => void): void {
   const global = privateDirectory(globalDirectory);
   connections = [...connections].sort((a,b) => a.connectionId.localeCompare(b.connectionId));
   const releases: (() => void)[] = [];
@@ -236,6 +246,7 @@ function disconnectLocked(globalDirectory: string, connections: Connection[], fo
       if (!force && hasUnsyncedWork(replicaPaths[i]!, connections[i]!))
         throw new Error("possible unsynced work; use --force to explicitly discard pending synchronization state (files are preserved)");
     }
+    beforeMutation?.();
     for (const connection of connections) {
       if (!absent.has(connection.connectionId)) { unlinkSync(join(connection.root, MARKER)); syncDirectory(connection.root); }
       unlinkSync(join(global, "connections", `${connection.connectionId}.json`));

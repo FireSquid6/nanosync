@@ -23,7 +23,7 @@ afterEach(() => { for (const path of created.splice(0)) rmSync(path, { recursive
 test("forced disconnect and server removal discard missing roots without bypassing locks", async () => {
   const e = fixture(), serverId = randomUUID();
   const credential = join(privateDirectory(join(e.global, "servers")), `${serverId}.json`);
-  secureCreate(credential, JSON.stringify({ version: 1, serverId, baseUrl: "http://localhost", deviceId: e.device, name: "home", token: "a".repeat(43) }));
+  secureCreate(credential, JSON.stringify({ version: 1, serverId, baseUrl: "http://localhost", deviceId: e.device, name: "home", token: "A".repeat(43) }));
   const a = createConnection(e.global, e.first, serverId, e.vault, e.device);
   const b = createConnection(e.global, e.second, serverId, e.vault, e.device);
   rmSync(e.first, { recursive: true }); rmSync(e.second, { recursive: true });
@@ -32,11 +32,11 @@ test("forced disconnect and server removal discard missing roots without bypassi
   expect(records(e.global).map(item => item.connectionId)).toEqual([b.connectionId]);
   const replica = privateDirectory(join(privateDirectory(join(e.global, "replicas")), b.connectionId));
   const release = acquireSyncLock(replica);
-  try { expect(() => removeServerConnection(e.global, serverId, true)).toThrow(/live process/); }
+  try { await expect(removeServerConnection(e.global, serverId, true)).rejects.toThrow(/live process/); }
   finally { release(); }
   expect(existsSync(credential)).toBe(true);
   expect(records(e.global)).toHaveLength(1);
-  removeServerConnection(e.global, serverId, true);
+  await removeServerConnection(e.global, serverId, true);
   expect(records(e.global)).toEqual([]);
   expect(existsSync(credential)).toBe(false);
 });

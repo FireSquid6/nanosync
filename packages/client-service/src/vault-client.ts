@@ -1,12 +1,13 @@
+import { credentialBarrier, credentialMetadata, withCredentialOperation, readCredentialRecord, writeCredentialRecord, cleanupCredentialRecords, initializeCredentials, withCredentialRegistry, type CredentialOptions, type CredentialMode } from "./credentials.ts";
 import type { EnrollmentEvent } from "./events.ts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { existsSync, readdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { decodeRecoverySecret, unwrapMasterKey, RemoteError } from "@nanosync/sync-core";
-import { enrollmentVerificationCode, parseCapabilityResponse, parseDeviceId, parseAuthToken, decodeCanonicalBase64Url } from "@nanosync/protocol";
+import { enrollmentVerificationCode, parseCapabilityResponse, parseDeviceId } from "@nanosync/protocol";
 import { api, baseUrl, login } from "./client.ts";
-import { privateDirectory, secureCreate, secureRead, secureReplace, syncPrivateDirectory } from "./security.ts";
+import { privateDirectory, syncPrivateDirectory } from "./security.ts";
 
 import { ClientError } from "./errors.ts";
 
@@ -14,57 +15,64 @@ export interface ServerRegistration { version: 1; serverId: string; baseUrl: str
 interface VaultKey { version: 1; serverId: string; vaultId: string; masterKey: string }
 const dir = (root: string, leaf: string) => privateDirectory(join(privateDirectory(root), leaf));
 
-export function servers(root: string): ServerRegistration[] {
-  const path = dir(root, "servers");
-  return readdirSync(path).map(file => {
-    if (!/^[0-9a-f-]{36}\.json$/.test(file)) throw new Error("unexpected server state file");
-    const value = JSON.parse(secureRead(join(path, file), 2048).toString("utf8")) as ServerRegistration;
-    if (value.version !== 1 || value.serverId !== file.slice(0,-5) || typeof value.token !== "string" ||
-        typeof value.name !== "string" || baseUrl(value.baseUrl) !== value.baseUrl) throw new Error("invalid server registration");
-    return value;
+export type ServerMetadata = Omit<ServerRegistration, 'token'>;
+export function servers(root: string): ServerMetadata[] {
+  credentialBarrier(root);
+  return readdirSync(dir(root, 'servers')).map(file => {
+    if (!/^[0-9a-f-]{36}\.json$/.test(file)) throw new Error('unexpected server state file');
+    return credentialMetadata(root, `servers/${file}`) as unknown as ServerMetadata;
   });
 }
-export function server(root: string, choice?: string): ServerRegistration {
+export async function authenticatedServer(root: string, choice?: string, options: CredentialOptions = {}): Promise<ServerRegistration> {
+  const info = server(root, choice);
+  return readCredentialRecord(root, `servers/${info.serverId}.json`, options);
+}
+export function server(root: string, choice?: string): ServerMetadata {
   const list = servers(root);
   const selected = choice ? list.filter(item => item.serverId === choice || item.name === choice || item.baseUrl === choice) : list;
   if (selected.length !== 1) throw new Error(selected.length ? "server is ambiguous; select by ID" : "server not found; run nanosync client connections add");
   return selected[0]!;
 }
-export function key(root: string, serverId: string, vaultId: string): Uint8Array | null {
-  const path = join(dir(root, "keys"), `${serverId}-${vaultId}.json`);
-  if (!existsSync(path)) return null;
-  const value = JSON.parse(secureRead(path, 1024).toString("utf8")) as VaultKey;
-  if (value.serverId !== serverId || value.vaultId !== vaultId || !/^[0-9a-f]{64}$/.test(value.masterKey))
-    throw new Error("stored vault key is invalid");
-  return Buffer.from(value.masterKey, "hex");
+export async function key(root: string, serverId: string, vaultId: string, options: CredentialOptions = {}): Promise<Uint8Array | null> {
+  credentialBarrier(root);
+  parseDeviceId(serverId); parseDeviceId(vaultId);
+  const path = `keys/${serverId}-${vaultId}.json`;
+  if (!existsSync(join(dir(root, 'keys'), `${serverId}-${vaultId}.json`))) return null;
+  const value = await readCredentialRecord<VaultKey>(root, path, options);
+  return Buffer.from(value.masterKey, 'hex');
 }
-function saveKey(root: string, info: ServerRegistration, vaultId: string, master: Uint8Array): void {
-  const path = join(dir(root, "keys"), `${info.serverId}-${vaultId}.json`);
-  if (existsSync(path)) {
-    const current = key(root, info.serverId, vaultId);
-    if (!current || !Buffer.from(current).equals(Buffer.from(master))) throw new Error("vault key differs from stored key");
+export function keyWritePending(root: string, serverId: string, vaultId: string): boolean {
+  parseDeviceId(serverId); parseDeviceId(vaultId);
+  const path = `keys/${serverId}-${vaultId}.json`;
+  return existsSync(join(root, path)) && credentialMetadata(root, path).credentialWrite === 'pending';
+}
+async function saveKey(root: string, info: ServerMetadata, vaultId: string, master: Uint8Array, options: CredentialOptions): Promise<void> {
+  const current = options.retryCredentialWrite && keyWritePending(root, info.serverId, vaultId)
+    ? null : await key(root, info.serverId, vaultId, options);
+  if (current) {
+    try { if (!Buffer.from(current).equals(Buffer.from(master))) throw new Error('vault key differs from stored key'); }
+    finally { current.fill(0); }
     return;
   }
-  secureCreate(path, JSON.stringify({ version: 1, serverId: info.serverId, vaultId, masterKey: Buffer.from(master).toString("hex") }));
+  await withCredentialRegistry(root, () => writeCredentialRecord(root, `keys/${info.serverId}-${vaultId}.json`, {version:1, serverId:info.serverId, vaultId, masterKey:Buffer.from(master).toString('hex')}, options));
 }
 
 export interface PendingEnrollment { url: string; token: string; deviceId: string; name: string; alias: string; fingerprint: string; serverId: string; expiresAtMs: number; status?: string }
-export function pendingEnrollments(root: string): PendingEnrollment[] {
-  return readdirSync(dir(root, "pending")).map(file => {
-    if (!/^[a-f0-9]{64}\.json$/.test(file)) throw new Error("unexpected pending enrollment file");
-    const value = JSON.parse(secureRead(join(dir(root, "pending"), file), 4096).toString("utf8")) as PendingEnrollment;
-    if (pendingFile(root, value.url) !== join(dir(root, "pending"), file)) throw new Error("invalid pending enrollment URL");
-    parseDeviceId(value.deviceId); parseDeviceId(value.serverId); parseAuthToken(value.token); decodeCanonicalBase64Url(value.fingerprint, 32);
-    if (!value.name || !value.alias || !Number.isSafeInteger(value.expiresAtMs) || value.status && !["pending", "denied", "expired"].includes(value.status)) throw new Error("invalid pending enrollment");
+export function pendingEnrollments(root: string): Omit<PendingEnrollment, 'token'>[] {
+  credentialBarrier(root);
+  return readdirSync(dir(root, 'pending')).map(file => {
+    if (!/^[a-f0-9]{64}\.json$/.test(file)) throw new Error('unexpected pending enrollment file');
+    const value = credentialMetadata(root, `pending/${file}`) as unknown as Omit<PendingEnrollment, 'token'>;
+    if (pendingFile(root, value.url) !== join(dir(root, 'pending'), file)) throw new Error('invalid pending enrollment URL');
     return value;
   });
 }
 function pendingFile(root: string, url: string) { return join(dir(root, "pending"), createHash("sha256").update(baseUrl(url)).digest("hex") + ".json"); }
-export function connectionSummary(info: ServerRegistration) {
+export function connectionSummary(info: ServerMetadata) {
   return { serverId: info.serverId, alias: info.name, url: info.baseUrl, deviceId: info.deviceId, status: "approved" };
 }
-export async function enrollServer(root: string, url: string, password: string | undefined, deviceName: string,
-  waitMs = 60_000, options: { alias?: string; fresh?: boolean; signal?: AbortSignal; password?: () => Promise<string>; onEvent?: (event: EnrollmentEvent) => void } = {}): Promise<Record<string, unknown> & { status: string }> {
+async function enrollLocked(root: string, url: string, password: string | undefined, deviceName: string,
+  waitMs = 60_000, options: { alias?: string; fresh?: boolean; signal?: AbortSignal; password?: () => Promise<string>; onEvent?: (event: EnrollmentEvent) => void } & CredentialOptions = {}): Promise<Record<string, unknown> & { status: string }> {
   const waitDeadline = waitMs > 0 ? Date.now() + waitMs : Infinity;
   const interrupted = () => new ClientError("INTERRUPTED", "Enrollment interrupted; retry the same command to resume", 130);
   // Every exchange is bounded, even submit-and-exit and interactive enrollment.
@@ -87,17 +95,42 @@ export async function enrollServer(root: string, url: string, password: string |
   }
   privateDirectory(root);
   const canonical = baseUrl(url), pendingPath = pendingFile(root, canonical);
-  const existing = servers(root).find(item => item.baseUrl === canonical);
+  if (existsSync(join(root, 'credential-cleanup.json')) && !options.fresh) throw new ClientError('CREDENTIAL_CLEANUP_PENDING', 'Credential cleanup pending; use client credentials resume --confirm-cleanup or repeat the authorized --fresh');
+  const existingInfo = servers(root).find(item => item.baseUrl === canonical);
+  const existing = existingInfo ? await authenticatedServer(root, existingInfo.serverId, options) : undefined;
+  if (options.signal?.aborted) throw interrupted();
   if (existing) {
     if (existsSync(pendingPath)) {
-      const saved = JSON.parse(secureRead(pendingPath, 4096).toString("utf8")) as PendingEnrollment;
+      const saved = await readCredentialRecord<PendingEnrollment>(root, `pending/${pendingPath.split("/").pop()!}`, options);
+      if (options.signal?.aborted) throw interrupted();
       if (saved.deviceId !== existing.deviceId || saved.token !== existing.token || saved.serverId !== existing.serverId)
         throw new ClientError("CONFLICT", "pending identity differs from saved connection; inspect local state");
-      unlinkSync(pendingPath); syncPrivateDirectory(dir(root, "pending"));
+      await withCredentialRegistry(root, async () => { unlinkSync(pendingPath); syncPrivateDirectory(dir(root, "pending")); });
     }
     return connectionSummary(existing);
   }
-  let pending: PendingEnrollment | undefined = existsSync(pendingPath) ? JSON.parse(secureRead(pendingPath, 4096).toString("utf8")) : undefined;
+  if (options.fresh && existsSync(join(root, 'credential-cleanup.json'))) {
+    await withCredentialRegistry(root, () => cleanupCredentialRecords(root, [`pending/${pendingPath.split('/').pop()!}`], options));
+  }
+  let pending: PendingEnrollment | undefined;
+  if (existsSync(pendingPath)) {
+    const path = `pending/${pendingPath.split('/').pop()!}`;
+    const metadata = credentialMetadata(root, path);
+    try { pending = await readCredentialRecord<PendingEnrollment>(root, path, options); }
+    catch (error) {
+      if (!(error instanceof ClientError) || error.code !== 'CREDENTIALS_UNAVAILABLE' ||
+          metadata.credentialWrite !== 'pending' || !options.retryCredentialWrite) throw error;
+      const secret = password ?? await options.password?.();
+      if (!secret) throw new ClientError('INPUT_REQUIRED', 'Password required to retry an unsubmitted credential write');
+      const token = await bounded(signal => login(canonical, secret, signal), waitDeadline);
+      await withCredentialRegistry(root, () => writeCredentialRecord(root, path, {...metadata, token}, options));
+      pending = await readCredentialRecord<PendingEnrollment>(root, path, options);
+    }
+    if (metadata.credentialWrite === 'pending') {
+      await withCredentialRegistry(root, () => writeCredentialRecord(root, path, {...pending!}, options));
+    }
+  }
+  if (options.signal?.aborted) throw interrupted();
   if (pending && options.alias && pending.alias !== options.alias) throw new ClientError("CONFLICT", "Pending request has a different alias; resume that alias");
   const alias = pending?.alias ?? options.alias ?? deviceName;
   if (!alias.trim() || Buffer.byteLength(alias) > 128 || /[\u0000-\u001f\u007f]/u.test(alias)) throw new ClientError("INVALID_INPUT", "invalid connection alias");
@@ -111,7 +144,7 @@ export async function enrollServer(root: string, url: string, password: string |
       catch (error) { if (error instanceof RemoteError && error.status === 401) status = "expired"; else throw error; }
     }
     if (!["denied", "expired"].includes(status)) throw new ClientError("CONFLICT", "Only denied or expired requests may be replaced with --fresh");
-    unlinkSync(pendingPath); syncPrivateDirectory(dir(root, "pending")); pending = undefined;
+    await withCredentialRegistry(root, () => cleanupCredentialRecords(root, [`pending/${pendingPath.split("/").pop()!}`], options)); pending = undefined;
   }
   if (!pending) {
     if (!deviceName || Buffer.byteLength(deviceName)>128 || /[\u0000-\u001f\u007f]/u.test(deviceName)) throw new ClientError("INVALID_INPUT", "invalid device name");
@@ -120,8 +153,9 @@ export async function enrollServer(root: string, url: string, password: string |
     options.onEvent?.({ type: 'connecting' });
     pending = { url: canonical, token: await bounded(signal => login(canonical, secret, signal), waitDeadline), deviceId: randomUUID(), name: deviceName, alias,
       fingerprint: randomBytes(32).toString("base64url"), serverId: randomUUID(), expiresAtMs: Date.now() + 24 * 60 * 60_000 };
-    secureCreate(pendingPath, JSON.stringify(pending));
+    await withCredentialRegistry(root, () => writeCredentialRecord(root, `pending/${pendingPath.split("/").pop()!}`, {...pending}, options));
   }
+  if (options.signal?.aborted) throw interrupted();
   const request = pending;
   options.onEvent?.({ type: 'verification', deviceId: request.deviceId, verificationCode: enrollmentVerificationCode(request.deviceId, request.fingerprint) });
   const until = Math.min(request.expiresAtMs, waitMs === 0 ? Date.now() : waitDeadline);
@@ -169,35 +203,55 @@ export async function enrollServer(root: string, url: string, password: string |
     const info: ServerRegistration = { version: 1, serverId: request.serverId, baseUrl: canonical, deviceId: request.deviceId, name: alias, token: request.token };
     const path = join(dir(root, "servers"), `${request.serverId}.json`);
     if (existsSync(path)) {
-      if (secureRead(path).toString("utf8") !== JSON.stringify(info)) throw new ClientError("CONFLICT", "saved credential differs from pending enrollment");
-    } else secureCreate(path, JSON.stringify(info));
-    unlinkSync(pendingPath); syncPrivateDirectory(dir(root, "pending"));
+      const current = await authenticatedServer(root, info.serverId, options);
+      if (current.token !== info.token || current.deviceId !== info.deviceId) throw new ClientError('CONFLICT', 'saved credential differs from pending enrollment');
+    } else await withCredentialRegistry(root, () => writeCredentialRecord(root, `servers/${request.serverId}.json`, {...info}, options));
+    await withCredentialRegistry(root, async () => { unlinkSync(pendingPath); syncPrivateDirectory(dir(root, "pending")); });
     options.onEvent?.({ type: 'approved' });
     return connectionSummary(info);
   }
   if (options.signal?.aborted) throw new ClientError("INTERRUPTED", "Enrollment interrupted; retry the same command to resume", 130);
   if (status === "denied" || status === "expired") {
-    secureReplace(pendingPath, JSON.stringify({...request, status}));
+    await withCredentialRegistry(root, () => writeCredentialRecord(root, `pending/${pendingPath.split("/").pop()!}`, {...request, status}, options));
     options.onEvent?.({ type: 'terminal', status });
   }
   return { status, alias, url: canonical, deviceId: request.deviceId, deviceName: request.name };
 }
 
-export async function unlockVault(root: string, info: ServerRegistration, vaultId: string, secret: string): Promise<void> {
-  const wrap = await api(info.baseUrl, "/v1/recovery-wrap", { headers: { "x-nanosync-vault-id": vaultId } }, info.token);
+export async function unlockVault(root: string, info: ServerMetadata, vaultId: string, secret: string, options: CredentialOptions = {}): Promise<void> {
+  return withCredentialOperation(root, async () => {
+  const credential = await authenticatedServer(root, info.serverId, options);
+  const wrap = await api(credential.baseUrl, "/v1/recovery-wrap", { headers: { "x-nanosync-vault-id": vaultId } }, credential.token);
   const recovery = await decodeRecoverySecret(secret);
   try {
     const master = await unwrapMasterKey(wrap.recoveryWrap, recovery, vaultId);
-    try { saveKey(root, info, vaultId, master); } finally { master.fill(0); }
+    try { await saveKey(root, info, vaultId, master, options); } finally { master.fill(0); }
   } finally { recovery.fill(0); }
+  });
 }
 
 export interface RemoteVault { vaultId: string; name: string }
-export async function listRemoteVaults(info: ServerRegistration): Promise<RemoteVault[]> {
-  return (await api(info.baseUrl, '/v1/vaults', {}, info.token)).vaults;
+export async function listRemoteVaults(root: string, info: ServerMetadata, options: CredentialOptions = {}): Promise<RemoteVault[]> {
+  const credential = await authenticatedServer(root, info.serverId, options);
+  return (await api(credential.baseUrl, '/v1/vaults', {}, credential.token)).vaults;
 }
 export function resolveRemoteVault(list: RemoteVault[], choice: string): RemoteVault {
   const matches = list.filter(vault => vault.vaultId === choice || vault.name === choice);
   if (matches.length !== 1) throw new ClientError('NOT_FOUND', 'vault not found or ambiguous');
   return matches[0]!;
+}
+
+export async function enrollServer(root: string, url: string, password: string | undefined, deviceName: string,
+  waitMs = 60_000, options: Parameters<typeof enrollLocked>[5] & {credentialMode?: CredentialMode} = {}) {
+  const interrupted = () => new ClientError('INTERRUPTED', 'Enrollment interrupted; retry the same command to resume', 130);
+  if (options.signal?.aborted) throw interrupted();
+  initializeCredentials(root, options.credentialMode);
+  try {
+    const result = await withCredentialOperation(root, () => enrollLocked(root, url, password, deviceName, waitMs, options));
+    if (options.signal?.aborted) throw interrupted();
+    return result;
+  } catch (error) {
+    if (options.signal?.aborted) throw interrupted();
+    throw error;
+  }
 }

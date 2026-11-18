@@ -1,4 +1,4 @@
-{ stdenv, bun2nix }:
+{ stdenv, bun2nix, lib, libsecret, glib }:
 
 stdenv.mkDerivation {
   pname = "nanosync";
@@ -33,7 +33,8 @@ stdenv.mkDerivation {
     # store loader directly without modifying the executable.
     cat > "$out/bin/nanosync" <<EOF
 #!${stdenv.shell}
-exec ${stdenv.cc.libc}/lib/ld-linux-x86-64.so.2 --library-path ${stdenv.cc.libc}/lib "$out/libexec/nanosync" "\$@"
+export LD_LIBRARY_PATH="${lib.makeLibraryPath [ libsecret glib ]}"
+exec ${stdenv.cc.libc}/lib/ld-linux-x86-64.so.2 --library-path ${lib.makeLibraryPath [ stdenv.cc.libc libsecret glib ]} "$out/libexec/nanosync" "\$@"
 EOF
     chmod 755 "$out/bin/nanosync"
     runHook postInstall

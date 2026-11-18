@@ -149,3 +149,27 @@ test('terminal recovery acknowledgement failure publishes nothing and deletion r
     expect((await run(['server','vaults','view'])).vaults).toHaveLength(0);
   } finally { rmSync(directory,{recursive:true,force:true}); }
 },30000);
+
+test('interactive new client roots explicitly select credential mode without a session bus', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'nanosync-mode-tty-'));
+  const http = Bun.serve({port:0, hostname:'127.0.0.1', async fetch(request) {
+    await request.text();
+    if (new URL(request.url).pathname === '/v1/auth/password') return Response.json({sessionToken:'A'.repeat(43)});
+    return new Response(null, {status:404});
+  }});
+  try {
+    const args = ['client','connections','add','--url',http.url.href,'--alias','home','--device-name','device','--wait-ms','0','--client-dir',directory,'--json'];
+    const proc = Bun.spawn(['python3','-c',confirmationScript,process.execPath,resolve('packages/cli/src/main.ts'),JSON.stringify(args),'Credential storage',''], {
+      stdout:'pipe', stderr:'pipe', env:{...process.env, NANOSYNC_PASSWORD:'mode-password-sentinel', DBUS_SESSION_BUS_ADDRESS:'unix:path=/nonexistent-nanosync-test-bus'},
+    });
+    const stdout = await new Response(proc.stdout).text(), stderr = await new Response(proc.stderr).text();
+    expect(await proc.exited, stderr).toBe(0);
+    const result = JSON.parse(stdout);
+    expect(result.sent).toBe(true);
+    expect(result.code).toBe(5); // Deliberate discovery 404 after mode/identity publication.
+    expect(result.terminal).toContain('Protected files');
+    expect(result.terminal).not.toContain('mode-password-sentinel');
+    const {credentialStatus} = await import('@nanosync/client-service');
+    expect(credentialStatus(directory).mode).toBe('protected-file');
+  } finally { http.stop(true); rmSync(directory,{recursive:true,force:true}); }
+},20000);

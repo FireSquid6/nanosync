@@ -23,7 +23,7 @@ async function scenario(run: (ctx: { root: string; invoke: (wait: number) => Pro
   const previous = process.env.NANOSYNC_PASSWORD;
   process.env.NANOSYNC_PASSWORD = 'network-test-password';
   try {
-    await run({root, calls, setMode: value => { mode = value; }, invoke: wait => main(['client','connections','add','--client-dir',root,'--url',server.url.href,'--alias','test','--wait-ms',String(wait),'--json','--non-interactive'])});
+    await run({root, calls, setMode: value => { mode = value; }, invoke: wait => main(['client','connections','add','--credential-mode','protected-file','--client-dir',root,'--url',server.url.href,'--alias','test','--wait-ms',String(wait),'--json','--non-interactive'])});
   } finally {
     server.stop(true); out.mockRestore(); err.mockRestore(); rmSync(root,{recursive:true,force:true});
     if (previous === undefined) delete process.env.NANOSYNC_PASSWORD; else process.env.NANOSYNC_PASSWORD = previous;
@@ -69,11 +69,11 @@ test('request expiry cancels an in-flight exchange and durably retains the expir
     expect(await invoke(0)).toBe(3);
     const before = pendingEnrollments(root)[0]!;
     const file = join(root, 'pending', readdirSync(join(root, 'pending'))[0]!);
-    secureReplace(file, JSON.stringify({...before, expiresAtMs:Date.now() + 80}));
+    secureReplace(file, JSON.stringify({...JSON.parse((await import('node:fs')).readFileSync(file, 'utf8')), expiresAtMs:Date.now() + 80}));
     setMode('/v1/auth/enrollments');
     const started = Date.now();
     expect(await invoke(2000)).toBe(4);
     expect(Date.now() - started).toBeLessThan(500);
-    expect(pendingEnrollments(root)[0]).toMatchObject({deviceId:before.deviceId, token:before.token, status:'expired'});
+    expect(pendingEnrollments(root)[0]).toMatchObject({deviceId:before.deviceId, status:'expired'});
   });
 });

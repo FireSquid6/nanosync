@@ -31,7 +31,7 @@ test('scripted CLI enrollment resumes lost submission, keeps aliases separate an
   try {
     expect(await invoke(['server', 'init', '--server-dir', serverDir])).toBe(0);
     running = await runServer({directory:serverDir, port:7559});
-    const add = ['client','connections','add','--url',running.url,'--alias','home','--device-name','desktop','--client-dir',clientDir,'--wait-ms','0'];
+    const add = ['client','connections','add','--credential-mode','protected-file','--url',running.url,'--alias','home','--device-name','desktop','--client-dir',clientDir,'--wait-ms','0'];
     let lost = false;
     globalThis.fetch = (async (input, init) => {
       const response = await native(input, init);
@@ -107,7 +107,7 @@ test('independent pending requests retain denial until explicit fresh, and inter
     for (const dir of [a,b]) expect(await invoke(['server','init','--server-dir',dir])).toBe(0);
     running.push(await runServer({directory:a,port:7560,webUi:true,externalOrigin:'http://127.0.0.1:7560'}));
     running.push(await runServer({directory:b,port:7561}));
-    const add = (i:number, alias:string, wait = '0') => ['client','connections','add','--url',running[i]!.url,'--alias',alias,'--wait-ms',wait,'--client-dir',clientDir];
+    const add = (i:number, alias:string, wait = '0') => ['client','connections','add','--credential-mode','protected-file','--url',running[i]!.url,'--alias',alias,'--wait-ms',wait,'--client-dir',clientDir];
     expect(await invoke(add(0,'one'))).toBe(3); const first = result().deviceId;
     expect(err.mock.calls.flat().join('\n')).toContain('Administration: http://127.0.0.1:7560/admin');
     expect(await invoke(add(1,'two'))).toBe(3); const second = result().deviceId;

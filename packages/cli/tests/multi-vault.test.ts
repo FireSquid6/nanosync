@@ -1,5 +1,5 @@
 import {
-  enrollServer, servers, key, unlockVault, type ServerRegistration, createConnection,
+  enrollServer, authenticatedServer, key, unlockVault, type ServerRegistration, createConnection,
   discoverConnection, api,
 } from '@nanosync/client-service';
 import { afterEach, expect, test } from "bun:test";
@@ -55,10 +55,10 @@ test("password-only server, local device approval, two isolated vaults and two r
   await initializeServerOwner(serverRoot, "correct horse battery staple");
   const running = await runServer({ directory: serverRoot, port: 7555, webUi:true });
   try {
-    expect(await enrollServer(clientRoot, running.url, "correct horse battery staple", "desktop", 0)).toMatchObject({status:"pending"});
+    expect(await enrollServer(clientRoot, running.url, "correct horse battery staple", "desktop", 0, {credentialMode:"protected-file"})).toMatchObject({status:"pending"});
     approveLocalDevice(serverRoot, (await import('@nanosync/client-service')).pendingEnrollments(clientRoot)[0]!.deviceId);
     expect(await enrollServer(clientRoot, running.url, undefined, "desktop", 0)).toMatchObject({status:"approved"});
-    const [info] = servers(clientRoot);
+    const info = await authenticatedServer(clientRoot);
     expect(info).toBeDefined();
     const owner = await browserOwner(running.url, "correct horse battery staple");
     const secrets: string[] = [];
@@ -118,9 +118,9 @@ test("password-only server, local device approval, two isolated vaults and two r
     // Losing a local key does not affect the other vault's key or the server's
     // ability to authorize an enrolled device. Recovery is per-vault.
     rmSync(join(clientRoot, "keys", `${info!.serverId}-${pictures.vaultId}.json`));
-    expect(key(clientRoot, info!.serverId, pictures.vaultId)).toBeNull();
+    expect(await key(clientRoot, info!.serverId, pictures.vaultId)).toBeNull();
     await unlockVault(clientRoot, info!, pictures.vaultId, secrets[0]!);
-    expect(key(clientRoot, info!.serverId, pictures.vaultId)).toHaveLength(32);
+    expect(await key(clientRoot, info!.serverId, pictures.vaultId)).toHaveLength(32);
   } finally { await running.stop(); }
 });
 
@@ -136,13 +136,13 @@ test("CLI env workflow creates and selects named vaults without exposing secrets
     try {
       process.env.NANOSYNC_SERVER = running.url;
       process.env.NANOSYNC_DEVICE_NAME = "desktop";
-      expect(await main(["client","connections","add","--alias","house","--url",running.url,"--device-name","desktop","--wait-ms","0","--client-dir",root])).toBe(3);
+      expect(await main(["client","connections","add","--credential-mode","protected-file","--alias","house","--url",running.url,"--device-name","desktop","--wait-ms","0","--client-dir",root])).toBe(3);
       expect(await main(["server","devices","approve","--device-id",(await import('@nanosync/client-service')).pendingEnrollments(root)[0]!.deviceId,"--server-dir",serverRoot])).toBe(0);
-      expect(await main(["client","connections","add","--alias","house","--url",running.url,"--device-name","desktop","--wait-ms","0","--client-dir",root])).toBe(0);
+      expect(await main(["client","connections","add","--credential-mode","protected-file","--alias","house","--url",running.url,"--device-name","desktop","--wait-ms","0","--client-dir",root])).toBe(0);
       // Provisioning belongs to the owner API; device CLI mutations are unavailable.
       expect(await main(["vault","create","--client-dir",root,"--name","notes","--recovery-output",recovery])).toBe(2);
       const owner = await browserOwner(running.url, process.env.NANOSYNC_PASSWORD!);
-      const info = servers(root)[0]!;
+      const info = await authenticatedServer(root);
       const created = await createOwnerVault(root, info, 'notes', owner, async secret => { writeFileSync(recovery, secret, {mode:0o600}); });
       expect(await main(["server","vaults","view","--server-dir",serverRoot])).toBe(0);
       expect(await main(["vault","rename","notes","--client-dir",root,"--name","documents"])).toBe(2);

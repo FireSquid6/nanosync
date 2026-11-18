@@ -3,7 +3,7 @@
 Start with the authoritative [user guides](../../apps/site/content/docs/introduction.md), [source installation](../../apps/site/content/docs/installation.md), and [demo first sync](../../apps/site/content/docs/first-sync.md). No release is available yet. This reference retains detailed flags, state semantics, and machine contracts for operators and integrators; library-only history/restore features are not CLI commands.
 
 For contributor use, install workspace dependencies with `bun install`. Run `bun packages/cli/src/main.ts --help`.
-This is a breaking command/state redesign: no legacy aliases, bootstrap command, credential migration, `--env`, `--sync-dir` or `--continuous`.
+This is a breaking command/state redesign: no legacy aliases, bootstrap command, historical-format migration, `--env`, `--sync-dir` or `--continuous`.
 
 ```sh
 nanosync server init --server-dir "$HOME/nanosync-server"
@@ -11,7 +11,7 @@ nanosync server init --server-dir "$HOME/nanosync-server"
 nanosync server vaults create --server-dir "$HOME/nanosync-server" --name documents
 nanosync server run --server-dir "$HOME/nanosync-server" --web-ui
 # In another terminal/on the client:
-nanosync client connections add --url https://sync.example.com --alias home
+nanosync client connections add --credential-mode protected-file --url https://sync.example.com --alias home
 # On the server, compare the verification code and use the exact printed UUID:
 nanosync server devices approve --device-id UUID
 # Deliver the vault recovery key offline to the client:
@@ -27,7 +27,7 @@ nanosync client sync --watch --path "$HOME/Sync"
 - `server devices view|approve|deny|revoke`: local owner operations. Mutations use `--device-id UUID` or an interactive device selector showing names and full UUIDs; display names are never accepted as identifiers. Revocation requires ordinary confirmation or `--yes`; it prevents access, not erasure of retained data/keys.
 - `server vaults view|create|rename|delete`: creation uses `--name` and optional protected `--recovery-output FILE`. Rename uses `--vault UUID --name NAME`. Delete requires exact name entry interactively, or `--vault UUID --confirm-delete SAME_UUID --non-interactive` in scripts. Neither `--yes` nor `--force` substitutes.
 - `server admin storage|retention-dry-run|gc-dry-run|scan|diagnostics`: local aggregate reports/maintenance, requiring the runtime to be stopped because report setup initializes/recovers object storage. GC remains dry-run; scan processes a bounded batch.
-- `client connections add|remove|view`: add uses `--url`, `--alias`, `--device-name`, `--wait-ms`, `--fresh`, `--password-file`. Alias is unique local selection vocabulary, independent of the owner-visible device name (hostname offered by default). Remove uses `--server ALIAS_OR_ID` and optional `--force`; it never remotely revokes. View omits credentials.
+- `client connections add|remove|view`: add uses `--credential-mode protected-file|os-store` for a genuinely new root, `--retry-credential-write` for an interrupted unsubmitted OS credential write, `--url`, `--alias`, `--device-name`, `--wait-ms`, `--fresh`, `--password-file`. Alias is unique local selection vocabulary, independent of the owner-visible device name (hostname offered by default). Remove uses `--server ALIAS_OR_ID` and optional `--force`; it never remotely revokes. View omits credentials.
 - `client vaults connect|disconnect|view`: connect uses `--server ALIAS_OR_ID`, `--vault NAME_OR_UUID`, `--path DIRECTORY`, `--confirm-nonempty`, `--recovery-file`. Interactive server/vault choices use maintained selection prompts. Path defaults to CWD. Recovery is requested only when the key is absent. Binding transfers no files. Multiple independent nonoverlapping directory replicas are allowed. Disconnect uses `--path` (CWD default) and optional `--force`, preserving files and remote data.
 - `client sync`: nearest binding at CWD or an ancestor; explicit `--path` and foreground `--watch`. Deleted vaults return `VAULT_DELETED`, stop syncing, and preserve files and cached keys. Disconnect the obsolete binding; reconnect to a separately provisioned vault deliberately.
 
@@ -47,7 +47,7 @@ Terminal output uses colors and phase spinners during waits. Spinners pause for 
 
 ## Enrollment, interruption and retry
 
-Pending requests are independently persisted in protected files keyed by canonical server URL **before submission**. Retry the same URL/alias to resume without a password or identity change, including after Ctrl-C (exit 130) or lost responses. Approved credentials are fsynced before pending state is removed. Existing connections return safe summaries rather than re-enrolling. Successful enrollment suggests `client vaults connect`, never automatic binding/sync.
+Pending identities are independently persisted as private metadata keyed by canonical server URL, with tokens in the selected credential provider, **before submission**. Retry the same URL/alias to resume without a password or identity change, including after Ctrl-C (exit 130) or lost responses. Approved credentials are persisted and verified before pending state is removed; private metadata/file writes are fsynced. Existing connections return safe summaries rather than re-enrolling. Successful enrollment suggests `client vaults connect`, never automatic binding/sync.
 
 For enrollment requests, the CLI prints `nanosync server devices approve --device-id UUID` and the request verification code to stdout in human mode, or stderr with `--json`. The approval command intentionally omits the unknown server directory, so it prompts on the server. The code is public comparison material, not authorization. An admin URL appears only when capability discovery advertises an enabled UI **and** a trustworthy configured URL; otherwise no link is invented.
 
@@ -126,3 +126,71 @@ existing secrets. A compromised server can serve malicious JavaScript; browser-s
 encryption does not resist this. See [proxy setup](../../docs/clients-and-operations.md#reverse-proxy-example).
 For this breaking release, preserve old state and plaintext backups, use fresh
 server/client directories, and reconnect deliberately; there is no migration path.
+
+## Credential storage (Linux)
+
+A genuinely new root must explicitly select `--credential-mode protected-file|os-store`
+on `client connections add`; interactive use asks if omitted. Recognized current-format
+file roots continue without the flag or any display, session bus, or credential store.
+Supplying a different mode never converts existing state. Historical `client.json` /
+`enrollment.json` formats and partial upgrades are rejected, not treated as empty.
+
+`protected-file` uses checked 0700 directories / 0600 files. Nanosync does **not**
+encrypt these files at rest. `os-store` uses the same user's Secret Service default
+collection through Bun.secrets (experimental API, validated with Bun 1.4.4,
+revision 38afee6c8; the Nix CLI build also passed on Bun 1.4.2 / 744846f84). CLI and desktop share references under the same client root;
+there is no desktop credential silo. Linux needs libsecret, GLib and a running,
+unlocked user-session Secret Service. The Nix CLI wrapper supplies the libraries;
+source installations must make them discoverable by their Bun runtime.
+
+```sh
+nanosync client credentials view --client-dir ~/.nanosync
+# Stop all watches/owners, review this whole root and its pending enrollments first.
+# This affects headless access and temporarily duplicates credentials for staging.
+nanosync client credentials migrate --client-dir ~/.nanosync --confirm-migration
+nanosync client credentials resume --client-dir ~/.nanosync --confirm-migration
+# Only before durable source-cleanup intent:
+nanosync client credentials rollback --client-dir ~/.nanosync --confirm-rollback
+# Retry a previously authorized connection/fresh-enrollment credential deletion:
+nanosync client credentials resume --client-dir ~/.nanosync --confirm-cleanup
+```
+
+`--yes` authorizes none of these operations. Migration is protected-file → OS store
+only; reverse conversion is not implemented. All replica locks and a separate
+credential-operation lease must be available; live owners are refused, never stopped
+or bypassed. Stop old binaries before upgrading; concurrently running old versions
+are unsupported and cannot be made to obey a new migration barrier.
+
+Migration retains server/device/binding IDs, pending fingerprints/expiry/status,
+unbound vault keys and journals. A private **secret-free** phase journal blocks
+normal operations until explicit resume/rollback. Target entries are written and
+read back before cleanup intent. After that intent recovery is roll-forward only.
+Locked/unavailable stores or missing target entries preserve the barrier, not a
+plaintext fallback. Do not reset state, re-enroll, or re-enter recovery keys merely
+to work around interrupted migration.
+
+Metadata listings never unlock the store. Required reference returning null,
+access rejection, and other native errors produce actionable `CREDENTIALS_UNAVAILABLE`
+(local exit 2); this deliberately does not claim exact locked/missing classification.
+A recorded but inaccessible key is not the same as never having stored a key.
+An already-running owner retains its loaded credentials until stopped; keyring
+locking does not erase process memory or stop that owner. JS string zeroization
+and cancellation of native credential operations are not guaranteed.
+
+An interrupted **initial, unsubmitted** OS credential write retains identity. If
+ordinary retry cannot access it, explicitly retry `connections add` with
+`--retry-credential-write` and protected password input. Reauthentication is allowed
+only while that durable pre-submission phase remains; it never rotates a submitted
+identity. An interrupted initial vault-key write can similarly be retried via
+`vaults connect --retry-credential-write --recovery-file FILE`; inaccessible committed
+keys do not take this path. Password and recovery input are never stored or logged.
+
+Removal preserves a durable secret-free cleanup inventory. Failed cleanup is not
+reported as successful deletion. Under authorized cleanup only, a non-secret marker
+is stored/read back, affirmatively deleted, and checked absent; replay repeats this
+protocol because locked entries can yield false/null without actually being absent.
+This covers application-owned entries in the default collection, not manually moved
+or duplicated entries elsewhere. No forensic erasure from media/backups is promised.
+Desktop trusted code can initialize OS mode explicitly; opening file mode returns a
+decision-required result (leave unchanged/use CLI, or explicitly migrate the root).
+No desktop onboarding UI is implemented in this step.

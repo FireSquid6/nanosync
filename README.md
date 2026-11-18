@@ -36,7 +36,7 @@ nanosync server init --server-dir "$HOME/nanosync-server"
 nanosync server vaults create --server-dir "$HOME/nanosync-server" --name documents
 nanosync server run --server-dir "$HOME/nanosync-server" --web-ui
 # In another terminal/on the client:
-nanosync client connections add --url http://127.0.0.1:7337 --alias home
+nanosync client connections add --credential-mode protected-file --url http://127.0.0.1:7337 --alias home
 # Compare the printed code; approve the exact request in /admin or server devices approve.
 nanosync client vaults connect --server home --vault documents --path "$HOME/Sync"
 nanosync client sync --path "$HOME/Sync"

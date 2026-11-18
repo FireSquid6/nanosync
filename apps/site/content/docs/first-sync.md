@@ -34,7 +34,7 @@ umask 077
 printf 'Demo directory from terminal A: '
 read -r DEMO
 test -d "$DEMO/server" || exit 1
-nanosync client connections add --client-dir "$DEMO/client" \
+nanosync client connections add --credential-mode protected-file --client-dir "$DEMO/client" \
   --url http://127.0.0.1:7337 --alias demo --device-name demo-linux --wait-ms 0
 ```
 

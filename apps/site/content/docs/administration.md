@@ -72,7 +72,7 @@ There is no `backup` or `restore` CLI command. The CLI cannot fully automate res
 
 ## Automation and secrets
 
-Use hidden prompts or protected files, not secret command-line arguments. `server init` and `client connections add` accept `--password-file`; `client vaults connect` accepts `--recovery-file`. Inputs must be owned regular 0600 files without symlinks or hard links. For unattended creation, `--recovery-output FILE --non-interactive` writes a new 0600 delivery file in a private 0700 parent outside sync roots.
+Use hidden prompts or protected files, not secret command-line arguments. `server init` and `client connections add` accept `--password-file`; `client vaults connect` accepts `--recovery-file`. Inputs must be owned regular 0600 files without symlinks or hard links. A genuinely new unattended client root requires `client connections add --credential-mode protected-file` (or explicitly `os-store`, requiring an unlocked user-session store). Resume commands need no mode flag. For unattended creation, `--recovery-output FILE --non-interactive` writes a new 0600 delivery file in a private 0700 parent outside sync roots.
 
 After interrupted creation, retry the same name and absolute recovery-output path. Keep encrypted receipts and the original delivered file intact until the operation is complete; changing the path starts a new creation. After completion, deliver and back up the secret securely/offline before removing the operator's delivery copy. Replaying that same receipt later requires the original protected output file.
 

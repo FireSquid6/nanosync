@@ -136,7 +136,7 @@ first, or archive the old root and import a separate plaintext copy.
    `nanosync server vaults create --server-dir DIR --name documents`.
    Save and acknowledge the newly delivered recovery secret.
 3. `nanosync server run --server-dir DIR --web-ui` serves sync and optional owner UI.
-4. `nanosync client connections add --url URL --alias home` enrolls a device.
+4. `nanosync client connections add --credential-mode protected-file --url URL --alias home` enrolls a device.
    Compare the printed request code and approve its exact UUID in `/admin` or with
    `nanosync server devices approve --server-dir DIR --device-id UUID`.
 5. `nanosync client vaults connect --server home --vault documents --path DIRECTORY`

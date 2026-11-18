@@ -49,7 +49,7 @@ test("local init and creation → CLI enrollment/browser approval → two replic
     const replicas = [join(root, "replica-a"), join(root, "replica-b")];
     for (let i = 0; i < 2; i++) {
       mkdirSync(replicas[i]!);
-      const args = ["client", "connections", "add", "--url", url, "--alias", "home", "--device-name", `journey-${i}`, "--client-dir", clients[i]!, "--wait-ms", "0"];
+      const args = ["client", "connections", "add", "--credential-mode", "protected-file", "--url", url, "--alias", "home", "--device-name", `journey-${i}`, "--client-dir", clients[i]!, "--wait-ms", "0"];
       const pending = await cli(args);
       expect(pending.exit, pending.stderr).toBe(3);
       await page.getByRole("button", { name: "Refresh", exact: true }).click();

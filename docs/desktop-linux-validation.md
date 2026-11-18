@@ -196,3 +196,32 @@ Codehygiene 0.6.1 was advertised; installed 0.5.0 was used.
 - Reproducible/offline desktop Nix packaging and native CI SDK inputs.
 - No blocker downloading/installing the required toolchain locally was encountered.
   The scoped dev integration is proven; the pending release cases above are not.
+
+## Step 4 credential runtime follow-up
+
+The credential service uses **Bun.secrets**, not secret-tool subprocesses. Official
+Bun 1.4.4 source at `38afee6c84fcf48c0edb2466aa4b27d287a59c30` and the pinned
+bun-types declarations were inspected. Packaged Bun 1.4.4 and workstation Nix Bun
+1.4.4 passed disposable get/set/update/delete checks. In a temporary HOME/XDG
+keyring on a private session bus, locked lookup returned null and deletion false
+while the disposable item remained present. Invalid bus addresses rejected with
+ERR_SECRETS_PLATFORM_ERROR. No real user keyring was locked or existing item read.
+
+The normal Git-visible Nix CLI build (Bun **1.4.2 / 744846f84**) also passed an
+isolated-service whole-root OS migration, credential lookup, locked secret-free
+listing, and actionable `CREDENTIALS_UNAVAILABLE` JSON/local exit 2. The wrapper
+must include libsecret and GLib in the explicit loader `--library-path`, not just
+LD_LIBRARY_PATH: the former overrides the latter. No compiled payload ELF rewrite
+was used. Protected-file browser/CLI journeys also run without DISPLAY, Wayland,
+or a usable session bus. These checks do not validate other Secret Service backends,
+real interactive unlock cancellation, or desktop onboarding UI.
+
+Step 4 automated regression evidence: full Bun suite **376 passed / 0 failed**;
+workspace/tools typechecks passed; source browser suite **7 passed**, and rebuilt
+compiled-binary browser suite **7 passed** with no usable session bus/display.
+Tests inject providers and explicit crash/barrier checkpoints; the default test
+suite never uses the user's credential store. Migration regressions include full
+set verification before cleanup intent, source/target comparison immediately before
+replacement, inventory changes, repeated migration, rollback source loss, and
+cleanup replay. Async registry tests cover expired contexts and release failure;
+enrollment tests cover interruption after uncancellable native calls settle.

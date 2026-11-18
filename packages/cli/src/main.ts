@@ -2,8 +2,8 @@
 import {
   baseUrl, privateDirectory, secureCreate, secureRead, startBoundSync, listRemoteVaults,
   resolveRemoteVault, connectRegisteredVault, discoverConnection, records,
-  disconnectConnections, removeServerConnection, enrollServer, key, server as storedServer,
-  servers, unlockVault, pendingEnrollments, connectionSummary,
+  disconnectConnections, removeServerConnection, enrollServer, key, keyWritePending, server as storedServer,
+  servers, unlockVault, pendingEnrollments, connectionSummary, credentialStatus, initializeCredentials, migrateCredentials, resumeCredentialMigration, resumeCredentialCleanup, rollbackCredentialMigration, type CredentialMode,
 } from '@nanosync/client-service';
 import { join } from 'node:path';
 import { hostname } from 'node:os';
@@ -175,13 +175,43 @@ async function execute(args: string[], presentation: CliOutput): Promise<number>
       });
     }
     const client = flags(program.command('client').description('Local connections, vault bindings and sync'), ...clientFlags, ...common);
+    const credentials = flags(client.command('credentials').description('Credential storage and explicit whole-root migration'), ...clientFlags, ...common);
+    flags(credentials.command('view'), ...clientFlags, ...common).action(async (_o, command) => {
+      result = credentialStatus(root(command));
+    });
+    flags(credentials.command('migrate').description('Move protected files to OS store; stop every owner first. Temporary staging copies are required.'), ...clientFlags, ...common, '--confirm-migration')
+      .action(async (_o, command) => {
+        const directory = root(command);
+        output().warning(`Whole-root migration for ${directory}: OS store requires an unlocked user session, including future headless CLI use. Temporary staging duplicates are required. Stop all owners and old binaries first.`);
+        if (opts(command).confirmMigration) {
+          for (const pending of pendingEnrollments(directory)) output().info(`Pending ${pending.alias}: device ${pending.deviceId}, expires ${pending.expiresAtMs}, ${pending.status ?? 'pending'}`);
+        }
+        result = await migrateCredentials(directory, !!opts(command).confirmMigration);
+      });
+    flags(credentials.command('resume'), ...clientFlags, ...common, '--confirm-migration', '--confirm-cleanup')
+      .action(async (_o, command) => {
+        const options = opts(command);
+        if (!!options.confirmMigration === !!options.confirmCleanup) throw new CliError('CONFIRMATION_REQUIRED', 'Choose exactly --confirm-migration or --confirm-cleanup');
+        result = options.confirmCleanup ? await resumeCredentialCleanup(root(command), true)
+          : await resumeCredentialMigration(root(command), true);
+      });
+    flags(credentials.command('rollback').description('Remove staged OS entries before source cleanup begins'), ...clientFlags, ...common, '--confirm-rollback')
+      .action(async (_o, command) => { result = await rollbackCredentialMigration(root(command), !!opts(command).confirmRollback); });
     const connections = flags(client.command('connections'), ...clientFlags, ...common);
     flags(connections.command('view'), ...clientFlags, ...common).action(async (_o, command) => {
       result = {connections:servers(root(command)).map(connectionSummary), pending:pendingEnrollments(root(command)).map(p => ({alias:p.alias, url:p.url, deviceId:p.deviceId, deviceName:p.name, status:Date.now() >= p.expiresAtMs ? 'expired' : p.status ?? 'pending'}))};
     });
-    flags(connections.command('add'), ...clientFlags, ...common, '--url <url>', '--alias <alias>', '--device-name <name>', '--password-file <file>', '--wait-ms <milliseconds>', '--fresh')
+    flags(connections.command('add'), ...clientFlags, ...common, '--url <url>', '--alias <alias>', '--device-name <name>', '--password-file <file>', '--wait-ms <milliseconds>', '--fresh', '--credential-mode <mode>', '--retry-credential-write')
       .action(async (_o, command) => {
         const o = opts(command), dir = root(command), url = baseUrl(await need(command, 'url'));
+        let mode = o.credentialMode as CredentialMode | undefined;
+        if (credentialStatus(dir).mode === 'uninitialized' && !mode && canPrompt(command)) {
+          mode = await choose('Credential storage (--credential-mode)', [
+            {name:'Protected files (headless; not encrypted by Nanosync)', value:'protected-file'},
+            {name:'OS store (requires unlocked user session)', value:'os-store'},
+          ], true) as CredentialMode;
+        }
+        initializeCredentials(dir, mode);
         const existing = servers(dir).find(s => s.baseUrl === url);
         if (existing) { result = await enrollServer(dir, url, undefined, '', 0); return; }
         const pending = pendingEnrollments(dir).find(p => p.url === url);
@@ -192,7 +222,7 @@ async function execute(args: string[], presentation: CliOutput): Promise<number>
         const controller = new AbortController(), stop = () => controller.abort();
         process.once('SIGINT', stop);
         try {
-          const response = await enrollServer(dir, url, undefined, deviceName, wait, {alias, fresh:o.fresh, signal:controller.signal, onEvent:event => enrollmentEvent(presentation, event),
+          const response = await enrollServer(dir, url, undefined, deviceName, wait, {alias, fresh:o.fresh, retryCredentialWrite:o.retryCredentialWrite, signal:controller.signal, onEvent:event => enrollmentEvent(presentation, event),
             password:() => secret(command, 'NANOSYNC_PASSWORD', 'passwordFile', 'Owner password')});
           result = response;
           if (response.status === 'pending') { exitCode = 3; resultCode = 'PENDING_APPROVAL'; }
@@ -202,18 +232,18 @@ async function execute(args: string[], presentation: CliOutput): Promise<number>
     flags(connections.command('remove'), ...clientFlags, ...common, '--server <alias-or-id>', '--force').action(async (_o, command) => {
       const info = await selectServer(command), dir = root(command);
       output().warning('Local removal only: remote device access is NOT revoked. Files and remote data are preserved. --force discards pending synchronization state.');
-      removeServerConnection(dir, info.serverId, !!opts(command).force);
+      await removeServerConnection(dir, info.serverId, !!opts(command).force);
       result = {serverId:info.serverId, removed:true, remotelyRevoked:false};
     });
     const bindings = flags(client.command('vaults'), ...clientFlags, ...common);
     flags(bindings.command('view'), ...clientFlags, ...common).action(async (_o, command) => {
       const list = servers(root(command)); result = {bindings:records(root(command)).map(c => ({...c, serverAlias:list.find(s => s.serverId === c.serverId)?.name ?? null}))};
     });
-    flags(bindings.command('connect'), ...clientFlags, ...common, '--server <alias-or-id>', '--vault <name-or-uuid>', '--path <directory>', '--confirm-nonempty', '--recovery-file <file>')
+    flags(bindings.command('connect'), ...clientFlags, ...common, '--server <alias-or-id>', '--vault <name-or-uuid>', '--path <directory>', '--confirm-nonempty', '--recovery-file <file>', '--retry-credential-write')
       .action(async (_o, command) => {
         const o = opts(command), dir = root(command), info = await selectServer(command);
         output().progress('Loading available vaults…');
-        const list = await listRemoteVaults(info);
+        const list = await listRemoteVaults(dir, info);
         const choice = o.vault ?? await choose('Choose a vault (--vault)',
           list.map(vault => ({ name: `${vault.name} — ${vault.vaultId}`, value: vault.vaultId })),
           canPrompt(command), 'No vaults available. Ask the server owner to run nanosync server vaults create.');
@@ -221,8 +251,9 @@ async function execute(args: string[], presentation: CliOutput): Promise<number>
         let confirmed = !!o.confirmNonempty;
         if (readdirSync(destination).length && !confirmed) confirmed = !!o.yes || await acknowledge('Existing files will participate in synchronization. Continue?', canPrompt(command));
         if (!confirmed && readdirSync(destination).length) throw new CliError('CANCELLED', 'connection cancelled');
-        const stored = key(dir, info.serverId, vault.vaultId);
-        if (!stored) await unlockVault(dir, info, vault.vaultId, await secret(command, 'NANOSYNC_RECOVERY_SECRET', 'recoveryFile', 'Vault recovery key (unlocks encryption on this device; not your owner password)'));
+        const stored = o.retryCredentialWrite && keyWritePending(dir, info.serverId, vault.vaultId)
+          ? null : await key(dir, info.serverId, vault.vaultId);
+        if (!stored) await unlockVault(dir, info, vault.vaultId, await secret(command, 'NANOSYNC_RECOVERY_SECRET', 'recoveryFile', 'Vault recovery key (unlocks encryption on this device; not your owner password)'), {retryCredentialWrite:o.retryCredentialWrite});
         else stored.fill(0);
         result = connectRegisteredVault(dir, destination, info.serverId, vault.vaultId, info.deviceId, confirmed);
         if (presentation.json) output().info('Connected; no files transferred. Next: nanosync client sync');
@@ -233,7 +264,7 @@ async function execute(args: string[], presentation: CliOutput): Promise<number>
       disconnectConnections(dir, [binding], !!opts(command).force); result = {connectionId:binding.connectionId, disconnected:true, filesPreserved:true};
     });
     flags(client.command('sync'), ...clientFlags, ...common, '--path <directory>', '--watch').action(async (_o, command) => {
-      const runner = startBoundSync(root(command), opts(command).path ?? process.cwd(), {
+      const runner = await startBoundSync(root(command), opts(command).path ?? process.cwd(), {
         onEvent: event => syncEvent(presentation, event, !!opts(command).watch),
       });
       try {

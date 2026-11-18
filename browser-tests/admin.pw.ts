@@ -241,6 +241,8 @@ test("approve/deny comparison codes, active/revoked clients and lost creation re
         "client",
         "connections",
         "add",
+        "--credential-mode",
+        "protected-file",
         "--url",
         url,
         "--alias",

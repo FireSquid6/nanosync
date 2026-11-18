@@ -5,13 +5,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   ClientError, connectRegisteredVault, enrollServer, pendingEnrollments, privateDirectory,
-  secureCreate, secureReplace, startBoundSync, type EnrollmentEvent,
+  secureCreate, secureReplace, startBoundSync, initializeCredentials, type EnrollmentEvent,
 } from '../src/index.ts';
 
 const directories: string[] = [];
 function temp() {
   const directory = mkdtempSync(join(tmpdir(), 'client-service-'));
   directories.push(directory);
+  initializeCredentials(directory, 'protected-file');
   return directory;
 }
 afterEach(() => {
@@ -63,7 +64,8 @@ test('enrollment is silent, secret-free and resumable', async () => {
 });
 
 test('bound sync validates identity, owns exclusively and releases ownership after stop', async () => {
-  const root = temp(), files = temp();
+  const root = temp(), files = mkdtempSync(join(tmpdir(), 'client-files-'));
+  directories.push(files);
   const serverId = randomUUID(), vaultId = randomUUID(), deviceId = randomUUID();
   const registrationPath = join(privateDirectory(join(root, 'servers')), `${serverId}.json`);
   const registration = {
@@ -71,20 +73,20 @@ test('bound sync validates identity, owns exclusively and releases ownership aft
   };
   secureCreate(registrationPath, JSON.stringify(registration));
   const binding = connectRegisteredVault(root, files, serverId, vaultId, deviceId);
-  expect(() => startBoundSync(root, files)).toThrow('vault key is missing; reconnect to unlock');
+  await expect(startBoundSync(root, files)).rejects.toThrow('vault key is missing; reconnect to unlock');
   secureCreate(join(privateDirectory(join(root, 'keys')), `${serverId}-${vaultId}.json`), JSON.stringify({
     version: 1, serverId, vaultId, masterKey: 'ab'.repeat(32),
   }));
-  const runner = startBoundSync(root, files);
+  const runner = await startBoundSync(root, files);
   try {
-    expect(() => startBoundSync(root, binding.root))
-      .toThrow('another live process owns the sync ownership lock');
+    await expect(startBoundSync(root, binding.root))
+      .rejects.toThrow('another live process owns the sync ownership lock');
   }
   finally { await runner.stop(); }
-  const next = startBoundSync(root, files);
+  const next = await startBoundSync(root, files);
   await next.stop();
   secureReplace(registrationPath, JSON.stringify({ ...registration, deviceId: randomUUID() }));
-  expect(() => startBoundSync(root, files)).toThrow('binding device differs from connection');
+  await expect(startBoundSync(root, files)).rejects.toThrow('binding device differs from connection');
   expect(new ClientError('CONFLICT', 'test').exitCode).toBe(2);
 });
 

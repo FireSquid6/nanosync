@@ -11,10 +11,10 @@ Scope is client operation, Linux first, using Electrobun/TypeScript/Bun and exis
 Source anchors (relative to repository root):
 
 - `packages/cli/src/main.ts`: actual command tree, defaults, confirmations, output/exit mapping.
-- `packages/cli/src/vault-client.ts`: URL-keyed pending enrollment, registration/token files, vault-key files, retry/approval behavior.
-- `packages/cli/src/connections.ts`: binding records/markers, nonoverlap, registry gate, removal inventory and ordered replica locks.
-- `packages/cli/src/sync-lock.ts`: Linux PID plus `/proc` process-start identity, atomic hardlink lock publication, fail-closed stale recovery.
-- `packages/cli/src/sync-runner.ts`: one-shot/watch orchestration, cancellation, durable replay and conflict reconciliation.
+- `packages/client-service/src/vault-client.ts`: URL-keyed pending enrollment, registration/token files, vault-key files, retry/approval behavior.
+- `packages/client-service/src/connections.ts`: binding records/markers, nonoverlap, registry gate, removal inventory and ordered replica locks.
+- `packages/client-service/src/sync-lock.ts`: Linux PID plus `/proc` process-start identity, atomic hardlink lock publication, fail-closed stale recovery.
+- `packages/client-service/src/sync-runner.ts`: one-shot/watch orchestration, cancellation, durable replay and conflict reconciliation.
 - `packages/client-local/src/index.ts`: FULL-synchronous Bun SQLite journal, heads, proposals, applies, transfers, conflict lineage, ignored identities, plaintext chunk cache.
 - `packages/linux-client/src/{index,apply,ignore}.ts`: no-follow filesystem scanning/application and root-local ignore rules.
 - `packages/sync-core`: portable cryptography, publication, merging and remote protocol; do not duplicate these in the desktop.
@@ -53,7 +53,7 @@ Native notifications have no headless delivery requirement: their shared categor
 
 ## 3. Shared client boundary and state
 
-Extract orchestration from CLI into `packages/client-service` (proposed), depending on `sync-core`, `client-local`, `linux-client` and existing safety helpers. CLI retains prompting, command parsing and presentation; Electrobun's trusted main process retains native adapters and renderer RPC. Neither presentation layer writes SQLite, credential files, markers or settings directly. `client-local` remains a journal, not a credential database or native UI library. Keep headless modules free of Electrobun/native-store imports until that mode is requested.
+Orchestration is extracted from CLI into `packages/client-service`, depending on `sync-core`, `client-local`, `linux-client` and existing safety helpers. CLI retains prompting, command parsing and presentation; Electrobun's trusted main process retains native adapters and renderer RPC. Neither presentation layer writes SQLite, credential files, markers or settings directly. `client-local` remains a journal, not a credential database or native UI library. Keep headless modules free of Electrobun/native-store imports until that mode is requested.
 
 Use existing identities unchanged:
 
@@ -123,9 +123,9 @@ Current credentials are protected files, **not OS-store-backed or encrypted-at-r
 
 Introduce one explicit credential-mode descriptor per client root: `protected-file` or `os-store`, schema/generation, and opaque provider references. Existing current-format roots are identified as file-backed without conversion. New desktop-managed state chooses OS store. CLI-created/headless roots must have an explicitly selected protected-file mode (add a non-secret credential-mode selection to creation); existing file-backed CLI usage continues without a display/keyring. New mode selection must not change existing commands' meaning or auto-migrate current roots.
 
-Linux OS-store target is the user-session Secret Service, shared by CLI and desktop via the same service namespace and client-root identity. Adapter must distinguish locked, unavailable, denied/cancelled, missing and corrupt entries. Locked/unavailable state blocks secret-dependent work with unlock/session guidance, no plaintext fallback or duplicate secret cache. Non-secret listings/settings remain available. Credentials already loaded by a running owner require an explicit lock policy in adapter integration; do not claim a keyring lock zeroizes process memory. Retain no account password/recovery input; store only required device/enrollment credentials and vault master keys. macOS Keychain/Windows credential adapters are later work.
+Linux OS-store target is the user-session Secret Service, shared by CLI and desktop via the same service namespace and client-root identity. The Linux adapter uses the platform Bun.secrets API backed by maintained libsecret. Native rejection or a required recorded reference returning null is conservatively `CREDENTIALS_UNAVAILABLE` with unlock/session guidance; do not claim precise locked/missing/denied classification. Invalid token/key encoding is a state error. Locked/unavailable state blocks secret-dependent work with unlock/session guidance, no plaintext fallback or duplicate secret cache. Non-secret listings/settings remain available. Credentials already loaded by a running owner require an explicit lock policy in adapter integration; do not claim a keyring lock zeroizes process memory. Retain no account password/recovery input; store only required device/enrollment credentials and vault master keys. macOS Keychain/Windows credential adapters are later work.
 
-Opening file-backed state in desktop presents: **leave unchanged and continue using CLI**, or **explicitly migrate this entire root to OS store**, explaining that unattended/headless CLI access will then need the unlocked user session. No syncing or enrollment from desktop against file-backed state before that decision. Cancel is non-mutating. Reverse migration to protected files is CLI-explicit with the same warnings/protected paths; never an automatic recovery action.
+Opening file-backed state in desktop presents: **leave unchanged and continue using CLI**, or **explicitly migrate this entire root to OS store**, explaining that unattended/headless CLI access will then need the unlocked user session. No syncing or enrollment from desktop against file-backed state before that decision. Cancel is non-mutating. Reverse migration to protected files is deferred; it is not required for the forward credential-mode slice and is never an automatic recovery action.
 
 A filesystem and credential store have no common atomic transaction. Migration therefore uses a durable phase journal, blocks all secret use while incomplete, and permits only explicit, temporary staging duplication needed for crash safety—not two active modes:
 
@@ -135,7 +135,7 @@ A filesystem and credential store have no common atomic transaction. Migration t
 4. Durably record cleanup intent, then remove source secret-bearing files/items and replace mixed registration/pending files with verified secret-free metadata, fsyncing each filesystem change. Keep target metadata/identities recoverable in the journal. From this phase roll forward only: never delete verified target secrets to roll back a partly removed source.
 5. Verify source cleanup, atomically publish/fsync the target-mode descriptor, mark complete, then release barrier/locks. New normal operations resolve only the committed provider. A crash before final commit resumes under the barrier; a crash after commit with a leftover journal performs idempotent final cleanup, never falls back to source.
 
-An unavailable target during cleanup/commit keeps migration blocked until it can be verified; do not invent replacement credentials or discard pending enrollment. OS-store deletion failure during reverse migration also blocks completion until cleanup succeeds. Test crashes before/after each durable transition, partial source deletion, target-entry loss, locked store and cleanup failure. Temporary duplicate staging must be disclosed in migration UX and never silently left as a working fallback. Old backups/storage remnants cannot be guaranteed erased. No recovery-key re-entry or fresh enrollment should be required merely because migration was interrupted.
+An unavailable target during cleanup/commit keeps migration blocked until it can be verified; do not invent replacement credentials or discard pending enrollment. Any staged-entry rollback deletion failure also keeps migration blocked until verified cleanup succeeds. Test crashes before/after each durable transition, partial source deletion, target-entry loss, locked store and cleanup failure. Temporary duplicate staging must be disclosed in migration UX and never silently left as a working fallback. Old backups/storage remnants cannot be guaranteed erased. No recovery-key re-entry or fresh enrollment should be required merely because migration was interrupted.
 
 ## 6. Notifications and diagnostics
 
@@ -189,14 +189,14 @@ Use existing Bun integration seams in `packages/cli/tests/{command-tree,cli,term
 
 ## 9. Unresolved design/runtime blockers
 
-- Electrobun version, supported Linux environment matrix and required native dependencies are not selected/proven here. Bun SQLite embedding, Linux window/session semantics, launcher singleton/reopen and logout must be checked in a real desktop.
+- Step 2 pins Electrobun 2.0.6 and records scoped Linux runtime evidence in `desktop-linux-validation.md`. Full packaged lifecycle, launcher singleton/reopen, logout and the supported-environment matrix still need release validation.
 - Private socket/capability transport and runtime peer-credential support need implementation and adversarial tests; filesystem permissions alone are not the specified authenticated transport. No control interface should ship without validated authentication.
-- Secret Service library/adapter selection, unlock/denial behavior, generation verification, cleanup guarantees and running-owner behavior when the store locks need implementation investigation. Never claim multi-resource atomicity or secure physical erasure.
-- Safe pause checkpoints and a durable multi-binding removal/migration recovery schema need implementation and fault-injection tests. Current runner cancellation and locks are foundations, not an implemented pause/IPC protocol.
+- Step 4 chooses Bun.secrets/libsecret on Linux with conservative unavailable errors, generation/reference validation and resumable forward migration. The API is experimental and pinned-runtime regression coverage remains required; never claim multi-resource atomicity or physical erasure.
+- Safe pause checkpoints and durable multi-binding removal still need implementation and fault-injection tests. Step 4 covers credential migration recovery; current runner cancellation and locks are not an implemented pause/IPC protocol.
 - Exact new CLI flag/result schemas, structured progress instrumentation and persistent-failure notification threshold must be finalized with their implementation tests; the existing command contracts cannot be changed to simplify this work.
 - Linux tray backends, notification delivery, login registration, package/Nix runtime closure and keyboard-only onboarding remain native validation work. macOS/Windows remain unsupported until separately validated.
 
-No acceptance criteria are checked off by step 1. No runtime tests or native validation are claimed; only repository/issue/design inspection and documentation changes are in scope.
+The original step 1 checked off no runtime acceptance criteria. Subsequent step 2 evidence and step 4 implementation notes below are explicitly scoped; they do not validate unfinished desktop behavior.
 
 
 ## 10. Step 3 — shared client extraction evidence
@@ -234,3 +234,32 @@ implemented by step 3. File-backed secrets remain trusted-process APIs, not rend
 payloads; sync completion events are not a durable “up to date” status. Existing removal
 crash/credential-cleanup limitations remain unchanged. This evidence does not complete
 issue #18 backend/native acceptance.
+
+
+## Step 4 implementation boundary
+
+The shared service now supports explicit protected-file/OS-store initialization,
+secret-free listings, asynchronous secret access, forward migration/resume/rollback,
+and retryable credential cleanup. See `packages/cli/README.md#credential-storage-linux`
+for actual commands, explicit confirmations, initial-write retry flags and limitations.
+Reverse migration, IPC, settings and renderer/native onboarding are not implemented.
+The trusted desktop entry seam is `desktopCredentials` plus explicit
+`initializeCredentials(root, 'os-store')`; file mode returns decision-required.
+
+`Bun.secrets` 1.4.4+38afee6c8 was inspected against official pinned runtime source and
+probed using disposable namespaced items. Native get/set/update/delete roundtrips
+passed with packaged Bun and Nix Bun with discoverable libsecret/GLib. A private bus
+and temporary HOME/XDG keyring showed locked get=null and delete=false while its own
+item still existed; missing bus produced ERR_SECRETS_PLATFORM_ERROR. No user keyring
+was locked or existing credentials inspected. Therefore required null/native failure
+blocks with actionable local exit 2, never fallback or implicit re-enrollment.
+
+Deletion after durable authorization uses a non-secret write/read/delete(true)/
+read(null) marker protocol, including replay against already-absent entries. Staged
+rollback may destroy only the target generation before cleanup intent; after intent,
+only verified target data permits forward source cleanup. This covers application
+entries in the default collection, not externally moved/duplicated entries. Already
+running sync owners retain loaded credentials until stop. Native calls have no exposed
+cancellation; JS-memory erasure, immediate lock revocation and forensic erasure are
+not claimed. Network polling does not retain the registry gate: a separate process-
+identity credential-operation lease prevents migration/removal racing enrollment.

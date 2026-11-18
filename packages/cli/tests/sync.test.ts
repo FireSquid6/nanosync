@@ -1,5 +1,5 @@
 import {
-  createConnection, privateDirectory, secureCreate, SyncRunner, type SyncOptions,
+  createConnection, privateDirectory, secureCreate, initializeCredentials, SyncRunner, type SyncOptions,
   type SyncEvent,
 } from '@nanosync/client-service';
 import { afterEach, expect, test, spyOn } from "bun:test";
@@ -42,6 +42,8 @@ async function fixture() {
   const server = await runServer({ directory: serverDir, port: await freePort(), scanIntervalMs: 3_600_000 });
   servers.push(server);
   let recovery = "";
+  initializeCredentials(firstDir, 'protected-file');
+  initializeCredentials(secondDir, 'protected-file');
   await bootstrapWorkflow(firstDir, server.url, join(serverDir, "bootstrap.hex"), "sync test password", async value => { recovery = value; });
   const secondId = randomUUID();
   expect((await joinVault(secondDir, server.url, secondId, "sync test password")).status).toBe("pending");
