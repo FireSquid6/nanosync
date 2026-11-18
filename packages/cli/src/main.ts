@@ -13,9 +13,16 @@ import { connectRegisteredVault, discoverConnection, records, disconnectConnecti
 import { enrollServer, key, server as storedServer, servers, unlockVault, pendingEnrollments, connectionSummary } from './vault-client.ts';
 import { provisionLocalVault } from './local-provision.ts';
 import { CliError, interactive, text, hidden, choose, acknowledge } from './prompts.ts';
+import { CliOutput, output, withOutput } from './output.ts';
 
 type Options = { [key: string]: any };
 export async function main(args = process.argv.slice(2)): Promise<number> {
+  const flagArgs = args.slice(0, args.indexOf('--') < 0 ? args.length : args.indexOf('--'));
+  const presentation = new CliOutput(flagArgs.includes('--json'));
+  return withOutput(presentation, () => execute(args, presentation));
+}
+
+async function execute(args: string[], presentation: CliOutput): Promise<number> {
   try {
     const program = new Command().name('nanosync').description('Explicit server-local administration and client synchronization').exitOverride()
       .configureOutput({ writeErr: () => {} }).showHelpAfterError(false);
@@ -37,16 +44,34 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
     const opts = (command: Command): Options => command.optsWithGlobals();
     const canPrompt = (command: Command) => interactive(opts(command).nonInteractive);
     const root = (command: Command) => opts(command).clientDir ?? join(process.env.HOME ?? '', '.nanosync');
-    const need = async (command: Command, flag: string, label = `--${flag}`): Promise<string> =>
+    const labels: Record<string, string> = {
+      'server-dir': 'Server directory', name: 'Vault name', alias: 'Connection alias', url: 'Server URL',
+    };
+    const need = async (command: Command, flag: string,
+      label = `${labels[flag] ?? flag.replaceAll('-', ' ')} (--${flag})`): Promise<string> =>
       opts(command)[flag.replace(/-([a-z])/g, (_: string, c: string) => c.toUpperCase())] ?? await text(label, canPrompt(command));
     const serverRoot = async (command: Command) => need(command, 'server-dir');
     const secret = async (command: Command, variable: string, fileFlag: string, label: string): Promise<string> => {
       const path = opts(command)[fileFlag];
+      if (!path && process.env[variable] === undefined && !canPrompt(command)) {
+        const flag = fileFlag.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`);
+        throw new CliError('INPUT_REQUIRED', `${label} is required; set ${variable} or supply --${flag} <file>.`);
+      }
       return path ? secureRead(path, 4096).toString('utf8').trimEnd() : process.env[variable] ?? await hidden(label, canPrompt(command));
     };
     async function selectServer(command: Command) {
-      const choice = opts(command).server ?? await choose('--server', servers(root(command)).map(s => ({name:`${s.name}: ${s.baseUrl}`, value:s.serverId})), canPrompt(command));
+      const choice = opts(command).server ?? await choose('Choose a server (--server)',
+        servers(root(command)).map(info => ({ name: `${info.name}: ${info.baseUrl}`, value: info.serverId })),
+        canPrompt(command), 'No server connections. Run nanosync client connections add.');
       return storedServer(root(command), choice);
+    }
+    async function selectLocalVault(command: Command, directory: string) {
+      if (!opts(command).vault && !canPrompt(command)) return parseVaultId(await need(command, 'vault'));
+      const selected = opts(command).vault ?? await choose('Choose a vault (--vault)',
+        await withLocalOwner(directory, owner => owner.listVaults(localOwner).map(vault => ({
+          name: `${vault.name} — ${vault.vaultId}`, value: vault.vaultId,
+        }))), canPrompt(command), 'No vaults. Create one with nanosync server vaults create.');
+      return parseVaultId(selected);
     }
     let result: unknown, exitCode = 0, resultCode = 'OK';
     const server = flags(program.command('server').description('Local server administration'), ...local, ...common);
@@ -54,15 +79,18 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
       const dir = privateDirectory(await serverRoot(command));
       const password = await secret(command, 'NANOSYNC_PASSWORD', 'passwordFile', 'Owner password');
       if (!opts(command).passwordFile && !process.env.NANOSYNC_PASSWORD && password !== await hidden('Confirm owner password', canPrompt(command))) throw new CliError('INVALID_INPUT', 'password confirmation mismatch');
+      output().progress('Initializing server…');
       await initializeServerOwner(dir, password);
       result = { initialized: true, serverDirectory: dir };
     });
     flags(server.command('run'), ...local, ...common, '--host <host>', '--port <port>', '--acknowledge-exposure', '--web-ui', '--external-origin <origin>', '--trusted-proxy <ip>')
       .action(async (_o, command) => {
         const o = opts(command);
-        const running = await runServer({ directory:await serverRoot(command), host:o.host, port:o.port === undefined ? undefined : Number(o.port),
+        const directory = await serverRoot(command);
+        output().progress('Starting server…');
+        const running = await runServer({ directory, host:o.host, port:o.port === undefined ? undefined : Number(o.port),
           acknowledgeExposure:!!o.acknowledgeExposure, webUi:!!o.webUi, externalOrigin:o.externalOrigin, trustedProxyAddresses:o.trustedProxy ? [o.trustedProxy] : undefined });
-        console.error(`Server listening at ${running.url}`);
+        output().info(`Server listening at ${running.url}`);
         await new Promise<void>(resolve => { process.once('SIGINT', resolve); process.once('SIGTERM', resolve); });
         await running.stop(); result = { stopped:true };
       });
@@ -72,16 +100,27 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
     });
     for (const action of ['approve', 'deny', 'revoke'] as const) {
       flags(devices.command(action), ...local, ...common, '--device-id <uuid>').action(async (_o, command) => {
-        const dir = await serverRoot(command), id = parseDeviceId(await need(command, 'device-id'));
+        const dir = await serverRoot(command);
+        if (!opts(command).deviceId && !canPrompt(command)) await need(command, 'device-id');
+        const selected = opts(command).deviceId ?? await choose(`Choose a device to ${action} (--device-id)`,
+          await withLocalOwner(dir, owner => {
+            const candidates = action === 'revoke'
+              ? owner.devices(localOwner).filter(device => device.state === 'active') : owner.pending(localOwner);
+            return candidates.map(device => ({
+              name: `${device.displayName} — ${device.deviceId}`, value: device.deviceId,
+            }));
+          }), canPrompt(command), action === 'revoke' ? 'No active devices to revoke.'
+            : 'No pending requests. Run nanosync client connections add on a client.');
+        const id = parseDeviceId(selected);
         if (action === 'revoke') {
-          console.error('Revocation blocks future access; downloaded ciphertext, plaintext and keys are not erased.');
+          output().warning('Revocation blocks future access; downloaded ciphertext, plaintext and keys are not erased.');
           if (!opts(command).yes && !await acknowledge('Revoke this device?', canPrompt(command))) throw new CliError('CANCELLED', 'revocation cancelled');
         }
         result = await withLocalOwner(dir, owner => {
           if (action === 'revoke') owner.revoke(localOwner, id);
           else {
             const request = owner.pending(localOwner).find(r => r.deviceId === id);
-            if (request) console.error(`Verification code: ${request.verificationCode}`);
+            if (request) output().info(`Verification code: ${request.verificationCode}`);
             owner.decideEnrollment(localOwner, {protocolVersion:1, deviceId:id, decision:action});
           }
           return {deviceId:id, status:action === 'approve' ? 'approved' : action === 'deny' ? 'denied' : 'revoked'};
@@ -95,24 +134,25 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
     flags(vaults.command('create'), ...local, ...common, '--name <name>', '--recovery-output <file>').action(async (_o, command) => {
       const dir = await serverRoot(command), name = await need(command, 'name');
       if (!opts(command).recoveryOutput && !canPrompt(command)) throw new CliError('INPUT_REQUIRED', '--recovery-output is required in scripts');
+      output().progress('Creating vault…');
       result = await provisionLocalVault(dir, name, async recovery => {
         const path = opts(command).recoveryOutput;
         if (path) secureCreate(path, recovery + '\n');
         else {
-          console.error(`Recovery secret (record offline): ${recovery}`);
+          output().info(`Recovery secret (record offline): ${recovery}`);
           if (await hidden('Retype recovery secret to acknowledge backup', canPrompt(command)) !== recovery) throw new CliError('INVALID_INPUT', 'recovery acknowledgement mismatch; no vault created');
         }
       }, opts(command).recoveryOutput);
     });
     flags(vaults.command('rename'), ...local, ...common, '--vault <uuid>', '--name <name>').action(async (_o, command) => {
-      const dir = await serverRoot(command), id = parseVaultId(await need(command, 'vault')), name = await need(command, 'name');
+      const dir = await serverRoot(command), id = await selectLocalVault(command, dir), name = await need(command, 'name', 'New vault name (--name)');
       await withLocalOwner(dir, owner => owner.renameVault(localOwner, id, name)); result = {vaultId:id, name};
     });
     flags(vaults.command('delete'), ...local, ...common, '--vault <uuid>', '--confirm-delete <uuid>').action(async (_o, command) => {
-      const dir = await serverRoot(command), id = parseVaultId(await need(command, 'vault'));
+      const dir = await serverRoot(command), id = await selectLocalVault(command, dir);
       const vault = await withLocalOwner(dir, owner => owner.listVaults(localOwner).find(v => v.vaultId === id));
       if (!vault) throw new CliError('NOT_FOUND', 'vault not found');
-      console.error(`PERMANENT deletion: ${dir} / ${vault.name} / ${id}. History, encrypted objects and recovery wraps are destroyed. Recovery secrets cannot restore data without a server backup. Offline clients may have unsynced work. Client files are preserved.`);
+      output().warning(`PERMANENT deletion: ${dir} / ${vault.name} / ${id}. History, encrypted objects and recovery wraps are destroyed. Recovery secrets cannot restore data without a server backup. Offline clients may have unsynced work. Client files are preserved.`);
       if (canPrompt(command)) {
         if (await text(`Type exact vault name: ${vault.name}`, true) !== vault.name) throw new CliError('INVALID_INPUT', 'vault name confirmation mismatch');
       } else {
@@ -124,7 +164,11 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
     });
     const admin = flags(server.command('admin'), ...local, ...common);
     for (const name of ['storage', 'retention-dry-run', 'gc-dry-run', 'scan', 'diagnostics']) {
-      flags(admin.command(name), ...local, ...common).action(async (_o, command) => { result = await localAdminReport(await serverRoot(command), name); });
+      flags(admin.command(name), ...local, ...common).action(async (_o, command) => {
+        const directory = await serverRoot(command);
+        output().progress('Preparing server report…');
+        result = await localAdminReport(directory, name);
+      });
     }
     const client = flags(program.command('client').description('Local connections, vault bindings and sync'), ...clientFlags, ...common);
     const connections = flags(client.command('connections'), ...clientFlags, ...common);
@@ -153,7 +197,7 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
       });
     flags(connections.command('remove'), ...clientFlags, ...common, '--server <alias-or-id>', '--force').action(async (_o, command) => {
       const info = await selectServer(command), dir = root(command);
-      console.error('Local removal only: remote device access is NOT revoked. Files and remote data are preserved. --force discards pending synchronization state.');
+      output().warning('Local removal only: remote device access is NOT revoked. Files and remote data are preserved. --force discards pending synchronization state.');
       removeServerConnection(dir, info.serverId, !!opts(command).force);
       result = {serverId:info.serverId, removed:true, remotelyRevoked:false};
     });
@@ -164,8 +208,11 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
     flags(bindings.command('connect'), ...clientFlags, ...common, '--server <alias-or-id>', '--vault <name-or-uuid>', '--path <directory>', '--confirm-nonempty', '--recovery-file <file>')
       .action(async (_o, command) => {
         const o = opts(command), dir = root(command), info = await selectServer(command);
+        output().progress('Loading available vaults…');
         const list = (await api(info.baseUrl, '/v1/vaults', {}, info.token)).vaults as {vaultId:string;name:string}[];
-        const choice = o.vault ?? await choose('--vault', list.map(v => ({name:v.name, value:v.vaultId})), canPrompt(command));
+        const choice = o.vault ?? await choose('Choose a vault (--vault)',
+          list.map(vault => ({ name: `${vault.name} — ${vault.vaultId}`, value: vault.vaultId })),
+          canPrompt(command), 'No vaults available. Ask the server owner to run nanosync server vaults create.');
         const matches = list.filter(v => v.vaultId === choice || v.name === choice);
         if (matches.length !== 1) throw new CliError('NOT_FOUND', 'vault not found or ambiguous');
         const vault = matches[0]!, destination = o.path ?? process.cwd();
@@ -176,11 +223,11 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
         if (!stored) await unlockVault(dir, info, vault.vaultId, await secret(command, 'NANOSYNC_RECOVERY_SECRET', 'recoveryFile', 'Vault recovery secret'));
         else stored.fill(0);
         result = connectRegisteredVault(dir, destination, info.serverId, vault.vaultId, info.deviceId, confirmed);
-        console.error('Connected; no files transferred. Next: nanosync client sync');
+        if (presentation.json) output().info('Connected; no files transferred. Next: nanosync client sync');
       });
     flags(bindings.command('disconnect'), ...clientFlags, ...common, '--path <directory>', '--force').action(async (_o, command) => {
       const dir = root(command), binding = discoverConnection(dir, opts(command).path ?? process.cwd(), !!opts(command).force);
-      if (opts(command).force) console.error('Disconnect discards pending synchronization state. Local files and remote data are preserved.');
+      if (opts(command).force) output().warning('Disconnect discards pending synchronization state. Local files and remote data are preserved.');
       disconnectConnections(dir, [binding], !!opts(command).force); result = {connectionId:binding.connectionId, disconnected:true, filesPreserved:true};
     });
     flags(client.command('sync'), ...clientFlags, ...common, '--path <directory>', '--watch').action(async (_o, command) => {
@@ -195,9 +242,7 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
         return SyncRunner.start({clientDirectory:privateDirectory(join(privateDirectory(join(privateDirectory(dir), 'replicas')), binding.connectionId)),
           syncDirectory:binding.root, vaultId:binding.vaultId, deviceId:binding.deviceId,
           masterKey:master, baseUrl:info.baseUrl, token:info.token,
-          onProgress: message => {
-            console.error(opts(command).json ? JSON.stringify({event:'sync-progress', message}) : message);
-          }});
+          onProgress: message => presentation.syncProgress(message, !!opts(command).watch) });
       }); }
       finally { master.fill(0); }
       try {
@@ -205,23 +250,50 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
         else {
           const controller = new AbortController(), stop = () => controller.abort();
           process.once('SIGINT', stop); process.once('SIGTERM', stop);
-          try { await runner.watch(controller.signal, head => console.error(JSON.stringify({event:'synced', head})), error => console.error(JSON.stringify({event:'sync-error', message:error instanceof Error ? error.message : 'sync failed'}))); }
+          try {
+            await runner.watch(controller.signal,
+              head => presentation.synced(head), error => presentation.syncError(error));
+          }
           finally { process.off('SIGINT', stop); process.off('SIGTERM', stop); }
           result = {stopped:true};
         }
       } finally { await runner.stop(); }
     });
-    if (!args.length) { program.outputHelp(); return 0; }
+    function configureHelp(command: Command) {
+      if (command.commands.length) {
+        command.addHelpCommand(true);
+        command.allowExcessArguments().action(() => {
+          if (command.args.length) {
+            const invocation = ['nanosync', presentation.command].filter(Boolean).join(' ');
+            throw new CliError('INVALID_INPUT', `Unknown subcommand: ${command.args[0]}. Run ${invocation} --help.`);
+          }
+          command.outputHelp();
+        });
+      }
+      for (const child of command.commands) configureHelp(child);
+    }
+    configureHelp(program);
+    program.hook('preAction', (_command, action) => {
+      const path: string[] = [];
+      for (let current: Command | null = action; current?.parent; current = current.parent) {
+        path.unshift(current.name());
+      }
+      presentation.command = path.join(' ');
+    });
     await program.parseAsync(args, {from:'user'});
-    if (result !== undefined) console.log(opts(program).json || seen.has('--json') ? JSON.stringify({ok:true, code:resultCode, data:result}) : JSON.stringify(result, null, 2));
+    if (result !== undefined) presentation.result(result, resultCode);
     return exitCode;
   } catch (error) {
     if (error instanceof CommanderError && error.exitCode === 0) return 0;
     const interrupted = error instanceof Error && error.name === 'ExitPromptError';
     const code = error instanceof CliError ? error.code : interrupted ? 'INTERRUPTED' : error instanceof RemoteError ? error.code : error instanceof CommanderError ? 'INVALID_INPUT' : 'OPERATION_FAILED';
     const exitCode = error instanceof CliError ? error.exitCode : interrupted ? 130 : error instanceof RemoteError ? 5 : 2;
-    console.error(JSON.stringify({ok:false, code, message:error instanceof Error ? error.message : 'Command failed', exitCode}));
+    let message = error instanceof Error ? error.message : 'Command failed';
+    if (!presentation.json && error instanceof CommanderError) {
+      message += '\nRun nanosync --help to see available commands and flags.';
+    }
+    presentation.error(code, message, exitCode);
     return exitCode;
-  }
+  } finally { presentation.stop(); }
 }
 if (import.meta.main) process.exitCode = await main();
