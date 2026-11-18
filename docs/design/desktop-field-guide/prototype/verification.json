@@ -1,0 +1,25 @@
+{
+  "checks": 19,
+  "passed": [
+    "Global resume preserves per-folder pause",
+    "Folder pause independently reversible",
+    "Missing-root state offers retry, not recreation",
+    "Ignore validation required and invalidated by edit",
+    "Disconnect gated on pending-state acknowledgment",
+    "Conflicts preserve copies and acknowledgment is a preview",
+    "Enrollment blocks unapproved advance and has alternate states",
+    "Nonempty and overlapping roots are guarded",
+    "Connect without sync leaves a paused never-synced binding",
+    "Lifecycle distinguishes background hide and explicit Quit",
+    "Tray fallback has Open Nanosync only",
+    "Notification global switch disables individual categories",
+    "Diagnostics exports labeled synthetic data without paths",
+    "Locked credentials and migration require explicit decisions",
+    "Offline, revoked access and empty states reachable",
+    "1280 and 960 widths have no horizontal overflow",
+    "Reviewed state summaries are coherent and preserve pauses",
+    "Connection removal requires explicit state acknowledgment",
+    "Enrollment starts with keyboard and explicit start honors selected vault"
+  ],
+  "errors": []
+}
