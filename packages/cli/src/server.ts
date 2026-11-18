@@ -7,6 +7,7 @@ import { AuthenticationRepository, BootstrapRepository, MaintenanceRepository, O
 import { LocalFilesystem } from "@nanosync/server-object-storage";
 import { privateDirectory, provisionSecret, secureRead } from "./security.ts";
 import { acquireServerStorage } from './server-ownership.ts';
+import { output } from './output.ts';
 
 export interface RunServerOptions { webUi?: boolean; externalOrigin?: string; trustedProxyAddresses?: string[]; adminAssets?: AdminAssets; directory: string; host?: string; port?: number; acknowledgeExposure?: boolean; scanIntervalMs?: number }
 export async function initializeServerOwner(directory: string, password: string): Promise<void> {
@@ -98,10 +99,10 @@ async function startOwnedServer(options: RunServerOptions, directory: string): P
       batchSize: 100,
       onBatch: counts => {
         if (counts.missing || counts.corrupt) {
-          console.error(`integrity failures: missing=${counts.missing}, corrupt=${counts.corrupt}`);
+          output().warning(`integrity failures: missing=${counts.missing}, corrupt=${counts.corrupt}`);
         }
       },
-      onError: () => console.error("integrity scan failed; investigate storage"),
+      onError: () => output().warning("integrity scan failed; investigate storage"),
     });
     const server = startServer({
       owner: new OwnerOperations(database, filesystem),
@@ -120,7 +121,7 @@ async function startOwnedServer(options: RunServerOptions, directory: string): P
     let cleanupFlight: Promise<void> | undefined;
     const cleanup = () => {
       if (!cleanupFlight) cleanupFlight = maintenance.cleanupDeleted()
-        .catch(() => console.error("vault deletion cleanup failed; will retry"))
+        .catch(() => output().warning("vault deletion cleanup failed; will retry"))
         .finally(() => { cleanupFlight = undefined; });
     };
     cleanup();

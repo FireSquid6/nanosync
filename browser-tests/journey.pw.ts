@@ -75,11 +75,11 @@ test("local init and creation → CLI enrollment/browser approval → two replic
     await navigation.getByRole("link", { name: "Vaults", exact: true }).click();
     await expect(page).toHaveURL(url + "/admin/vaults");
     await page.getByLabel("New vault name").fill("browser-vault");
-    await page.getByRole("button", { name: "Prepare recovery" }).click();
+    await page.getByRole("button", { name: "Prepare recovery key" }).click();
     const browserSecret = await page.getByTestId("recovery-secret").innerText();
-    await page.getByLabel("I saved the recovery secret").check();
+    await page.getByLabel("I saved the vault recovery key").check();
     await page.getByRole("button", { name: "Save encrypted receipt" }).click();
-    await page.getByLabel("Saved recovery secret").fill(browserSecret);
+    await page.getByLabel("Vault recovery key", { exact: true }).fill(browserSecret);
     await page.getByRole("button", { name: "Verify and publish" }).click();
     await expect(page.getByRole("heading", { name: "browser-vault", exact: true })).toBeVisible();
 

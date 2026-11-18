@@ -55,4 +55,4 @@ For integrity failures or rollback warnings, stop and investigate the server's s
 
 ## Requesting help
 
-Record the exact command with secrets removed, executable revision/build, error code, exit code, and whether the runtime was running. Errors are structured on stderr; successful results with `--json` go to stdout. Redact passwords, recovery secrets, tokens, cookies, private state files, and personal paths before sharing diagnostics. Never upload your complete client state directory as a bug report.
+Record the exact command with secrets removed, executable revision/build, error code, exit code, and whether the runtime was running. Default human-readable output, including errors, goes to stdout. With `--json`, successful results go to stdout and structured errors and diagnostics go to stderr. Redact passwords, recovery secrets, tokens, cookies, private state files, and personal paths before sharing diagnostics. Never upload your complete client state directory as a bug report.

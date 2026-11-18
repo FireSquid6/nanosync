@@ -13,18 +13,19 @@ export function VaultCreation() {
       void run(() => prepareRecovery(String(fields.get("name"))));
     }}>
       <TextField label="New vault name" name="name" required maxLength={128} />
-      <Button type="submit" disabled={busy}>Prepare recovery</Button>
+      <Button type="submit" disabled={busy}>Prepare recovery key</Button>
     </form>
   );
   return (
     <div className="nv-stack">
       <h3>Create {creation.name}</h3>
       {!saved ? <>
-        <p>Save this recovery secret securely. It cannot be retrieved later. No vault has been published.</p>
+        <p>Your vault recovery key unlocks this vault’s encryption key on new devices. It is not your owner password or a backup of your files.</p>
+        <p>Save it in a password manager or offline. Anyone with this key and the encrypted vault data can decrypt your files. It cannot be retrieved later. No vault has been published.</p>
         <code data-testid="recovery-secret">{secret}</code>
         <label>
           <input type="checkbox" checked={acknowledged} onChange={(event) => acknowledge(event.target.checked)} />{" "}
-          I saved the recovery secret
+          I saved the vault recovery key
         </label>
         <Button disabled={!acknowledged || busy} onClick={() => void run(saveReceipt)}>Save encrypted receipt</Button>
       </> : (
@@ -33,8 +34,8 @@ export function VaultCreation() {
           event.currentTarget.reset();
           void run(() => publish(String(fields.get("secret"))));
         }}>
-          <p>Reenter your saved secret to verify the encrypted receipt before publishing or retrying. Lost responses replay the same vault, never a duplicate.</p>
-          <TextField label="Saved recovery secret" name="secret" type="password" autoComplete="off" required />
+          <p>Reenter your saved vault recovery key to verify the encrypted receipt before publishing or retrying. Lost responses replay the same vault, never a duplicate.</p>
+          <TextField label="Vault recovery key" name="secret" type="password" autoComplete="off" required />
           <Button type="submit" disabled={busy}>Verify and publish</Button>
         </form>
       )}

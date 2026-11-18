@@ -8,6 +8,7 @@ import { api, baseUrl, login } from "./client.ts";
 import { privateDirectory, secureCreate, secureRead, secureReplace, syncPrivateDirectory } from "./security.ts";
 
 import { hidden as secretPrompt, CliError } from "./prompts.ts";
+import { output } from './output.ts';
 
 export interface ServerRegistration { version: 1; serverId: string; baseUrl: string; deviceId: string; name: string; token: string }
 interface VaultKey { version: 1; serverId: string; vaultId: string; masterKey: string }
@@ -116,13 +117,14 @@ export async function enrollServer(root: string, url: string, password: string |
     if (!deviceName || Buffer.byteLength(deviceName)>128 || /[\u0000-\u001f\u007f]/u.test(deviceName)) throw new CliError("INVALID_INPUT", "invalid device name");
     const secret = password ?? await options.password?.();
     if (!secret) throw new CliError("INPUT_REQUIRED", "owner password required for first enrollment");
+    output().progress('Connecting to server…');
     pending = { url: canonical, token: await bounded(signal => login(canonical, secret, signal), waitDeadline), deviceId: randomUUID(), name: deviceName, alias,
       fingerprint: randomBytes(32).toString("base64url"), serverId: randomUUID(), expiresAtMs: Date.now() + 24 * 60 * 60_000 };
     secureCreate(pendingPath, JSON.stringify(pending));
   }
   const request = pending;
-  console.error(`nanosync server devices approve --device-id ${request.deviceId}`);
-  console.error(`Verification code: ${enrollmentVerificationCode(request.deviceId, request.fingerprint)}`);
+  output().info(`nanosync server devices approve --device-id ${request.deviceId}`);
+  output().info(`Verification code: ${enrollmentVerificationCode(request.deviceId, request.fingerprint)}`);
   const until = Math.min(request.expiresAtMs, waitMs === 0 ? Date.now() : waitDeadline);
   let delay = 250;
   async function retry<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T | null> {
@@ -134,21 +136,24 @@ export async function enrollServer(root: string, url: string, password: string |
       catch (error) {
         if (options.signal?.aborted) throw new CliError("INTERRUPTED", "Enrollment interrupted; retry the same command to resume", 130);
         if (!(error instanceof TypeError || error instanceof CliError && error.code === "REQUEST_TIMEOUT" || error instanceof RemoteError && (error.status >= 500 || error.status === 429))) throw error;
-        if (Date.now() >= until) { console.error("Temporary outage; pending request retained. Retry the same command."); return null; }
-        console.error(`Temporary outage; retrying in ${delay}ms (request retained)`);
+        if (Date.now() >= until) { output().info("Temporary outage; pending request retained. Retry the same command."); return null; }
+        output().info(`Temporary outage; retrying in ${delay}ms (request retained)`);
         await pause(Math.min(delay, Math.max(0, until - Date.now()))); delay = Math.min(5000, delay * 2);
       }
     }
   }
   const caps = await retry(signal => api(canonical, "/v1/capabilities", {signal}));
-  if (caps) { const admin = parseCapabilityResponse(caps).webAdministration; if (admin.enabled && admin.url) console.error(`Administration: ${admin.url}`); }
+  if (caps) { const admin = parseCapabilityResponse(caps).webAdministration; if (admin.enabled && admin.url) output().info(`Administration: ${admin.url}`); }
   let status = Date.now() >= request.expiresAtMs ? "expired" : request.status ?? "pending";
   if (status === "pending") {
     try {
       const response = await retry(signal => api(canonical, "/v1/auth/enrollments", { method: "POST", body: JSON.stringify({ protocolVersion: 1,
         deviceId: request.deviceId, displayName: request.name, platform: process.platform, clientVersion: "1", fingerprint: request.fingerprint }), signal }, request.token));
       status = response?.status ?? "pending";
-      if (status === "pending") console.error("Waiting for approval; Ctrl-C preserves this request for resume.");
+      if (status === "pending") {
+        output().info("Waiting for approval; Ctrl-C preserves this request for resume.");
+        if (Date.now() < until) output().progress('Waiting for device approval…');
+      }
       while (status === "pending" && Date.now() < until) {
         if (options.signal?.aborted) throw new CliError("INTERRUPTED", "Enrollment interrupted; retry the same command to resume", 130);
         await pause(Math.min(1000, until - Date.now()));
@@ -169,13 +174,13 @@ export async function enrollServer(root: string, url: string, password: string |
       if (secureRead(path).toString("utf8") !== JSON.stringify(info)) throw new CliError("CONFLICT", "saved credential differs from pending enrollment");
     } else secureCreate(path, JSON.stringify(info));
     unlinkSync(pendingPath); syncPrivateDirectory(dir(root, "pending"));
-    console.error("Approved. Next: nanosync client vaults connect (no files transferred).");
+    output().info("Approved. Next: nanosync client vaults connect (no files transferred).");
     return connectionSummary(info);
   }
   if (options.signal?.aborted) throw new CliError("INTERRUPTED", "Enrollment interrupted; retry the same command to resume", 130);
   if (status === "denied" || status === "expired") {
     secureReplace(pendingPath, JSON.stringify({...request, status}));
-    console.error(`Enrollment ${status}; review with the owner, then explicitly use --fresh for a new identity.`);
+    output().info(`Enrollment ${status}; review with the owner, then explicitly use --fresh for a new identity.`);
   }
   return { status, alias, url: canonical, deviceId: request.deviceId, deviceName: request.name };
 }
