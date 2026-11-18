@@ -183,9 +183,9 @@ injected runtime failures complement rather than replace real-device execution.
 
 GitHub Actions builds validation APKs and runs host/protocol/type/lint checks in
 the lightweight Nix shell. Android platform/emulator acceptance commands above are
-separate from that build job. See tracking for actual recorded results and the
-remaining physical Pixel 9/Android 17 acceptance gate. Emulator tests do not prove
-real-device battery/Doze behavior or a completed 50 GB transfer.
+separate from that build job. See tracking for automated results and user-reported
+completion of the physical Pixel 9/Android 17, reboot/Doze and 50 GB transfer/resume
+acceptance checks. Those manual results are separate from emulator test evidence.
 
 Bundled dependency licenses are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
 and included in the APK assets.

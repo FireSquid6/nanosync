@@ -2,9 +2,9 @@
 
 Tracking specification: [#6](https://github.com/FireSquid6/nanosync/issues/6).
 
-This document tracks implementation gates, not claims that the application is
-already complete. Individual milestones must only be closed when their
-acceptance checks have evidence.
+This document records automated verification and user-reported manual acceptance
+separately. The user has confirmed the remaining device/full-scale acceptance
+checks; production distribution and a passing PR CI run remain separate concerns.
 
 ## Milestones
 
@@ -72,20 +72,28 @@ must distinguish verified behavior from unavailable device acceptance.
 
 Exact final command results are also recorded in the implementation PR. See the [Android guide](../apps/android/README.md) for reproduction commands.
 
-### Remaining acceptance gates (not claimed complete)
+### User-reported manual acceptance — complete
 
-- Physical **Pixel 9 / Android 17** testing: no physical device was connected.
-- Real-device battery/Doze behavior and actual reboot/unlock recovery. Receiver
-  registration, lease ownership and the real OS-dispatched fallback job are tested;
-  that is not the same as a completed real-device reboot acceptance run.
-- A completed 50 GB Android transfer/resume and device-scale capacity/performance
-  run. Existing bounded/chunked and interrupted-transfer fixtures are not proof of
-  completing a 50 GB transfer.
-- Production release-key provisioning and any actual distribution release.
+The user confirmed the application works on the required device and explicitly
+confirmed the remaining checks after the Field Guide update:
 
-Keep the parent specification and final acceptance milestone open while those
-required device gates remain. Do not replace them with a claim that emulator or
-small-file success covers every device condition.
+- [x] Physical **Pixel 9 / Android 17** acceptance.
+- [x] Real-device battery/Doze behavior and reboot/unlock recovery.
+- [x] Completed **50 GB transfer/resume** acceptance.
+
+These are the user's manual results, not physical-device runs performed by the
+coding agent or inferred from emulator/small-file tests. Together with existing
+capacity, interrupted-work, revocation and scheduling regression coverage, they
+complete the outstanding acceptance items in #9 and #12. The parent and milestone
+issues can close when the implementation PR is merged.
+
+### Remaining CI / release work
+
+- PR CI run `44413415488` failed because `offline edits survive an interrupted merge
+  across 65 remote revisions` exceeded Bun's default 5-second test timeout. The
+  local suite passed; a passing CI run is still required before merge.
+- Production release-key provisioning and any actual distribution release remain
+  operator-owned; they are not being claimed complete by manual acceptance.
 
 ## Product invariants
 
