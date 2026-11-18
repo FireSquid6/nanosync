@@ -1,9 +1,8 @@
 import { input, password, select, confirm } from '@inquirer/prompts';
 import { output, readable } from './output.ts';
 
-export class CliError extends Error {
-  constructor(readonly code: string, message: string, readonly exitCode = 2) { super(message); }
-}
+import { ClientError as CliError } from '@nanosync/client-service';
+export { ClientError as CliError } from '@nanosync/client-service';
 export function interactive(disabled = false): boolean {
   return !disabled && process.env.TERM !== 'dumb'
     && !!process.stdin.isTTY && !!output().promptStream.isTTY;

@@ -1,3 +1,7 @@
+import {
+  createConnection, privateDirectory, secureCreate, SyncRunner, type SyncOptions,
+  type SyncEvent,
+} from '@nanosync/client-service';
 import { afterEach, expect, test, spyOn } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:net";
@@ -8,11 +12,8 @@ import { ClientLocal } from "@nanosync/client-local";
 import { HttpRemote } from "@nanosync/sync-core";
 import { CHUNK_SIZE } from "@nanosync/protocol";
 import { bootstrapWorkflow, credentials, joinVault } from "./support/legacy-fixture.ts";
-import { createConnection } from "../src/connections.ts";
-import { privateDirectory, secureCreate } from "../src/security.ts";
 import { main } from "../src/main.ts";
 import { runServer } from "../src/server.ts";
-import { SyncRunner, type SyncOptions } from "../src/sync-runner.ts";
 
 const dirs: string[] = [];
 const servers: { stop(): Promise<void> }[] = [];
@@ -99,18 +100,18 @@ function controlledWatch(runner: SyncRunner, onSuccess: Parameters<SyncRunner["w
 
 test("sync reports transfer progress on stderr while preserving JSON stdout", async () => {
   const e = await fixture();
-  const uploadProgress: string[] = [];
-  const publisher = start({ ...e.a, onProgress: message => uploadProgress.push(message) });
+  const uploadProgress: SyncEvent[] = [];
+  const publisher = start({ ...e.a, onEvent: event => uploadProgress.push(event) });
   await publisher.syncOnce();
   for (let index = 0; index < 26; index++) {
     writeFileSync(join(e.firstFiles, `note-${index}`), `contents ${index}`, { mode: 0o600 });
   }
   uploadProgress.length = 0;
   const head = await publisher.syncOnce();
-  expect(uploadProgress[0]).toBe("Connecting to server and checking sync state...");
-  expect(uploadProgress).toContain("Scanning local files for changes...");
-  expect(uploadProgress.some(message => message.startsWith("Uploaded 25 encrypted objects"))).toBe(true);
-  expect(uploadProgress.at(-1)).toBe("Sync complete.");
+  expect(uploadProgress[0]).toEqual({ type: "checking" });
+  expect(uploadProgress).toContainEqual({ type: "scanning" });
+  expect(uploadProgress).toContainEqual({ type: "transfer", direction: "upload", count: 25, bytes: expect.any(Number) });
+  expect(uploadProgress.at(-1)).toEqual({ type: "complete" });
 
   const stdout: string[] = [], stderr: string[] = [];
   const output = spyOn(console, "log").mockImplementation(message => stdout.push(String(message)));
@@ -546,8 +547,8 @@ test('disconnect distinguishes synchronized plaintext from unscanned edits and p
 
 test('forced multi-binding removal preflights every lock and registry contention preserves all bindings', async () => {
   const e = await fixture();
-  const { records } = await import('../src/connections.ts');
-  const { acquireSyncLock } = await import('../src/sync-lock.ts');
+  const { records } = await import('@nanosync/client-service');
+  const { acquireSyncLock } = await import('@nanosync/client-service');
   const first = records(e.firstDir)[0]!;
   const another = temp();
   writeFileSync(join(another,'private-note'),'retained',{mode:0o600});
@@ -577,7 +578,7 @@ test('forced multi-binding removal preflights every lock and registry contention
 
 test('connect revalidates the selected server after remote discovery races local removal', async () => {
   const e = await fixture();
-  const { records } = await import('../src/connections.ts');
+  const { records } = await import('@nanosync/client-service');
   const binding = records(e.firstDir)[0]!, destination = temp();
   const native = globalThis.fetch;
   let removed = false;

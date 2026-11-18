@@ -1,12 +1,13 @@
+import {
+  createConnection, discoverConnection, repairConnection, records, disconnectConnections,
+  removeServerConnection, privateDirectory, secureCreate, acquireSyncLock,
+} from '@nanosync/client-service';
 import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, cpSync, renameSync, rmSync, writeFileSync, existsSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { createConnection, discoverConnection, repairConnection, records, disconnectConnections, removeServerConnection } from "../src/connections.ts";
 
-import { privateDirectory, secureCreate } from "../src/security.ts";
-import { acquireSyncLock } from "../src/sync-lock.ts";
 import { main } from "../src/main.ts";
 
 const created: string[] = [];

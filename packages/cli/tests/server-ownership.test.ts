@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { runServer } from '../src/server.ts';
 import { provisionLocalVault } from '../src/local-provision.ts';
-import { secureCreate } from '../src/security.ts';
+import { secureCreate } from '@nanosync/client-service';
 
 async function cli(root: string, args: string[]) {
   const child = Bun.spawn(['timeout', '--kill-after=2s', '15s', process.execPath, resolve('packages/cli/src/main.ts'), ...args, '--server-dir', root, '--json', '--non-interactive'], {

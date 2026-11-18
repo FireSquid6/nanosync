@@ -1,13 +1,14 @@
+import {
+  enrollServer, servers, key, unlockVault, type ServerRegistration, createConnection,
+  discoverConnection, api,
+} from '@nanosync/client-service';
 import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID, randomBytes } from "node:crypto";
 import { initializeServerOwner, approveLocalDevice, runServer } from "../src/server.ts";
-import { enrollServer, servers, key, unlockVault, type ServerRegistration } from "../src/vault-client.ts";
-import { createConnection, discoverConnection } from "../src/connections.ts";
 import { main } from "../src/main.ts";
-import { api } from "../src/client.ts";
 
 import { OWNER_GENESIS_AUTHOR_ID, parsePersistedRevisionEnvelope } from '@nanosync/protocol';
 import { encryptManifest, referenceSetMac, generateRecoverySecret, displayRecoverySecret, wrapMasterKey } from '@nanosync/sync-core';
@@ -55,7 +56,7 @@ test("password-only server, local device approval, two isolated vaults and two r
   const running = await runServer({ directory: serverRoot, port: 7555, webUi:true });
   try {
     expect(await enrollServer(clientRoot, running.url, "correct horse battery staple", "desktop", 0)).toMatchObject({status:"pending"});
-    approveLocalDevice(serverRoot, (await import("../src/vault-client.ts")).pendingEnrollments(clientRoot)[0]!.deviceId);
+    approveLocalDevice(serverRoot, (await import('@nanosync/client-service')).pendingEnrollments(clientRoot)[0]!.deviceId);
     expect(await enrollServer(clientRoot, running.url, undefined, "desktop", 0)).toMatchObject({status:"approved"});
     const [info] = servers(clientRoot);
     expect(info).toBeDefined();
@@ -136,7 +137,7 @@ test("CLI env workflow creates and selects named vaults without exposing secrets
       process.env.NANOSYNC_SERVER = running.url;
       process.env.NANOSYNC_DEVICE_NAME = "desktop";
       expect(await main(["client","connections","add","--alias","house","--url",running.url,"--device-name","desktop","--wait-ms","0","--client-dir",root])).toBe(3);
-      expect(await main(["server","devices","approve","--device-id",(await import("../src/vault-client.ts")).pendingEnrollments(root)[0]!.deviceId,"--server-dir",serverRoot])).toBe(0);
+      expect(await main(["server","devices","approve","--device-id",(await import('@nanosync/client-service')).pendingEnrollments(root)[0]!.deviceId,"--server-dir",serverRoot])).toBe(0);
       expect(await main(["client","connections","add","--alias","house","--url",running.url,"--device-name","desktop","--wait-ms","0","--client-dir",root])).toBe(0);
       // Provisioning belongs to the owner API; device CLI mutations are unavailable.
       expect(await main(["vault","create","--client-dir",root,"--name","notes","--recovery-output",recovery])).toBe(2);

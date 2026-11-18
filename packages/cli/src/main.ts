@@ -1,16 +1,18 @@
 #!/usr/bin/env bun
+import {
+  baseUrl, privateDirectory, secureCreate, secureRead, startBoundSync, listRemoteVaults,
+  resolveRemoteVault, connectRegisteredVault, discoverConnection, records,
+  disconnectConnections, removeServerConnection, enrollServer, key, server as storedServer,
+  servers, unlockVault, pendingEnrollments, connectionSummary,
+} from '@nanosync/client-service';
 import { join } from 'node:path';
 import { hostname } from 'node:os';
 import { readdirSync } from 'node:fs';
 import { Command, CommanderError, Option } from 'commander';
 import { parseDeviceId, parseVaultId } from '@nanosync/protocol';
 import { RemoteError } from '@nanosync/sync-core';
-import { api, baseUrl } from './client.ts';
-import { privateDirectory, secureCreate, secureRead } from './security.ts';
 import { runServer, initializeServerOwner, localAdminReport, withLocalOwner, localOwner } from './server.ts';
-import { SyncRunner } from './sync-runner.ts';
-import { connectRegisteredVault, discoverConnection, records, disconnectConnections, removeServerConnection, withConnectionRegistry } from './connections.ts';
-import { enrollServer, key, server as storedServer, servers, unlockVault, pendingEnrollments, connectionSummary } from './vault-client.ts';
+import { enrollmentEvent, syncEvent } from './client-events.ts';
 import { provisionLocalVault } from './local-provision.ts';
 import { CliError, interactive, text, hidden, choose, acknowledge } from './prompts.ts';
 import { CliOutput, output, withOutput } from './output.ts';
@@ -190,7 +192,7 @@ async function execute(args: string[], presentation: CliOutput): Promise<number>
         const controller = new AbortController(), stop = () => controller.abort();
         process.once('SIGINT', stop);
         try {
-          const response = await enrollServer(dir, url, undefined, deviceName, wait, {alias, fresh:o.fresh, signal:controller.signal,
+          const response = await enrollServer(dir, url, undefined, deviceName, wait, {alias, fresh:o.fresh, signal:controller.signal, onEvent:event => enrollmentEvent(presentation, event),
             password:() => secret(command, 'NANOSYNC_PASSWORD', 'passwordFile', 'Owner password')});
           result = response;
           if (response.status === 'pending') { exitCode = 3; resultCode = 'PENDING_APPROVAL'; }
@@ -211,13 +213,11 @@ async function execute(args: string[], presentation: CliOutput): Promise<number>
       .action(async (_o, command) => {
         const o = opts(command), dir = root(command), info = await selectServer(command);
         output().progress('Loading available vaults…');
-        const list = (await api(info.baseUrl, '/v1/vaults', {}, info.token)).vaults as {vaultId:string;name:string}[];
+        const list = await listRemoteVaults(info);
         const choice = o.vault ?? await choose('Choose a vault (--vault)',
           list.map(vault => ({ name: `${vault.name} — ${vault.vaultId}`, value: vault.vaultId })),
           canPrompt(command), 'No vaults available. Ask the server owner to run nanosync server vaults create.');
-        const matches = list.filter(v => v.vaultId === choice || v.name === choice);
-        if (matches.length !== 1) throw new CliError('NOT_FOUND', 'vault not found or ambiguous');
-        const vault = matches[0]!, destination = o.path ?? process.cwd();
+        const vault = resolveRemoteVault(list, choice), destination = o.path ?? process.cwd();
         let confirmed = !!o.confirmNonempty;
         if (readdirSync(destination).length && !confirmed) confirmed = !!o.yes || await acknowledge('Existing files will participate in synchronization. Continue?', canPrompt(command));
         if (!confirmed && readdirSync(destination).length) throw new CliError('CANCELLED', 'connection cancelled');
@@ -233,20 +233,9 @@ async function execute(args: string[], presentation: CliOutput): Promise<number>
       disconnectConnections(dir, [binding], !!opts(command).force); result = {connectionId:binding.connectionId, disconnected:true, filesPreserved:true};
     });
     flags(client.command('sync'), ...clientFlags, ...common, '--path <directory>', '--watch').action(async (_o, command) => {
-      const dir = root(command), binding = discoverConnection(dir, opts(command).path ?? process.cwd()), info = storedServer(dir, binding.serverId);
-      if (binding.deviceId !== info.deviceId) throw new CliError('CONFLICT', 'binding device differs from connection');
-      const master = key(dir, info.serverId, binding.vaultId);
-      if (!master) throw new CliError('INPUT_REQUIRED', 'vault key is missing; reconnect to unlock');
-      let runner: SyncRunner;
-      try { runner = withConnectionRegistry(dir, () => {
-        if (discoverConnection(dir, binding.root).connectionId !== binding.connectionId) throw new CliError('CONFLICT', 'binding changed');
-        storedServer(dir, binding.serverId);
-        return SyncRunner.start({clientDirectory:privateDirectory(join(privateDirectory(join(privateDirectory(dir), 'replicas')), binding.connectionId)),
-          syncDirectory:binding.root, vaultId:binding.vaultId, deviceId:binding.deviceId,
-          masterKey:master, baseUrl:info.baseUrl, token:info.token,
-          onProgress: message => presentation.syncProgress(message, !!opts(command).watch) });
-      }); }
-      finally { master.fill(0); }
+      const runner = startBoundSync(root(command), opts(command).path ?? process.cwd(), {
+        onEvent: event => syncEvent(presentation, event, !!opts(command).watch),
+      });
       try {
         if (!opts(command).watch) result = await runner.syncOnce();
         else {

@@ -1,6 +1,6 @@
 # Desktop implementation contract — issue #18, step 1
 
-**Status: technical design only.** No desktop, shared-service extraction, migration, IPC, or native integration is implemented or validated by this document. Existing behavior below was inspected in source; proposed contracts and verification work are not acceptance results.
+**Status: design contract with implementation evidence appended below.** Step 1 was technical design only; section 10 records the step 3 extraction. Proposed migration, IPC, status and native integration contracts below are not backend acceptance results.
 
 Requirements authority: [issue #18](https://github.com/FireSquid6/nanosync/issues/18), including its approved design-handoff comment. Visual authority is the **Field Guide**, pinned at [`2efb4794de0384d9e9f7bf97efc3d72020fa6671`](https://github.com/FireSquid6/nanosync/tree/2efb4794de0384d9e9f7bf97efc3d72020fa6671/docs/design/desktop-field-guide): [README](https://github.com/FireSquid6/nanosync/blob/2efb4794de0384d9e9f7bf97efc3d72020fa6671/docs/design/desktop-field-guide/README.md), [DESIGN.md](https://github.com/FireSquid6/nanosync/blob/2efb4794de0384d9e9f7bf97efc3d72020fa6671/docs/design/desktop-field-guide/DESIGN.md), and [REQUIREMENTS.md](https://github.com/FireSquid6/nanosync/blob/2efb4794de0384d9e9f7bf97efc3d72020fa6671/docs/design/desktop-field-guide/REQUIREMENTS.md). Use its Folders list/inspector, Conflicts, Connections, Settings, five-step setup, light/dark tokens, keyboard focus, and non-color statuses. Do not ship preview selectors, simulated responses, sample data, or synthetic diagnostics. Prototype browser checks are not native/backend validation.
 
@@ -197,3 +197,40 @@ Use existing Bun integration seams in `packages/cli/tests/{command-tree,cli,term
 - Linux tray backends, notification delivery, login registration, package/Nix runtime closure and keyboard-only onboarding remain native validation work. macOS/Windows remain unsupported until separately validated.
 
 No acceptance criteria are checked off by step 1. No runtime tests or native validation are claimed; only repository/issue/design inspection and documentation changes are in scope.
+
+
+## 10. Step 3 — shared client extraction evidence
+
+Extracted existing client orchestration into `packages/client-service`: HTTP/enrollment,
+protected-file state, bindings, replica locks and the existing sync runner. Security and
+lock helpers are unchanged; binding safety logic only changes its shared error import.
+`startBoundSync` preserves the existing registry revalidation, key-copy/zeroization and
+runner ownership ordering. Enrollment and sync expose optional typed callbacks; CLI
+adapters retain existing human messages, JSON streams and exit mappings. Prompts,
+signal handling, command defaults and presentation remain in CLI. Direct callers/tests
+now import the shared package; `bun.lock` and generated `build/nix/bun.nix` include it.
+
+Actual verification for this extraction:
+
+- Focused service/event-adapter tests: **7 passed**, using request barriers rather than
+  sleeps; cover silent/secret-free enrollment, resumable approval, cancellation,
+  missing keys, device mismatch, specific live-owner lock refusal, stop/reacquisition,
+  shared error identity and existing presentation strings.
+- Existing focused CLI/service regression selection: **56 passed** before the final
+  additional focused cases; final `bun test`: **343 passed, 0 failed** across 38 files.
+- `bun run typecheck`: passed for all workspaces and build/browser tooling.
+- `bun run --cwd apps/desktop typecheck:native`: passed.
+- `bun run test:browser`: **7 passed** (existing browser suite).
+- `bun run build:binary`: passed.
+- Regenerated Nix dependency expression with the pinned bun2nix tool;
+  `nix build path:. --no-link`: passed, including the new workspace. Explicit path input
+  includes the not-yet-staged extraction files without changing the parent's index.
+- Scoped codehygiene executed via Nix-provided Python/NumPy. Readability fixes were
+  limited to new code; remaining warnings are a protocol-fixture naming false positive
+  and long expected/output literals retained to preserve the existing CLI text.
+
+No IPC, credential modes/migration, pauses, durable status or desktop product UI is
+implemented by step 3. File-backed secrets remain trusted-process APIs, not renderer
+payloads; sync completion events are not a durable “up to date” status. Existing removal
+crash/credential-cleanup limitations remain unchanged. This evidence does not complete
+issue #18 backend/native acceptance.

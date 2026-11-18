@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { OWNER_GENESIS_AUTHOR_ID, parseEncryptedVaultCreateRequest, parsePersistedRevisionEnvelope } from '@nanosync/protocol';
 import { encryptManifest, generateRecoverySecret, generateVaultMasterKey, displayRecoverySecret, wrapMasterKey, referenceSetMac } from '@nanosync/sync-core';
-import { privateDirectory, secureCreate, secureRead, secureReplace } from './security.ts';
+import { privateDirectory, secureCreate, secureRead, secureReplace } from '@nanosync/client-service';
 import { acquireServerStorage } from './server-ownership.ts';
 import { localOwner } from './server.ts';
 import { OwnerOperations } from '@nanosync/server-core';

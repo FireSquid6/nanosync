@@ -1,3 +1,4 @@
+import type { EnrollmentEvent } from "./events.ts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { existsSync, readdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
@@ -7,8 +8,7 @@ import { enrollmentVerificationCode, parseCapabilityResponse, parseDeviceId, par
 import { api, baseUrl, login } from "./client.ts";
 import { privateDirectory, secureCreate, secureRead, secureReplace, syncPrivateDirectory } from "./security.ts";
 
-import { hidden as secretPrompt, CliError } from "./prompts.ts";
-import { output } from './output.ts';
+import { ClientError } from "./errors.ts";
 
 export interface ServerRegistration { version: 1; serverId: string; baseUrl: string; deviceId: string; name: string; token: string }
 interface VaultKey { version: 1; serverId: string; vaultId: string; masterKey: string }
@@ -64,9 +64,9 @@ export function connectionSummary(info: ServerRegistration) {
   return { serverId: info.serverId, alias: info.name, url: info.baseUrl, deviceId: info.deviceId, status: "approved" };
 }
 export async function enrollServer(root: string, url: string, password: string | undefined, deviceName: string,
-  waitMs = 60_000, options: { alias?: string; fresh?: boolean; signal?: AbortSignal; password?: () => Promise<string> } = {}): Promise<Record<string, unknown> & { status: string }> {
+  waitMs = 60_000, options: { alias?: string; fresh?: boolean; signal?: AbortSignal; password?: () => Promise<string>; onEvent?: (event: EnrollmentEvent) => void } = {}): Promise<Record<string, unknown> & { status: string }> {
   const waitDeadline = waitMs > 0 ? Date.now() + waitMs : Infinity;
-  const interrupted = () => new CliError("INTERRUPTED", "Enrollment interrupted; retry the same command to resume", 130);
+  const interrupted = () => new ClientError("INTERRUPTED", "Enrollment interrupted; retry the same command to resume", 130);
   // Every exchange is bounded, even submit-and-exit and interactive enrollment.
   // Clear timers after each exchange; combine rather than replace user cancellation.
   async function bounded<T>(operation: (signal: AbortSignal) => Promise<T>, deadline = Infinity): Promise<T> {
@@ -77,7 +77,7 @@ export async function enrollServer(root: string, url: string, password: string |
       return await operation(options.signal ? AbortSignal.any([options.signal, timeout.signal]) : timeout.signal);
     } catch (error) {
       if (options.signal?.aborted) throw interrupted();
-      if (timeout.signal.aborted) throw new CliError("REQUEST_TIMEOUT", "Server request timed out; retry the same command to resume", 5);
+      if (timeout.signal.aborted) throw new ClientError("REQUEST_TIMEOUT", "Server request timed out; retry the same command to resume", 5);
       throw error;
     } finally { clearTimeout(timer); }
   }
@@ -92,17 +92,17 @@ export async function enrollServer(root: string, url: string, password: string |
     if (existsSync(pendingPath)) {
       const saved = JSON.parse(secureRead(pendingPath, 4096).toString("utf8")) as PendingEnrollment;
       if (saved.deviceId !== existing.deviceId || saved.token !== existing.token || saved.serverId !== existing.serverId)
-        throw new CliError("CONFLICT", "pending identity differs from saved connection; inspect local state");
+        throw new ClientError("CONFLICT", "pending identity differs from saved connection; inspect local state");
       unlinkSync(pendingPath); syncPrivateDirectory(dir(root, "pending"));
     }
     return connectionSummary(existing);
   }
   let pending: PendingEnrollment | undefined = existsSync(pendingPath) ? JSON.parse(secureRead(pendingPath, 4096).toString("utf8")) : undefined;
-  if (pending && options.alias && pending.alias !== options.alias) throw new CliError("CONFLICT", "Pending request has a different alias; resume that alias");
+  if (pending && options.alias && pending.alias !== options.alias) throw new ClientError("CONFLICT", "Pending request has a different alias; resume that alias");
   const alias = pending?.alias ?? options.alias ?? deviceName;
-  if (!alias.trim() || Buffer.byteLength(alias) > 128 || /[\u0000-\u001f\u007f]/u.test(alias)) throw new CliError("INVALID_INPUT", "invalid connection alias");
+  if (!alias.trim() || Buffer.byteLength(alias) > 128 || /[\u0000-\u001f\u007f]/u.test(alias)) throw new ClientError("INVALID_INPUT", "invalid connection alias");
   if (servers(root).some(item => item.name === alias) || pendingEnrollments(root).some(item => item.alias === alias && item.url !== canonical))
-    throw new CliError("CONFLICT", "connection alias already in use");
+    throw new ClientError("CONFLICT", "connection alias already in use");
   if (options.fresh && pending) {
     // Fresh is deliberate, and only terminal requests can be replaced.
     let status = pending.status ?? (Date.now() >= pending.expiresAtMs ? "expired" : "pending");
@@ -110,40 +110,39 @@ export async function enrollServer(root: string, url: string, password: string |
       try { status = (await bounded(signal => api(canonical, "/v1/auth/enrollments/status", {signal}, pending!.token), Math.min(pending.expiresAtMs, waitDeadline))).status; }
       catch (error) { if (error instanceof RemoteError && error.status === 401) status = "expired"; else throw error; }
     }
-    if (!["denied", "expired"].includes(status)) throw new CliError("CONFLICT", "Only denied or expired requests may be replaced with --fresh");
+    if (!["denied", "expired"].includes(status)) throw new ClientError("CONFLICT", "Only denied or expired requests may be replaced with --fresh");
     unlinkSync(pendingPath); syncPrivateDirectory(dir(root, "pending")); pending = undefined;
   }
   if (!pending) {
-    if (!deviceName || Buffer.byteLength(deviceName)>128 || /[\u0000-\u001f\u007f]/u.test(deviceName)) throw new CliError("INVALID_INPUT", "invalid device name");
+    if (!deviceName || Buffer.byteLength(deviceName)>128 || /[\u0000-\u001f\u007f]/u.test(deviceName)) throw new ClientError("INVALID_INPUT", "invalid device name");
     const secret = password ?? await options.password?.();
-    if (!secret) throw new CliError("INPUT_REQUIRED", "owner password required for first enrollment");
-    output().progress('Connecting to server…');
+    if (!secret) throw new ClientError("INPUT_REQUIRED", "owner password required for first enrollment");
+    options.onEvent?.({ type: 'connecting' });
     pending = { url: canonical, token: await bounded(signal => login(canonical, secret, signal), waitDeadline), deviceId: randomUUID(), name: deviceName, alias,
       fingerprint: randomBytes(32).toString("base64url"), serverId: randomUUID(), expiresAtMs: Date.now() + 24 * 60 * 60_000 };
     secureCreate(pendingPath, JSON.stringify(pending));
   }
   const request = pending;
-  output().info(`nanosync server devices approve --device-id ${request.deviceId}`);
-  output().info(`Verification code: ${enrollmentVerificationCode(request.deviceId, request.fingerprint)}`);
+  options.onEvent?.({ type: 'verification', deviceId: request.deviceId, verificationCode: enrollmentVerificationCode(request.deviceId, request.fingerprint) });
   const until = Math.min(request.expiresAtMs, waitMs === 0 ? Date.now() : waitDeadline);
   let delay = 250;
   async function retry<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T | null> {
     while (true) {
-      if (options.signal?.aborted) throw new CliError("INTERRUPTED", "Enrollment interrupted; run the same connections add command to resume", 130);
+      if (options.signal?.aborted) throw new ClientError("INTERRUPTED", "Enrollment interrupted; run the same connections add command to resume", 130);
       if (waitMs !== 0 && Date.now() >= until) return null;
       if (Date.now() >= request.expiresAtMs) return null;
       try { return await bounded(operation, waitMs === 0 ? request.expiresAtMs : until); }
       catch (error) {
-        if (options.signal?.aborted) throw new CliError("INTERRUPTED", "Enrollment interrupted; retry the same command to resume", 130);
-        if (!(error instanceof TypeError || error instanceof CliError && error.code === "REQUEST_TIMEOUT" || error instanceof RemoteError && (error.status >= 500 || error.status === 429))) throw error;
-        if (Date.now() >= until) { output().info("Temporary outage; pending request retained. Retry the same command."); return null; }
-        output().info(`Temporary outage; retrying in ${delay}ms (request retained)`);
+        if (options.signal?.aborted) throw new ClientError("INTERRUPTED", "Enrollment interrupted; retry the same command to resume", 130);
+        if (!(error instanceof TypeError || error instanceof ClientError && error.code === "REQUEST_TIMEOUT" || error instanceof RemoteError && (error.status >= 500 || error.status === 429))) throw error;
+        if (Date.now() >= until) { options.onEvent?.({ type: 'outage-retained' }); return null; }
+        options.onEvent?.({ type: 'retrying', delayMs: delay });
         await pause(Math.min(delay, Math.max(0, until - Date.now()))); delay = Math.min(5000, delay * 2);
       }
     }
   }
   const caps = await retry(signal => api(canonical, "/v1/capabilities", {signal}));
-  if (caps) { const admin = parseCapabilityResponse(caps).webAdministration; if (admin.enabled && admin.url) output().info(`Administration: ${admin.url}`); }
+  if (caps) { const admin = parseCapabilityResponse(caps).webAdministration; if (admin.enabled && admin.url) options.onEvent?.({ type: 'administration', url: admin.url }); }
   let status = Date.now() >= request.expiresAtMs ? "expired" : request.status ?? "pending";
   if (status === "pending") {
     try {
@@ -151,13 +150,12 @@ export async function enrollServer(root: string, url: string, password: string |
         deviceId: request.deviceId, displayName: request.name, platform: process.platform, clientVersion: "1", fingerprint: request.fingerprint }), signal }, request.token));
       status = response?.status ?? "pending";
       if (status === "pending") {
-        output().info("Waiting for approval; Ctrl-C preserves this request for resume.");
-        if (Date.now() < until) output().progress('Waiting for device approval…');
+        options.onEvent?.({ type: 'waiting', progress: Date.now() < until });
       }
       while (status === "pending" && Date.now() < until) {
-        if (options.signal?.aborted) throw new CliError("INTERRUPTED", "Enrollment interrupted; retry the same command to resume", 130);
+        if (options.signal?.aborted) throw new ClientError("INTERRUPTED", "Enrollment interrupted; retry the same command to resume", 130);
         await pause(Math.min(1000, until - Date.now()));
-        if (options.signal?.aborted) throw new CliError("INTERRUPTED", "Enrollment interrupted; retry the same command to resume", 130);
+        if (options.signal?.aborted) throw new ClientError("INTERRUPTED", "Enrollment interrupted; retry the same command to resume", 130);
         if (Date.now() >= request.expiresAtMs) { status = "expired"; break; }
         status = (await retry(signal => api(canonical, "/v1/auth/enrollments/status", {signal}, request.token)))?.status ?? "pending";
       }
@@ -171,16 +169,16 @@ export async function enrollServer(root: string, url: string, password: string |
     const info: ServerRegistration = { version: 1, serverId: request.serverId, baseUrl: canonical, deviceId: request.deviceId, name: alias, token: request.token };
     const path = join(dir(root, "servers"), `${request.serverId}.json`);
     if (existsSync(path)) {
-      if (secureRead(path).toString("utf8") !== JSON.stringify(info)) throw new CliError("CONFLICT", "saved credential differs from pending enrollment");
+      if (secureRead(path).toString("utf8") !== JSON.stringify(info)) throw new ClientError("CONFLICT", "saved credential differs from pending enrollment");
     } else secureCreate(path, JSON.stringify(info));
     unlinkSync(pendingPath); syncPrivateDirectory(dir(root, "pending"));
-    output().info("Approved. Next: nanosync client vaults connect (no files transferred).");
+    options.onEvent?.({ type: 'approved' });
     return connectionSummary(info);
   }
-  if (options.signal?.aborted) throw new CliError("INTERRUPTED", "Enrollment interrupted; retry the same command to resume", 130);
+  if (options.signal?.aborted) throw new ClientError("INTERRUPTED", "Enrollment interrupted; retry the same command to resume", 130);
   if (status === "denied" || status === "expired") {
     secureReplace(pendingPath, JSON.stringify({...request, status}));
-    output().info(`Enrollment ${status}; review with the owner, then explicitly use --fresh for a new identity.`);
+    options.onEvent?.({ type: 'terminal', status });
   }
   return { status, alias, url: canonical, deviceId: request.deviceId, deviceName: request.name };
 }
@@ -194,5 +192,12 @@ export async function unlockVault(root: string, info: ServerRegistration, vaultI
   } finally { recovery.fill(0); }
 }
 
-export { text as prompt } from "./prompts.ts";
-export { secretPrompt };
+export interface RemoteVault { vaultId: string; name: string }
+export async function listRemoteVaults(info: ServerRegistration): Promise<RemoteVault[]> {
+  return (await api(info.baseUrl, '/v1/vaults', {}, info.token)).vaults;
+}
+export function resolveRemoteVault(list: RemoteVault[], choice: string): RemoteVault {
+  const matches = list.filter(vault => vault.vaultId === choice || vault.name === choice);
+  if (matches.length !== 1) throw new ClientError('NOT_FOUND', 'vault not found or ambiguous');
+  return matches[0]!;
+}

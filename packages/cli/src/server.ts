@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { OwnerMetadataOperations, OwnerOperations, type AdminAssets, createServerConfig, startServer, AuthenticationService, PeriodicIntegrityScanner, ServerMaintenance, Argon2idPasswordHasher } from "@nanosync/server-core";
 import { AuthenticationRepository, BootstrapRepository, MaintenanceRepository, ObjectCatalogRepository, RevisionRepository, ServerMetadataDatabase, VaultRepository } from "@nanosync/server-metadata";
 import { LocalFilesystem } from "@nanosync/server-object-storage";
-import { privateDirectory, provisionSecret, secureRead } from "./security.ts";
+import { privateDirectory, provisionSecret, secureRead } from '@nanosync/client-service';
 import { acquireServerStorage } from './server-ownership.ts';
 import { output } from './output.ts';
 

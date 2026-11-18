@@ -1,3 +1,4 @@
+import type { SyncEvent } from "./events.ts";
 import { randomUUID } from "node:crypto";
 import { ClientLocal } from "@nanosync/client-local";
 import { applyNewFiles, hydrateFile, LinuxScanner, LinuxWatcher, type ScanOptions, type ScanPlan } from "@nanosync/linux-client";
@@ -8,7 +9,7 @@ import { privateDirectory } from "./security.ts";
 import { setTimeout as delay } from "node:timers/promises";
 import { resolve, sep } from "node:path";
 
-// Synchronization orchestration belongs to the CLI process; no background service or IPC is created.
+// The calling process owns this runner; no background service or IPC is created.
 const MAX_ANCESTRY_NODES = 16_384;
 type Verified = { manifest: ManifestV1; revision: RevisionEnvelope; sequence: number | null };
 export interface SyncOptions {
@@ -22,7 +23,7 @@ export interface SyncOptions {
   fetch?: RemoteOptions["fetch"];
   pollMs?: number;
   scan?: ScanOptions;
-  onProgress?: (message: string) => void;
+  onEvent?: (event: SyncEvent) => void;
 }
 
 function sameTree(a: ManifestV1, b: ManifestV1): boolean {
@@ -41,7 +42,7 @@ export class SyncRunner {
   private readonly device: string;
   private readonly pollMs: number;
   private readonly unlock: () => void;
-  private readonly onProgress: SyncOptions["onProgress"];
+  private readonly onEvent: SyncOptions["onEvent"];
   private readonly transfers = { upload: { count: 0, bytes: 0 }, download: { count: 0, bytes: 0 } };
   private watcher?: LinuxWatcher;
   private active?: Promise<{ revisionId: string; sequence: number }>;
@@ -51,7 +52,7 @@ export class SyncRunner {
 
   private constructor(options: SyncOptions, unlock: () => void) {
     this.unlock = unlock;
-    this.onProgress = options.onProgress;
+    this.onEvent = options.onEvent;
     this.vault = parseVaultId(options.vaultId);
     this.device = parseDeviceId(options.deviceId);
     if (!(options.masterKey instanceof Uint8Array) || options.masterKey.length !== 32) throw new Error("invalid vault key");
@@ -67,9 +68,7 @@ export class SyncRunner {
           const total = this.transfers[direction];
           total.count++; total.bytes += bytes;
           if (total.count === 1 || total.count % 25 === 0) {
-            const verb = direction === "download" ? "Downloaded" : "Uploaded";
-            const size = (total.bytes / 1_048_576).toFixed(1);
-            this.onProgress?.(`${verb} ${total.count} encrypted objects (${size} MiB).`);
+            this.onEvent?.({ type: 'transfer', direction, count: total.count, bytes: total.bytes });
           }
         } });
     } catch (error) {
@@ -110,7 +109,7 @@ export class SyncRunner {
     const work = (async () => {
       this.transfers.upload = { count: 0, bytes: 0 };
       this.transfers.download = { count: 0, bytes: 0 };
-      this.onProgress?.("Connecting to server and checking sync state...");
+      this.onEvent?.({ type: 'checking' });
       // A concurrent publisher may advance the head between the first pass and its
       // final observation. Retry a bounded number of times rather than claim success.
       for (let attempt = 0; attempt < 4; attempt++) {
@@ -124,7 +123,7 @@ export class SyncRunner {
             this.local.head("accepted").revisionId === applied.revisionId && !this.local.proposal() &&
             !this.local.pendingApplies().length) {
           this.watcher?.refresh();
-          this.onProgress?.("Sync complete.");
+          this.onEvent?.({ type: 'complete' });
           return { revisionId: applied.revisionId, sequence: applied.sequence };
         }
       }
@@ -481,7 +480,7 @@ export class SyncRunner {
     if (prior.sequence !== latest.sequence) throw new Error("applied revision sequence mismatch");
     if (head.revisionId !== latest.revisionId) await this.remotePath(prior, current);
     else if (head.sequence !== latest.sequence) throw new Error("applied head sequence changed");
-    this.onProgress?.("Scanning local files for changes...");
+    this.onEvent?.({ type: 'scanning' });
     const scan = await this.scanner.plan(prior.manifest, randomUUID(), this.device, this.key);
     if (sameTree(scan.manifest, prior.manifest)) {
       if (head.sequence > latest.sequence) {

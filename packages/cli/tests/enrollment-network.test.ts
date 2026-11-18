@@ -1,10 +1,9 @@
+import { secureReplace, pendingEnrollments } from '@nanosync/client-service';
 import { expect, test, spyOn } from 'bun:test';
 import { mkdtempSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { secureReplace } from '../src/security.ts';
 import { main } from '../src/main.ts';
-import { pendingEnrollments } from '../src/vault-client.ts';
 
 // Real HTTP boundary: delayed or non-JSON proxy responses must not defeat CLI cancellation.
 async function scenario(run: (ctx: { root: string; invoke: (wait: number) => Promise<number>; calls: string[]; setMode: (mode: string) => void }) => Promise<void>) {

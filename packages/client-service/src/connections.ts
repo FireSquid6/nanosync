@@ -1,6 +1,6 @@
 import { ClientLocal } from '@nanosync/client-local';
 import { LinuxScanner } from '@nanosync/linux-client';
-import { CliError } from './prompts.ts';
+import { ClientError } from './errors.ts';
 import { acquireSyncLock } from "./sync-lock.ts";
 import { randomUUID } from "node:crypto";
 import { constants, closeSync, existsSync, lstatSync, openSync, realpathSync, readdirSync, renameSync, writeFileSync, fsyncSync, unlinkSync, rmSync } from "node:fs";
@@ -205,7 +205,7 @@ export function withConnectionRegistry<T>(globalDirectory: string, action: () =>
 export function removeServerConnection(globalDirectory: string, serverId: string, force = false): void {
   withConnectionRegistry(globalDirectory, () => {
     const attached = records(globalDirectory).filter(c => c.serverId === serverId);
-    if (attached.length && !force) throw new CliError('CONNECTION_IN_USE', 'Vaults remain attached; disconnect them or explicitly use --force');
+    if (attached.length && !force) throw new ClientError('CONNECTION_IN_USE', 'Vaults remain attached; disconnect them or explicitly use --force');
     disconnectLocked(globalDirectory, attached, force);
     unlinkSync(join(globalDirectory, 'servers', `${serverId}.json`));
     syncDirectory(join(globalDirectory, 'servers'));

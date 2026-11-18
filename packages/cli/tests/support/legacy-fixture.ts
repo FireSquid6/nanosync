@@ -1,5 +1,8 @@
+import {
+  api, baseUrl, login, privateDirectory, secureCreate, secureInstall, secureRead,
+  syncPrivateDirectory,
+} from '@nanosync/client-service';
 // Historical protocol fixtures only; no production CLI bootstrap or legacy credential path.
-import { api, baseUrl, login } from "../../src/client.ts";
 import { randomBytes, randomUUID, createHash } from "node:crypto";
 import { join } from "node:path";
 import { openSync, closeSync, readSync, writeSync, createReadStream, createWriteStream, existsSync, unlinkSync } from "node:fs";
@@ -8,7 +11,6 @@ import { hidden as secretPrompt } from "../../src/prompts.ts";
 import { encryptManifest, decryptManifest, generateRecoverySecret, generateVaultMasterKey, displayRecoverySecret, decodeRecoverySecret, wrapMasterKey, unwrapMasterKey, referenceSetMac, verifyReferenceSetMac, type ManifestV1 } from "@nanosync/sync-core";
 import { RemoteError } from "@nanosync/sync-core";
 import { decodeCanonicalBase64Url, parseAuthToken, parseDeviceId, parseVaultId, parsePrincipalId, parseRevisionId, parseReferenceSetMac, parsePersistedRevisionEnvelope, parseRecoveryWrap, type RecoveryWrapV1, type RevisionEnvelope } from "@nanosync/protocol";
-import { privateDirectory, secureCreate, secureInstall, secureRead, syncPrivateDirectory } from "../../src/security.ts";
 
 export interface ClientCredentials { baseUrl: string; vaultId: string; deviceId: string; token: string; masterKey: string }
 export function credentials(directory: string): ClientCredentials {

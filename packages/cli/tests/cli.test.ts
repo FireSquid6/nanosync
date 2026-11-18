@@ -1,3 +1,4 @@
+import { secureInstall, secureRead, api, login } from '@nanosync/client-service';
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, chmodSync, rmSync, writeFileSync, existsSync, lstatSync } from "node:fs";
 import { randomUUID, randomBytes, createHash } from "node:crypto";
@@ -5,8 +6,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { main } from "../src/main.ts";
 import { runServer } from "../src/server.ts";
-import { secureInstall, secureRead } from "../src/security.ts";
-import { api, login } from "../src/client.ts";
 import { bootstrapWorkflow, enroll, saveCredentials, joinVault } from "./support/legacy-fixture.ts";
 import { encryptManifest, generateRecoverySecret, generateVaultMasterKey, wrapMasterKey, referenceSetMac, displayRecoverySecret } from "@nanosync/sync-core";
 import { parsePersistedRevisionEnvelope } from "@nanosync/protocol";

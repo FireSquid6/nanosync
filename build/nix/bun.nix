@@ -204,6 +204,7 @@
   "@nanosync/admin-ui" = copyPathToStore ../../packages/admin-ui;
   "@nanosync/cli" = copyPathToStore ../../packages/cli;
   "@nanosync/client-local" = copyPathToStore ../../packages/client-local;
+  "@nanosync/client-service" = copyPathToStore ../../packages/client-service;
   "@nanosync/desktop" = copyPathToStore ../../apps/desktop;
   "@nanosync/linux-client" = copyPathToStore ../../packages/linux-client;
   "@nanosync/protocol" = copyPathToStore ../../packages/protocol;

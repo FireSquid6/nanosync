@@ -65,6 +65,7 @@
       "dependencies": {
         "@inquirer/prompts": "^8.8.0",
         "@nanosync/client-local": "workspace:*",
+        "@nanosync/client-service": "workspace:*",
         "@nanosync/linux-client": "workspace:*",
         "@nanosync/protocol": "workspace:*",
         "@nanosync/server-core": "workspace:*",
@@ -79,6 +80,18 @@
     "packages/client-local": {
       "name": "@nanosync/client-local",
       "dependencies": {
+        "@nanosync/protocol": "workspace:*",
+        "@nanosync/sync-core": "workspace:*",
+      },
+      "peerDependencies": {
+        "typescript": "^5",
+      },
+    },
+    "packages/client-service": {
+      "name": "@nanosync/client-service",
+      "dependencies": {
+        "@nanosync/client-local": "workspace:*",
+        "@nanosync/linux-client": "workspace:*",
         "@nanosync/protocol": "workspace:*",
         "@nanosync/sync-core": "workspace:*",
       },
@@ -249,6 +262,8 @@
     "@nanosync/cli": ["@nanosync/cli@workspace:packages/cli"],
 
     "@nanosync/client-local": ["@nanosync/client-local@workspace:packages/client-local"],
+
+    "@nanosync/client-service": ["@nanosync/client-service@workspace:packages/client-service"],
 
     "@nanosync/desktop": ["@nanosync/desktop@workspace:apps/desktop"],
 

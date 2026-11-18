@@ -1,4 +1,4 @@
-import { acquireSyncLock } from './sync-lock.ts';
+import { acquireSyncLock } from '@nanosync/client-service';
 
 /** One storage owner per server directory, including distinct instances/processes.
  * Metadata-only administration deliberately does not acquire this gate.
