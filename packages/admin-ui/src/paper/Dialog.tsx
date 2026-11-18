@@ -7,7 +7,6 @@ export interface DialogProps {
   title: string;
   description: string;
   children: ReactNode;
-  theme: 'dark' | 'light';
   triggerRef?: RefObject<HTMLElement | null>;
 }
 
@@ -17,13 +16,12 @@ export function Dialog({
   title,
   description,
   children,
-  theme,
   triggerRef,
 }: DialogProps) {
   return (
     <RadixDialog.Root open={open} onOpenChange={onOpenChange}>
       <RadixDialog.Portal>
-        <div data-nv-theme={theme} className="nv-root nv-dialog-portal">
+        <div className="nv-root nv-dialog-portal">
           <RadixDialog.Overlay className="nv-dialog-overlay" />
           <RadixDialog.Content
             className="nv-dialog-content"

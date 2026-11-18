@@ -1,54 +1,91 @@
 body {
   margin: 0;
+  background: var(--fg-bg);
+  color: var(--fg-text);
+  scrollbar-color: var(--fg-muted) var(--fg-bg);
 }
 .admin {
-  max-width: 960px;
+  max-width: 1100px;
   margin: auto;
-  padding: 24px;
+  padding: 0 32px;
 }
+.admin-header,
 .admin-toolbar,
 .admin-navigation {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
+}
+.admin-header {
+  justify-content: space-between;
+  gap: 24px;
+  padding: 32px 0 22px;
+  border-bottom: 1px solid var(--fg-border);
+}
+.admin-content {
+  padding: 45px 0 60px;
+  gap: 32px;
 }
 .admin-toolbar {
   justify-content: space-between;
+  gap: 24px;
+  padding-bottom: 22px;
+  border-bottom: 1px solid var(--fg-border);
+}
+.admin-navigation {
+  gap: 24px;
+  font-size: 13px;
 }
 .admin-navigation a {
-  color: inherit;
-  padding: 12px;
-  border-radius: 6px;
-  text-decoration: none;
+  padding: 8px 0;
 }
 .admin-navigation a[aria-current="page"] {
-  background: var(--nv-border);
-  font-weight: 600;
+  color: var(--fg-heading);
+  font-weight: bold;
 }
-.admin-navigation a:focus-visible {
-  outline: 2px solid currentColor;
-  outline-offset: 2px;
+.admin-page,
+.admin-content > form {
+  width: 100%;
+  max-width: 72ch;
+}
+.admin-page {
+  gap: 36px;
 }
 .admin-page:focus {
   outline: none;
 }
 .admin article {
-  border-bottom: 1px solid var(--nv-border);
-  padding: 12px 0;
+  border-bottom: 1px solid var(--fg-border);
+  padding: 18px 0;
 }
-.admin code,
-.admin p {
+.admin article:last-child {
+  border-bottom: 0;
+}
+.admin :is(code, p, h1, h2, h3, label) {
   overflow-wrap: anywhere;
 }
 .admin code {
   display: block;
+  padding: 18px 20px;
+  margin: 0 0 18px;
+  background: var(--fg-code);
+  font: inherit;
   white-space: pre-wrap;
 }
-.nv-dialog-content {
-  max-height: 90dvh;
-  overflow-y: auto;
+.nv-root [role="alert"] {
+  color: var(--fg-link);
+  border-left: 1px solid var(--fg-link);
+  padding-left: 16px;
 }
-[role="alert"] {
-  color: #b42323;
+@media (max-width: 700px) {
+  .admin {
+    padding: 0 22px;
+  }
+  .admin-navigation {
+    gap: 18px;
+  }
+  .admin code {
+    padding: 14px;
+    font-size: 12px;
+  }
 }

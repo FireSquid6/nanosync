@@ -7,6 +7,13 @@ source server runs work immediately after install; regenerate after UI changes.
 served by the existing server only with `server run --web-ui`; no CDN or extra
 frontend service is used. See `PAPER-UI-NOTICE.md` for copied source provenance.
 
+The Field Guide skin uses local monospace fonts and shared Gruvbox variables
+from `@nanosync/ui-theme/styles.css`. Its `ThemeControl` offers light, dark and
+system preferences on both login and authenticated pages; dialogs inherit the
+same document theme. Theme assets are bundled locally, with no remote fonts,
+stylesheets or runtime requests. The existing Paper UI control class names and
+Radix dialog accessibility behavior are retained.
+
 The React Router pages are `/admin/clients` (pending and allowed clients),
 `/admin/vaults` (vault management), and `/admin/activity` (recent actions).
 `/admin` opens Clients; protected deep links return to their destination after
@@ -18,7 +25,8 @@ initial session/data loader before `src/App.tsx` mounts its providers and shell.
 confirmations and recovery forms, and `src/state/` owns session/data and
 vault-creation state. Subsequent data changes happen in explicit event handlers;
 encrypted receipts use a lazy state initializer. Page titles are declarative and
-navigation focus uses a callback ref, with no application effect hooks.
+navigation focus uses a callback ref. Session and vault-creation behavior remain
+event-driven; the shared theme control synchronizes the document theme.
 `src/api.ts` handles HTTP transport and shared response types. Creation state
 survives page navigation; logout clears unpublished plaintext secret material,
 while acknowledged encrypted receipts remain resumable.

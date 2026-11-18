@@ -35,7 +35,6 @@ function ActionDialog({ action, close, trigger }: {
         : action?.kind === "revoke"
           ? "Revocation prevents future server access. It does not erase downloaded ciphertext, plaintext or keys."
           : "Change the vault display name."}
-      theme="light"
       triggerRef={trigger}
     >
       <form className="nv-stack" onSubmit={(event) => {

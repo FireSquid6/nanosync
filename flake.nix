@@ -17,6 +17,9 @@
         bun2nix = bun2nix.packages.${system}.default;
       };
     in {
+      devShells.${system}.default = pkgs.mkShell {
+        packages = [ pkgs.bun pkgs.nodejs ];
+      };
       packages.${system} = {
         inherit nanosync;
         default = nanosync;

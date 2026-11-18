@@ -1,6 +1,8 @@
-# `@nanosync/cli` — explicit server and client commands
+# `@nanosync/cli` — command and automation reference
 
-Install workspace dependencies with `bun install`. Run `bun packages/cli/src/main.ts --help`.
+Start with the authoritative [user guides](../../apps/site/content/docs/introduction.md), [source installation](../../apps/site/content/docs/installation.md), and [demo first sync](../../apps/site/content/docs/first-sync.md). No release is available yet. This reference retains detailed flags, state semantics, and machine contracts for operators and integrators; library-only history/restore features are not CLI commands.
+
+For contributor use, install workspace dependencies with `bun install`. Run `bun packages/cli/src/main.ts --help`.
 This is a breaking command/state redesign: no legacy aliases, bootstrap command, credential migration, `--env`, `--sync-dir` or `--continuous`.
 
 ```sh
@@ -81,6 +83,8 @@ Server-local creation transiently handles plaintext key material (an intentional
 Deletion immediately tombstones a vault; cleanup may still be pending. It destroys history, encrypted objects and wraps, regardless of offline clients' unsynced work. Recovery secrets cannot replace a server backup. Server backup must capture metadata and objects consistently while stopped. Runtime defaults to loopback; remote access needs external TLS and explicit exposure acknowledgement. Browser administration is opt-in with `server run --web-ui`; configure `--external-origin` to advertise a trustworthy link. Never run multiple serving runtimes against one server directory; stop the runtime for offline storage maintenance/provisioning. See [operations](../../docs/clients-and-operations.md) and [security](../../docs/security.md).
 
 ### Local ignore file
+
+For the user-facing guide and examples, see [Ignore rules](../../apps/site/content/docs/ignore-rules.md). The detailed semantics below are retained as a CLI reference.
 
 Create `.nanosyncignore` in the sync root **before first import** to exclude virtual environments and other local-only data. For example:
 

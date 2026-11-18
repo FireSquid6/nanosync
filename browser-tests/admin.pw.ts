@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -128,7 +129,7 @@ test("real browser encrypted provisioning, refresh retry, rename, danger dialog,
   await expectAdminPage(page, "Clients");
   await navigate(page, "Vaults");
   await page.getByLabel("New vault name").fill("notes");
-  await page.getByRole("button", { name: "Prepare recovery" }).click();
+  await page.getByRole("button", { name: "Prepare recovery key" }).click();
   const secret = await page.getByTestId("recovery-secret").innerText();
   expect(secret.length).toBeGreaterThan(40);
   await navigate(page, "Clients");
@@ -143,27 +144,27 @@ test("real browser encrypted provisioning, refresh retry, rename, danger dialog,
     if (r.method() === "POST" && r.url().endsWith("/vaults"))
       requests.push(r.postData()!);
   });
-  await page.getByLabel("I saved the recovery secret").check();
+  await page.getByLabel("I saved the vault recovery key").check();
   // Acknowledged receipt survives refresh, but requires proof before publishing.
   await page.getByRole("button", { name: "Save encrypted receipt" }).click();
-  await expect(page.getByLabel("Saved recovery secret")).toBeVisible();
+  await expect(page.getByLabel("Vault recovery key", { exact: true })).toBeVisible();
   await navigate(page, "Activity");
   await navigate(page, "Vaults");
-  await expect(page.getByLabel("Saved recovery secret")).toBeVisible();
+  await expect(page.getByLabel("Vault recovery key", { exact: true })).toBeVisible();
   await expect(page.getByTestId("recovery-secret")).toHaveCount(0);
   await page.getByRole("button", { name: "Log out", exact: true }).click();
-  await expect(page.getByLabel("Saved recovery secret")).toHaveCount(0);
+  await expect(page.getByLabel("Vault recovery key", { exact: true })).toHaveCount(0);
   await page.getByLabel("Owner password", { exact: true }).fill("browser-owner-password");
   await page.getByRole("button", { name: "Log in", exact: true }).click();
   await expectAdminPage(page, "Vaults");
-  await expect(page.getByLabel("Saved recovery secret")).toBeVisible();
+  await expect(page.getByLabel("Vault recovery key", { exact: true })).toBeVisible();
   await page.reload();
   await expectAdminPage(page, "Vaults");
-  await page.getByLabel("Saved recovery secret").fill("wrong");
+  await page.getByLabel("Vault recovery key", { exact: true }).fill("wrong");
   await page.getByRole("button", { name: "Verify and publish" }).click();
   await expect(page.getByRole("alert")).toBeVisible();
   expect(requests).toHaveLength(0);
-  await page.getByLabel("Saved recovery secret").fill(secret);
+  await page.getByLabel("Vault recovery key", { exact: true }).fill(secret);
   await page.getByRole("button", { name: "Verify and publish" }).click();
   await expect(
     page.getByRole("heading", { name: "notes", exact: true }),
@@ -316,9 +317,9 @@ test("approve/deny comparison codes, active/revoked clients and lost creation re
     await expect(page.getByText("device.revoked", { exact: true })).toBeVisible();
     await navigate(page, "Vaults");
     await page.getByLabel("New vault name").fill("lost-response");
-    await page.getByRole("button", { name: "Prepare recovery" }).click();
+    await page.getByRole("button", { name: "Prepare recovery key" }).click();
     const secret = await page.getByTestId("recovery-secret").innerText();
-    await page.getByLabel("I saved the recovery secret").check();
+    await page.getByLabel("I saved the vault recovery key").check();
     await page.getByRole("button", { name: "Save encrypted receipt" }).click();
     let request = "";
     await page.route("**/admin/api/vaults", async (route) => {
@@ -327,7 +328,7 @@ test("approve/deny comparison codes, active/revoked clients and lost creation re
       await route.fetch();
       await route.abort("failed");
     });
-    await page.getByLabel("Saved recovery secret").fill(secret);
+    await page.getByLabel("Vault recovery key", { exact: true }).fill(secret);
     await page.getByRole("button", { name: "Verify and publish" }).click();
     await expect(page.getByRole("alert")).toBeVisible();
     expect(
@@ -335,7 +336,7 @@ test("approve/deny comparison codes, active/revoked clients and lost creation re
     ).not.toContain(secret);
     await page.unroute("**/admin/api/vaults");
     await page.reload();
-    await page.getByLabel("Saved recovery secret").fill(secret);
+    await page.getByLabel("Vault recovery key", { exact: true }).fill(secret);
     const replay = page.waitForRequest(
       (r) => r.method() === "POST" && r.url().endsWith("/vaults"),
     );
@@ -451,15 +452,54 @@ test('two tabs cannot overwrite an acknowledged encrypted receipt', async ({page
  await expectAdminPage(other, 'Vaults');
  for(const [tab,name] of [[page,'first-tab'],[other,'second-tab']] as const){
   await tab.getByLabel('New vault name').fill(name);
-  await tab.getByRole('button',{name:'Prepare recovery'}).click();
-  await tab.getByLabel('I saved the recovery secret').check();
+  await tab.getByRole('button',{name:'Prepare recovery key'}).click();
+  await tab.getByLabel('I saved the vault recovery key').check();
  }
  await page.getByRole('button',{name:'Save encrypted receipt'}).click();
- await expect(page.getByLabel('Saved recovery secret')).toBeVisible();
+ await expect(page.getByLabel('Vault recovery key', {exact:true})).toBeVisible();
  await other.getByRole('button',{name:'Save encrypted receipt'}).click();
  await expect(other.getByRole('alert')).toContainText('Another tab saved a creation receipt');
  await other.reload();
  await expect(other.getByRole('heading',{name:'Create first-tab',exact:true})).toBeVisible();
  const receipt=await page.evaluate(()=>localStorage.getItem('nanosync-encrypted-creation-v1'));
  expect(JSON.parse(receipt!).name).toBe('first-tab');
+});
+
+test("Field Guide themes, responsive screens and dialog remain accessible", async ({ page }, testInfo) => {
+  await page.goto(url + "/admin");
+  await page.emulateMedia({ colorScheme: "dark" });
+  await expect(page.locator("body")).toHaveCSS("background-color", "rgb(40, 40, 40)");
+  await page.getByLabel("Theme", { exact: true }).selectOption("light");
+  await page.reload();
+  await expect(page.getByLabel("Theme", { exact: true })).toHaveValue("light");
+  expect((await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa"]).analyze()).violations).toEqual([]);
+  await page.getByLabel("Owner password", { exact: true }).fill("browser-owner-password");
+  await page.getByRole("button", { name: "Log in", exact: true }).click();
+  await expectAdminPage(page, "Clients");
+  for (const theme of ["light", "dark"]) {
+    await page.getByLabel("Theme", { exact: true }).selectOption(theme);
+    for (const width of [390, 1440]) {
+      await page.setViewportSize({ width, height: 1000 });
+      for (const section of ["Clients", "Vaults", "Activity"] as const) {
+        if (!page.url().endsWith(`/admin/${section.toLowerCase()}`)) await navigate(page, section);
+        await expectAdminPage(page, section);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+        expect((await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa"]).analyze()).violations).toEqual([]);
+        await page.screenshot({ path: testInfo.outputPath(`${section}-${theme}-${width}.png`), fullPage: true });
+      }
+    }
+  }
+  await navigate(page, "Vaults");
+  await page.getByLabel("New vault name").fill("theme-check");
+  await page.getByRole("button", { name: "Prepare recovery key" }).click();
+  const secret = await page.getByTestId("recovery-secret").innerText();
+  await page.getByLabel("I saved the vault recovery key").check();
+  await page.getByRole("button", { name: "Save encrypted receipt" }).click();
+  await page.getByLabel("Vault recovery key", { exact: true }).fill(secret);
+  await page.getByRole("button", { name: "Verify and publish" }).click();
+  await expect(page.getByRole("heading", { name: "theme-check", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Delete theme-check", exact: true }).click();
+  await expect(page.getByRole("dialog")).toHaveCSS("background-color", "rgb(40, 40, 40)");
+  expect((await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa"]).analyze()).violations).toEqual([]);
+  await page.screenshot({ path: testInfo.outputPath("delete-dialog-dark.png"), fullPage: true });
 });

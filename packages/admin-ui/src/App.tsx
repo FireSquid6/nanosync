@@ -1,4 +1,5 @@
 import { Outlet, useLoaderData } from "react-router-dom";
+import { ThemeControl } from "@nanosync/ui-theme/ThemeControl";
 import { AdminProvider, useAdmin } from "./state/AdminContext";
 import type { loadAdmin } from "./state/bootstrap";
 
@@ -10,11 +11,16 @@ export function App() {
 function AdminShell() {
   const { error } = useAdmin();
   return (
-    <main className="nv-root" data-nv-theme="light">
-      <div className="admin nv-stack">
-        <h1>Nanosync administration</h1>
-        {error && <p role="alert">{error}</p>}
-        <Outlet />
+    <main className="nv-root">
+      <div className="admin">
+        <header className="admin-header">
+          <h1>Nanosync administration</h1>
+          <ThemeControl />
+        </header>
+        <div className="admin-content nv-stack">
+          {error && <p role="alert">{error}</p>}
+          <Outlet />
+        </div>
       </div>
     </main>
   );
