@@ -18,7 +18,17 @@
       };
     in {
       devShells.${system}.default = pkgs.mkShell {
-        packages = [ pkgs.bun pkgs.nodejs ];
+        packages = with pkgs; [
+          bun nodejs curl gnutar gzip patchelf pkg-config
+          gtk3 webkitgtk_4_1 libayatana-appindicator librsvg libsecret
+          glib dbus xdg-utils
+        ];
+        shellHook = ''
+          export HUTCH_HOME="$PWD/.cache/hutch"
+          export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath (with pkgs; [
+            gtk3 webkitgtk_4_1 libayatana-appindicator librsvg libsecret
+          ])}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        '';
       };
       packages.${system} = {
         inherit nanosync;

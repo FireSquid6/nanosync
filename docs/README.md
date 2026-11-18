@@ -37,6 +37,8 @@ Nanosync is a self-hosted, client-encrypted file synchronization system with por
 - [Version 1 threat model](threat-model.md)
 - [Clients and operations](clients-and-operations.md)
 - [Mobile filesystem clients](mobile.md)
+- [Desktop implementation contract (planned)](desktop-implementation.md)
+- [Linux desktop toolkit validation spike](desktop-linux-validation.md)
 - [Decisions and open questions](decisions.md)
 
 ## Terminology

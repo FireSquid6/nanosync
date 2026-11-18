@@ -6,7 +6,8 @@
   },
   "workspaces": [
     "packages/*",
-    "apps/site"
+    "apps/site",
+    "apps/desktop"
   ],
   "scripts": {
     "test": "bun test",

@@ -1,0 +1,5 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": { "lib": ["ESNext", "DOM"], "types": ["bun"] },
+  "include": ["src/selfcheck.ts", "src/rpc.ts", "tests"]
+}

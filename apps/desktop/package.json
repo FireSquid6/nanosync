@@ -1,0 +1,16 @@
+{
+  "name": "@nanosync/desktop",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.check.json --noEmit",
+    "typecheck:native": "tsc -p tsconfig.json --noEmit",
+    "prepare:native": "bash tooling.sh prepare",
+    "build": "bash tooling.sh build --env=stable",
+    "dev": "bash tooling.sh dev"
+  },
+  "dependencies": {
+    "@nanosync/client-local": "workspace:*",
+    "electrobun": "2.0.6"
+  }
+}

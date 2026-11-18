@@ -204,6 +204,7 @@
   "@nanosync/admin-ui" = copyPathToStore ../../packages/admin-ui;
   "@nanosync/cli" = copyPathToStore ../../packages/cli;
   "@nanosync/client-local" = copyPathToStore ../../packages/client-local;
+  "@nanosync/desktop" = copyPathToStore ../../apps/desktop;
   "@nanosync/linux-client" = copyPathToStore ../../packages/linux-client;
   "@nanosync/protocol" = copyPathToStore ../../packages/protocol;
   "@nanosync/server-core" = copyPathToStore ../../packages/server-core;
@@ -551,6 +552,10 @@
   "devlop@1.1.0" = fetchurl {
     url = "https://registry.npmjs.org/devlop/-/devlop-1.1.0.tgz";
     hash = "sha512-RWmIqhcFf1lRYBvNmr7qTNuyCt/7/ns2jbpp1+PalgE/rDQcBT0fioSMUpJ93irlUhC5hrg4cYqe6U+0ImW0rA==";
+  };
+  "electrobun@2.0.6" = fetchurl {
+    url = "https://registry.npmjs.org/electrobun/-/electrobun-2.0.6.tgz";
+    hash = "sha512-qt3x6Ko7F7ufM3tGCtGSpHoGPsXioIdZP/dU4Gd7o7Imzoy+c3hqi0IWaecXkJY5fE5e3gTivhmwu9iob6furA==";
   };
   "escape-string-regexp@5.0.0" = fetchurl {
     url = "https://registry.npmjs.org/escape-string-regexp/-/escape-string-regexp-5.0.0.tgz";

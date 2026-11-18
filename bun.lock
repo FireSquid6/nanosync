@@ -13,6 +13,13 @@
         "typescript": "^5",
       },
     },
+    "apps/desktop": {
+      "name": "@nanosync/desktop",
+      "dependencies": {
+        "@nanosync/client-local": "workspace:*",
+        "electrobun": "2.0.6",
+      },
+    },
     "apps/site": {
       "name": "@nanosync/site",
       "dependencies": {
@@ -243,6 +250,8 @@
 
     "@nanosync/client-local": ["@nanosync/client-local@workspace:packages/client-local"],
 
+    "@nanosync/desktop": ["@nanosync/desktop@workspace:apps/desktop"],
+
     "@nanosync/linux-client": ["@nanosync/linux-client@workspace:packages/linux-client"],
 
     "@nanosync/protocol": ["@nanosync/protocol@workspace:packages/protocol"],
@@ -426,6 +435,8 @@
     "detect-node-es": ["detect-node-es@1.1.0", "", {}, "sha512-ypdmJU/TbBby2Dxibuv7ZLW3Bs1QEmM7nHjEANfohJLvE0XVujisn1qPJcZxg+qDucsr+bP6fLD1rPS3AhJ7EQ=="],
 
     "devlop": ["devlop@1.1.0", "", { "dependencies": { "dequal": "^2.0.0" } }, "sha512-RWmIqhcFf1lRYBvNmr7qTNuyCt/7/ns2jbpp1+PalgE/rDQcBT0fioSMUpJ93irlUhC5hrg4cYqe6U+0ImW0rA=="],
+
+    "electrobun": ["electrobun@2.0.6", "", { "bin": { "electrobun": "bin/electrobun.cjs" } }, "sha512-qt3x6Ko7F7ufM3tGCtGSpHoGPsXioIdZP/dU4Gd7o7Imzoy+c3hqi0IWaecXkJY5fE5e3gTivhmwu9iob6furA=="],
 
     "escape-string-regexp": ["escape-string-regexp@5.0.0", "", {}, "sha512-/veY75JbMK4j1yjvuUxuVsiS/hr/4iHs9FTT6cgTexxdE0Ly/glccBAkloH/DofkjRbZU3bnoj38mOmhkZ0lHw=="],
 
