@@ -42,12 +42,35 @@ blockquote { margin: 18px 0; padding-left: 18px; border-left: 1px solid var(--fg
 .hljs-comment, .hljs-quote { color: var(--fg-muted); }
 .hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-built_in { color: var(--fg-link); }
 .hljs-string, .hljs-title, .hljs-number, .hljs-attr { color: var(--fg-focus); }
+article .feature-checklist { list-style: none; padding: 0; margin: 0 0 28px; }
+.feature-checklist input { margin: 0 8px 0 0; }
+.sync-demo { margin: 28px 0; }
+.terminal-panes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border: 1px solid var(--fg-border); background: var(--fg-code); }
+.terminal-pane { min-width: 0; }
+.terminal-pane + .terminal-pane { border-left: 1px solid var(--fg-border); }
+.terminal-heading { display: flex; justify-content: space-between; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--fg-border); font-size: 12px; color: var(--fg-heading); }
+.terminal-heading span + span { color: var(--fg-muted); }
+.terminal-action { margin: 12px 14px 0; font-size: 11px; color: var(--fg-muted); }
+.terminal-pane pre { margin: 0; padding: 14px; font-size: 11px; min-height: 240px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.terminal-line { display: block; clip-path: inset(0 100% 0 0); animation: terminal-reveal 0.4s steps(18, end) var(--delay) forwards; }
+.terminal-command { color: var(--fg-link); }
+.terminal-panes[data-paused="true"] .terminal-line { animation-play-state: paused; }
+.sync-demo figcaption { margin-top: 12px; font-size: 12px; color: var(--fg-muted); }
+.demo-controls { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 10px; }
+.demo-controls button { border: 1px solid var(--fg-border); padding: 4px 10px; background: var(--fg-bg); color: var(--fg-text); cursor: pointer; font-size: 12px; }
+@keyframes terminal-reveal { to { clip-path: inset(0 0 0 0); } }
+@media (prefers-reduced-motion: reduce) {
+  .terminal-line { animation: none; clip-path: none; }
+  .demo-controls { display: none; }
+}
 @media (max-width: 700px) {
   .site-container { padding: 0 22px; }
   .site-header { flex-wrap: wrap; }
   .site-header nav { gap: 18px; font-size: 13px; }
   .home-main { padding-left: 0; }
   .intro { font-size: 15px; }
+  .terminal-panes { grid-template-columns: minmax(0, 1fr); }
+  .terminal-pane + .terminal-pane { border-left: 0; border-top: 1px solid var(--fg-border); }
   .docs-main { grid-template-columns: minmax(0, 1fr); gap: 28px; }
   .docs-sidebar { border: 0; padding: 0; }
   .browse-button { display: block; }

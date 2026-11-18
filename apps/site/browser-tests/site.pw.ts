@@ -40,6 +40,50 @@ test('real routes, documentation search, code copying, headings and history', as
   await expect(page.getByRole('heading', { name: 'Page not found' })).toBeVisible();
 });
 
+test('site branding, home features and sync animation', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByRole('figure', { name: 'Two-machine file sync demo' })).toBeVisible();
+  await expect(page.locator('.terminal-pane')).toHaveCount(2);
+  for (const route of ['/', '/dashboard', '/pricing', '/docs/introduction']) {
+    await page.goto(route);
+    await expect(page).toHaveTitle('nanosync');
+    await expect(page.locator('footer')).toContainText('built by Jonathan Deiss');
+  }
+  await page.goto('/dashboard');
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Dashboard');
+  await expect(page.getByText('self hosted only--managed nanosync servers coming soon', { exact: true })).toBeVisible();
+  await expect(page.getByRole('checkbox')).toHaveCount(0);
+  await expect(page.locator('.terminal-pane')).toHaveCount(0);
+  await page.goto('/');
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Uncomplicate file sync');
+  await expect(page.getByRole('checkbox')).toHaveCount(6);
+  for (const feature of ['Two-way sync', 'End-to-end encryption', 'Self-hostable', 'CLI']) {
+    await expect(page.getByRole('checkbox', { name: feature, exact: true })).toBeChecked();
+    await expect(page.getByRole('checkbox', { name: feature, exact: true })).toBeDisabled();
+  }
+  for (const feature of ['Mobile App', 'Desktop App']) {
+    await expect(page.getByRole('checkbox', { name: feature, exact: true })).not.toBeChecked();
+    await expect(page.getByRole('checkbox', { name: feature, exact: true })).toBeDisabled();
+  }
+  await expect(page.locator('.terminal-pane')).toHaveCount(2);
+  const pause = page.getByRole('button', { name: 'Pause animation' });
+  await pause.click();
+  await expect(pause).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('.terminal-line').last()).toHaveCSS('animation-play-state', 'paused');
+  await page.locator('.terminal-panes').evaluate(element => {
+    for (const animation of element.getAnimations({ subtree: true })) animation.currentTime = 30_000;
+  });
+  await expect(page.locator('.terminal-line').last()).toHaveCSS('clip-path', 'inset(0px 0% 0px 0px)');
+  await expect(page.locator('.terminal-pane').last()).toContainText('- Build something small.');
+  await page.getByRole('button', { name: 'Replay animation' }).click();
+  await expect(pause).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('.terminal-line').last()).toHaveCSS('clip-path', 'inset(0px 100% 0px 0px)');
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await expect(page.locator('.terminal-line').last()).toHaveCSS('animation-name', 'none');
+  await expect(page.locator('.terminal-line').last()).toHaveCSS('clip-path', 'none');
+  await expect(pause).toBeHidden();
+});
+
 test('every guide has working content links and accessible light/dark content', async ({ page }) => {
   for (const slug of ['introduction', 'installation', 'first-sync', 'server', 'administration', 'ignore-rules', 'troubleshooting', 'security']) {
     const response = await page.goto(`/docs/${slug}`);
@@ -98,11 +142,11 @@ for (const theme of ['light', 'dark']) {
   for (const width of [390, 700, 701, 1440]) {
     test(`${theme} at ${width}px has no horizontal overflow`, async ({ page }, testInfo) => {
       await page.setViewportSize({ width, height: 1000 });
-      for (const route of ['/', '/docs/installation']) {
+      for (const route of ['/', '/docs/installation', '/dashboard']) {
         await page.goto(route);
         await page.getByLabel('Theme', { exact: true }).selectOption(theme);
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-        await page.screenshot({ path: testInfo.outputPath(`${route === '/' ? 'home' : 'docs'}-${theme}-${width}.png`), fullPage: true });
+        await page.screenshot({ path: testInfo.outputPath(`${route === '/' ? 'home' : route.slice(1).replaceAll('/', '-')}-${theme}-${width}.png`), fullPage: true });
       }
     });
   }

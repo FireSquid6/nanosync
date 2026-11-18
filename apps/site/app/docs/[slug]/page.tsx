@@ -1,4 +1,3 @@
-import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import Markdown from 'react-markdown';
@@ -11,10 +10,6 @@ import { getDocs, topics } from '../../../lib/docs';
 
 type Props = { params: Promise<{ slug: string }> };
 export function generateStaticParams() { return topics.map(([slug]) => ({ slug })); }
-export async function generateMetadata({ params }: Props): Promise<Metadata> {
-  const { slug } = await params;
-  return { title: topics.find(topic => topic[0] === slug)?.[1] ?? 'Not found' };
-}
 export default async function DocPage({ params }: Props) {
   const { slug } = await params;
   const docs = getDocs();
