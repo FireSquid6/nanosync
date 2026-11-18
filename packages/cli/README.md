@@ -5,14 +5,14 @@ This is a breaking command/state redesign: no legacy aliases, bootstrap command,
 
 ```sh
 nanosync server init --server-dir "$HOME/nanosync-server"
-# Provision locally while the runtime is stopped; save the recovery secret.
+# Provision locally while the runtime is stopped; save the vault recovery key.
 nanosync server vaults create --server-dir "$HOME/nanosync-server" --name documents
 nanosync server run --server-dir "$HOME/nanosync-server" --web-ui
 # In another terminal/on the client:
 nanosync client connections add --url https://sync.example.com --alias home
 # On the server, compare the verification code and use the exact printed UUID:
 nanosync server devices approve --device-id UUID
-# Deliver the creation recovery secret offline to the client:
+# Deliver the vault recovery key offline to the client:
 mkdir -p "$HOME/Sync"
 nanosync client vaults connect --server home --vault documents --path "$HOME/Sync"
 nanosync client sync --path "$HOME/Sync"
@@ -72,7 +72,9 @@ Connection summaries contain only server ID, alias, canonical URL, device ID, st
 
 ## Secrets and operational boundaries
 
-Owner password: hidden prompt, `NANOSYNC_PASSWORD`, or `--password-file FILE` on init/add. Recovery input: hidden prompt, `NANOSYNC_RECOVERY_SECRET`, or `--recovery-file FILE` on connect. Protected input files must be owned regular mode-0600 files; secret values are never accepted as arguments. `@inquirer/prompts` supplies input/password/selection/confirmation behavior; no readline/stty password handling.
+The **vault recovery key** (previously called the recovery secret) unlocks the vault’s encryption key locally on new devices; it is not the owner password or a backup of files. Anyone with this key and the encrypted vault data can decrypt the vault. Keep it in a password manager or offline. Losing both it and every client’s saved vault key makes the data unrecoverable with the owner password alone.
+
+Owner password: hidden prompt, `NANOSYNC_PASSWORD`, or `--password-file FILE` on init/add. Vault recovery key input: hidden prompt, `NANOSYNC_RECOVERY_SECRET`, or `--recovery-file FILE` on connect. Existing environment-variable and flag names remain unchanged for compatibility. Protected input files must be owned regular mode-0600 files; secret values are never accepted as arguments. `@inquirer/prompts` supplies input/password/selection/confirmation behavior; no readline/stty password handling.
 
 Server-local creation transiently handles plaintext key material (an intentional owner-machine exception). It saves encrypted-only receipts before delivery and publishes only after exact interactive acknowledgement or verified protected file delivery. Scripted receipts live in `owner-creations/`, keyed by the absolute recovery-output path; retain the same name and path when retrying, including after lost stdout. The receipt verifies the protected file against a secret digest, so a crash after file delivery resumes the original encrypted request without redelivery or duplicate creation. Missing/modified/insecure delivered files fail visibly; restore the original protected output before retrying. An interruption before file delivery can safely regenerate unpublished material. Keep receipts for idempotence; a new output path explicitly starts a new creation. Interactive `owner-creation.json` retains the last acknowledged/completed encrypted request: retrying its name returns the same vault, while a different name can start after completion. Initialization, local creation (including receipt replay/recovery delivery), and the serving runtime share a process-identity `.sync-owner` lock in the server root, never bypassed by yes/force. The runtime holds it until shutdown completes, so a second runtime or local creation fails actionably before touching receipts, recovery output, or ciphertext. Stop the runtime and retry the same creation name/output; existing recovery delivery and receipts are preserved. Startup/provisioning failures and shutdown release ownership; definitively dead process owners are recovered automatically. Metadata-only device view/approve/deny/revoke and vault view/rename/delete remain available while serving; use the browser for live vault creation. Receipts contain no plaintext recovery secrets or vault keys. Do not persist plaintext vault master keys on the server. Recovery is not retrievable later. Keep recovery output and all private state outside sync roots; back up secrets offline.
 

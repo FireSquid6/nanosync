@@ -139,8 +139,10 @@ async function execute(args: string[], presentation: CliOutput): Promise<number>
         const path = opts(command).recoveryOutput;
         if (path) secureCreate(path, recovery + '\n');
         else {
-          output().info(`Recovery secret (record offline): ${recovery}`);
-          if (await hidden('Retype recovery secret to acknowledge backup', canPrompt(command)) !== recovery) throw new CliError('INVALID_INPUT', 'recovery acknowledgement mismatch; no vault created');
+          output().info('Your vault recovery key unlocks this vault’s encryption key on new devices. It is not your owner password or a backup of your files.');
+          output().info('Save it in a password manager or offline. Anyone with this key and the encrypted vault data can decrypt your files.');
+          output().info(`Vault recovery key: ${recovery}`);
+          if (await hidden('Retype vault recovery key to confirm you saved it', canPrompt(command)) !== recovery) throw new CliError('INVALID_INPUT', 'recovery key acknowledgement mismatch; no vault created');
         }
       }, opts(command).recoveryOutput);
     });
@@ -152,7 +154,7 @@ async function execute(args: string[], presentation: CliOutput): Promise<number>
       const dir = await serverRoot(command), id = await selectLocalVault(command, dir);
       const vault = await withLocalOwner(dir, owner => owner.listVaults(localOwner).find(v => v.vaultId === id));
       if (!vault) throw new CliError('NOT_FOUND', 'vault not found');
-      output().warning(`PERMANENT deletion: ${dir} / ${vault.name} / ${id}. History, encrypted objects and recovery wraps are destroyed. Recovery secrets cannot restore data without a server backup. Offline clients may have unsynced work. Client files are preserved.`);
+      output().warning(`PERMANENT deletion: ${dir} / ${vault.name} / ${id}. History, encrypted objects and recovery wraps are destroyed. Recovery keys cannot restore data without a server backup. Offline clients may have unsynced work. Client files are preserved.`);
       if (canPrompt(command)) {
         if (await text(`Type exact vault name: ${vault.name}`, true) !== vault.name) throw new CliError('INVALID_INPUT', 'vault name confirmation mismatch');
       } else {
@@ -220,7 +222,7 @@ async function execute(args: string[], presentation: CliOutput): Promise<number>
         if (readdirSync(destination).length && !confirmed) confirmed = !!o.yes || await acknowledge('Existing files will participate in synchronization. Continue?', canPrompt(command));
         if (!confirmed && readdirSync(destination).length) throw new CliError('CANCELLED', 'connection cancelled');
         const stored = key(dir, info.serverId, vault.vaultId);
-        if (!stored) await unlockVault(dir, info, vault.vaultId, await secret(command, 'NANOSYNC_RECOVERY_SECRET', 'recoveryFile', 'Vault recovery secret'));
+        if (!stored) await unlockVault(dir, info, vault.vaultId, await secret(command, 'NANOSYNC_RECOVERY_SECRET', 'recoveryFile', 'Vault recovery key (unlocks encryption on this device; not your owner password)'));
         else stored.fill(0);
         result = connectRegisteredVault(dir, destination, info.serverId, vault.vaultId, info.deviceId, confirmed);
         if (presentation.json) output().info('Connected; no files transferred. Next: nanosync client sync');

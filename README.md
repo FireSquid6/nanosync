@@ -12,7 +12,7 @@ To run the Linux CLI and server from source, see [packages/cli/README.md](packag
 
 ```sh
 nanosync server init --server-dir "$HOME/nanosync-server"
-# Provision locally while the runtime is stopped; save/acknowledge the secret.
+# Provision locally while the runtime is stopped; save/acknowledge the vault recovery key.
 nanosync server vaults create --server-dir "$HOME/nanosync-server" --name documents
 nanosync server run --server-dir "$HOME/nanosync-server" --web-ui
 # In another terminal/on the client:
@@ -21,6 +21,12 @@ nanosync client connections add --url http://127.0.0.1:7337 --alias home
 nanosync client vaults connect --server home --vault documents --path "$HOME/Sync"
 nanosync client sync --path "$HOME/Sync"
 ```
+
+The **vault recovery key** (previously called the recovery secret) unlocks the
+vault’s encryption key on new devices. It is not the owner password or a backup
+of your files. Save it in a password manager or offline: anyone with this key and
+the encrypted vault data can decrypt your files. If you lose both this key and all
+clients’ saved vault keys, the owner password cannot recover your data.
 
 Create the destination directory first. Browser administration is **off by default**;
 `--web-ui` embeds `/admin` on the existing listener, with no adjacent assets or
