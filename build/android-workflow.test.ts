@@ -16,8 +16,9 @@ const workflow = Bun.YAML.parse(await Bun.file(workflowPath).text()) as {
   jobs: { android: { steps: Step[] } };
 };
 
-test("Android validation is reusable without dropping existing entry points or pinned checks", () => {
-  for (const event of ["workflow_call", "pull_request", "push", "workflow_dispatch"]) {
+test("Android validation runs on PRs and remains reusable with pinned checks", () => {
+  expect(Object.hasOwn(workflow.on, "push")).toBe(false);
+  for (const event of ["workflow_call", "pull_request", "workflow_dispatch"]) {
     expect(Object.hasOwn(workflow.on, event)).toBe(true);
   }
   expect(workflow.concurrency.group).toStartWith("android-validation-");
@@ -26,7 +27,7 @@ test("Android validation is reusable without dropping existing entry points or p
   for (const command of [
     "nix develop .#android-build", "bun install --frozen-lockfile", "bun test",
     "bun run typecheck", "bun run typecheck:android", ":app:assembleDebug",
-    ":app:assembleDebugAndroidTest", ":app:lintDebug",
+    ":app:assembleDebugAndroidTest", ":app:testDebugUnitTest", ":app:lintDebug",
   ]) expect(build).toContain(command);
   expect(build).not.toContain("assembleRelease");
 });

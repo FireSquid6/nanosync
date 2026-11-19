@@ -3,8 +3,6 @@ name: Android build and protocol checks
 on:
   workflow_call:
   pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -29,7 +27,7 @@ jobs:
             bun test
             bun run typecheck
             bun run typecheck:android
-            gradle --no-daemon -p apps/android :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
+            gradle --no-daemon -p apps/android :app:assembleDebug :app:assembleDebugAndroidTest :app:testDebugUnitTest :app:lintDebug
           '
       - name: Prepare debug-signed APK (not production signed)
         run: |
