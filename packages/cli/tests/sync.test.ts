@@ -614,6 +614,7 @@ for (const [before, after] of [[0o600, 0o700], [0o700, 0o600]]) {
   });
 }
 
+// Real HTTP/SQLite work for 65 revisions can exceed Bun's default CI timeout.
 test("offline edits survive an interrupted merge across 65 remote revisions", async () => {
   const e = await fixture();
   const initial = start(e.b);
@@ -646,7 +647,7 @@ test("offline edits survive an interrupted merge across 65 remote revisions", as
   const finished = new ClientLocal(e.b.clientDirectory, e.b.vaultId, e.b.deviceId);
   try { expect(finished.reconciliation()).toBeNull(); expect(finished.proposal()).toBeNull(); }
   finally { finished.close(); }
-});
+}, 60_000);
 
 test("merge recovery handles a lost acceptance followed by interrupted filesystem staging", async () => {
   const e = await fixture(), a = start(e.a), initial = start(e.b);
