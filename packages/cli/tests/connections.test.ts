@@ -27,7 +27,7 @@ test("forced disconnect and server removal discard missing roots without bypassi
   const a = createConnection(e.global, e.first, serverId, e.vault, e.device);
   const b = createConnection(e.global, e.second, serverId, e.vault, e.device);
   rmSync(e.first, { recursive: true }); rmSync(e.second, { recursive: true });
-  expect(() => disconnectConnections(e.global, [a])).toThrow(/missing/);
+  await expect(disconnectConnections(e.global, [a])).rejects.toThrow(/saved root/);
   expect(await main(["client", "vaults", "disconnect", "--client-dir", e.global, "--path", e.first, "--force"])).toBe(0);
   expect(records(e.global).map(item => item.connectionId)).toEqual([b.connectionId]);
   const replica = privateDirectory(join(privateDirectory(join(e.global, "replicas")), b.connectionId));
@@ -41,12 +41,12 @@ test("forced disconnect and server removal discard missing roots without bypassi
   expect(existsSync(credential)).toBe(false);
 });
 
-test("force does not accept a replaced root or touch its marker", () => {
+test("force does not accept a replaced root or touch its marker", async () => {
   const e = fixture();
   const a = createConnection(e.global, e.first, "server", e.vault, e.device);
   rmSync(e.first, { recursive: true });
   symlinkSync(e.second, e.first);
-  expect(() => disconnectConnections(e.global, [a], true)).toThrow(/symlink/);
+  await expect(disconnectConnections(e.global, [a], true)).rejects.toThrow(/Folder unavailable/);
   expect(records(e.global)).toHaveLength(1);
   expect(existsSync(e.first)).toBe(true);
 });

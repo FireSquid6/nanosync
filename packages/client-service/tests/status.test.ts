@@ -274,7 +274,7 @@ test('a secondary status write failure cannot replace the primary credential err
   expect(primary.message).not.toContain(path);
 });
 
-async function legacyWalBinding(historicalRoot: boolean) {
+async function legacyWalBinding(historicalRoot: boolean, pending = true) {
   const fs = await import('node:fs');
   const { ClientLocal } = await import('@nanosync/client-local');
   const { createConnection } = await import('../src/connections.ts');
@@ -298,7 +298,7 @@ async function legacyWalBinding(historicalRoot: boolean) {
     local.recordScan([{ id: rootId, path: '', kind: 'directory', fingerprint: null, hydration: 'downloaded', revision: null }],
       [{ entryId: rootId, device: String(stat.dev), inode: String(stat.ino) }]);
   }
-  local.enqueueOperation(randomUUID(), 'publish');
+  if (pending) local.enqueueOperation(randomUUID(), 'publish');
   const facts = local.statusFacts(), wal = fs.readFileSync(join(replica, 'local.sqlite-wal'));
   local.close();
   fs.unlinkSync(join(replica, 'root-identity.json'));
@@ -306,6 +306,27 @@ async function legacyWalBinding(historicalRoot: boolean) {
   expect(fs.existsSync(join(replica, 'local.sqlite-shm'))).toBe(false);
   return { state, data, binding, replica, facts };
 }
+
+test.each(['original', 'replaced'] as const)('public unowned ignore save recovers legacy WAL before historical root check (%s), without passive recovery or credentials', async kind => {
+  const fs = await import('node:fs');
+  const { ClientLocal } = await import('@nanosync/client-local');
+  const { setIgnores, viewIgnores } = await import('../src/index.ts');
+  const { state, data, binding, replica, facts } = await legacyWalBinding(true, false);
+  const before = fs.readdirSync(replica);
+  expect(() => viewIgnores(state, data)).toThrow(/recovery/i);
+  expect(fs.readdirSync(replica)).toEqual(before);
+  if (kind === 'replaced') {
+    fs.renameSync(data, data + '-original'); fs.mkdirSync(data, { mode: 0o700 });
+    fs.copyFileSync(join(data + '-original', '.nanosync'), join(data, '.nanosync'));
+    await expect(setIgnores(state, data, { text: '*.tmp', expectedFileSignature: 'absent' })).rejects.toMatchObject({ code: 'FOLDER_UNAVAILABLE' });
+    expect(fs.existsSync(join(data, '.nanosyncignore'))).toBe(false);
+  } else {
+    await setIgnores(state, data, { text: '*.tmp', expectedFileSignature: 'absent' });
+    expect(fs.readFileSync(join(data, '.nanosyncignore'), 'utf8')).toBe('*.tmp');
+  }
+  expect(ClientLocal.readStatus(replica, binding.vaultId, binding.deviceId)).toEqual(facts);
+  expect(fs.existsSync(join(replica, 'root-identity.json'))).toBe(false);
+});
 
 test.each(['unscanned', 'scanned'] as const)('public bound start recovers %s legacy WAL before verifying historical root', async kind => {
   const fs = await import('node:fs');

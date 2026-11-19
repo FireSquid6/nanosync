@@ -1,16 +1,22 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { setContinuousIntent } from './settings.ts';
 import { chmodSync, existsSync, lstatSync, rmSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { discoverConnection } from './connections.ts';
+import { discoverConnection, records, assertBindingRoot } from './connections.ts';
+import { assertNoRemoval } from './removal-state.ts';
+import { ClientLocal } from '@nanosync/client-local';
+import { saveIgnoreFile, validateIgnoreText, IgnoreError } from '@nanosync/linux-client';
+import { acquireSyncLock } from './sync-lock.ts';
+import { assertIgnoreBasis } from './sync-runner.ts';
+import { ClientError } from './errors.ts';
 import { withCredentialRegistry, type CredentialOptions } from './credentials.ts';
 import { startBoundSync } from './bound-sync.ts';
 import { privateDirectory, secureCreate, secureRead, secureReplace } from './security.ts';
 import { observeSyncLock, type FileIdentity } from './sync-lock.ts';
 import type { SyncEvent } from './events.ts';
 import {
-  authorized, boundedJson, failure, MAX_BODY, NONCE, object, outcome, request, result,
+  authorized, boundedJson, failure, MAX_IGNORE_BODY, NONCE, object, outcome, request, result,
   safeError, progressResponse, streamedOutcome, UUID,
   type ControlRequest, type Head, type Operation, type Outcome,
 } from './sync-control-protocol.ts';
@@ -121,15 +127,15 @@ function checkConnectedEndpoint(metadata: Metadata): void {
   }
 }
 async function send(
-  target: Target, operation: Operation, signal?: AbortSignal, onEvent?: (event: SyncEvent) => void,
+  target: Target, operation: Operation, signal?: AbortSignal, onEvent?: (event: SyncEvent) => void, input?: ControlRequest['input'],
 ): Promise<unknown> {
   try {
     const { socket, capability } = validate(target);
     const payload: ControlRequest = { version: 1, id: randomUUID(), root: target.metadata.root,
-      binding: target.metadata.binding, instance: target.metadata.instanceId, operation };
+      binding: target.metadata.binding, instance: target.metadata.instanceId, operation, ...(input ? { input } : {}) };
     const response = await fetch('http://localhost/control', {
       unix: socket, method: 'POST', redirect: 'error', signal,
-      headers: { 'content-type': 'application/json', 'x-nanosync-capability': capability },
+      headers: { 'content-type': 'application/json', 'x-nanosync-capability': capability, ...(input ? { 'x-nanosync-operation': 'ignore-set' } : {}) },
       body: JSON.stringify(payload),
     });
     if (response.status !== 200) throw failure('OWNER_UNAVAILABLE');
@@ -193,7 +199,7 @@ export async function openBoundSync(
   if (!['cli', 'desktop'].includes(options.origin) || !UUID.test(options.instanceId))
     throw failure('OWNER_UNAVAILABLE');
   const selected = await withCredentialRegistry(root, async () => {
-    root = privateDirectory(root);
+    root = privateDirectory(root); assertNoRemoval(root);
     const binding = discoverConnection(root, from, true);
     const replica = privateDirectory(join(privateDirectory(join(root, 'replicas')), binding.connectionId));
     const lock = observeSyncLock(replica);
@@ -222,7 +228,7 @@ export async function openBoundSync(
       let transportStopped: Promise<void> | undefined;
       let continuous = false;
       let active = 0;
-      type Replay = { operation: Operation; done: boolean; value: Promise<Outcome | { stopped: true } | { accepted: true }> };
+      type Replay = { payload: string; operation: Operation; done: boolean; value: Promise<Outcome | { stopped: true } | { accepted: true } | { fileSignature: string } | { error: ReturnType<typeof safeError> }> };
       const replay = new Map<string, Replay>();
       const lifetime = new AbortController();
       let metadata: Metadata;
@@ -244,16 +250,21 @@ export async function openBoundSync(
           if (directory) rmSync(directory, { recursive: true, force: true });
         }
       })();
-      const dispatch = async (operation: Operation): Promise<Outcome | { stopped: true } | { accepted: true }> => {
+      const dispatch = async (payload: ControlRequest): Promise<Outcome | { stopped: true } | { accepted: true } | { fileSignature: string } | { error: ReturnType<typeof safeError> }> => {
+        const operation = payload.operation;
         if (closing) return { head: null, events: [], error: safeError(failure('OWNER_STOPPED')) };
         if (operation === 'stop-for-removal') { await close(); return { stopped: true }; }
+        if (operation === 'ignore-set') {
+          try { return { fileSignature: await runner.saveIgnores(payload.input!.text, payload.input!.expectedFileSignature, () => { assertNoRemoval(root); assertBindingRoot(root, binding); }) }; }
+          catch (error) { return { error: safeError(error) }; }
+        }
         if ((operation === 'watch' || operation === 'watch-accept') && !continuous)
           return { head: null, events: [], error: safeError(failure('OWNER_TEMPORARY')) };
         if (operation === 'watch-accept') return { accepted: true };
         try { return outcome({ head: await runner.syncOnce(), events: [], error: null }); }
         catch (error) { return { head: null, events: [], error: safeError(error) }; }
       };
-      server = Bun.serve({ unix: socket, maxRequestBodySize: MAX_BODY,
+      server = Bun.serve({ unix: socket, maxRequestBodySize: MAX_IGNORE_BODY,
         async fetch(incoming, listener) {
           if (!authorized(incoming.headers.get('x-nanosync-capability'), capability))
             return new Response(null, { status: 403 });
@@ -265,19 +276,21 @@ export async function openBoundSync(
           let streaming = false;
           let stream: ReturnType<typeof progressResponse> | undefined;
           try {
-            const payload = request(await boundedJson(incoming.body, lifetime.signal));
+            const editing = incoming.headers.get('x-nanosync-operation') === 'ignore-set';
+            const payload = request(await boundedJson(incoming.body, lifetime.signal, editing ? MAX_IGNORE_BODY : undefined));
+            if (editing !== (payload.operation === 'ignore-set')) return new Response(null, { status: 400 });
             if (payload.root !== root || payload.binding !== binding.connectionId || payload.instance !== options.instanceId)
               return new Response(null, { status: 400 });
             if (!closing) validate({ replica, metadata, lock: ownLock });
             listener.timeout(incoming, 0);
             let cached = replay.get(payload.id);
-            if (cached && cached.operation !== payload.operation) return new Response(null, { status: 400 });
+            if (cached && cached.payload !== JSON.stringify(payload)) return new Response(null, { status: 400 });
             if (!cached && replay.size >= 128) {
               const oldest = [...replay].find(([, entry]) => entry.done);
               if (!oldest) return new Response(null, { status: 429 });
               replay.delete(oldest[0]);
             }
-            const wantsStream = payload.operation !== 'stop-for-removal' && payload.operation !== 'watch-accept' &&
+            const wantsStream = payload.operation !== 'ignore-set' && payload.operation !== 'stop-for-removal' && payload.operation !== 'watch-accept' &&
               !(payload.operation === 'watch' && !continuous);
             if (wantsStream) {
               stream = progressResponse(() => { events.delete(stream!.publish); active--; });
@@ -286,7 +299,7 @@ export async function openBoundSync(
               if (lastEvent && lastEvent.type !== 'complete') stream.publish(lastEvent);
             }
             if (!cached) {
-              cached = { operation: payload.operation, done: false, value: dispatch(payload.operation) };
+              cached = { payload: JSON.stringify(payload), operation: payload.operation, done: false, value: dispatch(payload) };
               replay.set(payload.id, cached);
               const entry = cached;
               const markDone = () => { entry.done = true; };
@@ -349,6 +362,48 @@ export async function openBoundSync(
   if (selected.session) return selected.session;
   validate(selected.target);
   return attached(selected.target, options);
+}
+
+export async function setIgnores(root: string, from: string | { binding: string }, input: { text: string; expectedFileSignature: string }) {
+  root = resolve(root);
+  if (typeof from !== 'string' && (!from || Array.isArray(from) || Object.keys(from).join(',') !== 'binding' || typeof from.binding !== 'string' || !UUID.test(from.binding))) throw new ClientError('INVALID_INPUT', 'Select a saved binding UUID.');
+  const valid = validateIgnoreText(input.text);
+  if (!valid.valid) throw new ClientError('IGNORE_INVALID', `Invalid exclusions-only rules at line ${valid.line}.`);
+  const selected = await withCredentialRegistry(root, async () => {
+    assertNoRemoval(root);
+    const binding = typeof from === 'string' ? discoverConnection(root, from) : records(root).find(item => item.connectionId === from.binding);
+    if (!binding) throw new ClientError('NOT_FOUND', 'Saved binding not found; refresh before editing rules.');
+    const replica = privateDirectory(join(privateDirectory(join(root, 'replicas')), binding.connectionId));
+    const lock = observeSyncLock(replica);
+    if (lock?.live) {
+      try { return { binding, target: { replica, lock, metadata: readMetadata(replica, root, binding.connectionId, lock) } }; }
+      catch { throw failure('OWNER_UNAVAILABLE'); }
+    }
+    const release = acquireSyncLock(replica);
+    let local: ClientLocal | undefined;
+    try {
+      if (existsSync(join(replica, 'local.sqlite'))) local = new ClientLocal(replica, binding.vaultId, binding.deviceId);
+      assertBindingRoot(root, binding);
+      if (local) assertIgnoreBasis(local);
+      let fileSignature: string;
+      try { fileSignature = saveIgnoreFile(binding.root, input.text, input.expectedFileSignature); }
+      catch (error) { if (error instanceof IgnoreError) throw new ClientError(error.code, error.message); throw error; }
+      return { binding, fileSignature };
+    } finally { try { local?.close(); } finally { release(); } }
+  });
+  let fileSignature = selected.fileSignature;
+  if (selected.target) {
+    const value = await send(selected.target, 'ignore-set', undefined, undefined, input);
+    if (value && typeof value === 'object' && 'error' in value) {
+      object(value, ['error']);
+      const error = outcome({ head: null, events: [], error: value.error });
+      result(error);
+    }
+    const response = object(value, ['fileSignature']);
+    if (typeof response.fileSignature !== 'string' || !/^[0-9a-f]{64}$/.test(response.fileSignature)) throw failure('OWNER_UNAVAILABLE');
+    fileSignature = response.fileSignature;
+  }
+  return { version: 1 as const, connectionId: selected.binding.connectionId, fileSignature: fileSignature! };
 }
 
 /** Desktop Quit only: never stop independent CLI hosts or another process's owners. */

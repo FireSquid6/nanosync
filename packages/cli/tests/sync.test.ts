@@ -316,6 +316,27 @@ test("fresh client merges pre-existing local files with remote history", async (
   finally { local.close(); }
 });
 
+test('ignore rename followed by directory-fsync failure invalidates verified status before mutation without watcher timing', async () => {
+  const e = await fixture(), runner = start(e.a);
+  const { clientStatus, observeSyncLock } = await import('@nanosync/client-service');
+  const filesystem = await import('node:fs'), { spyOn } = await import('bun:test');
+  await runner.syncOnce();
+  expect(clientStatus(e.firstDir).bindings[0]!.upToDate).toBe(true);
+  const native = filesystem.fsyncSync;
+  const failure = spyOn(filesystem, 'fsyncSync').mockImplementation(fd => {
+    if (filesystem.readlinkSync(`/proc/self/fd/${fd}`) === e.firstFiles && filesystem.existsSync(join(e.firstFiles, '.nanosyncignore'))) throw Error('directory fsync injected');
+    native(fd);
+  });
+  try { await expect(runner.saveIgnores('*.tmp', 'absent', () => {})).rejects.toThrow('directory fsync injected'); }
+  finally { failure.mockRestore(); }
+  expect(readFileSync(join(e.firstFiles, '.nanosyncignore'), 'utf8')).toBe('*.tmp');
+  expect(clientStatus(e.firstDir).bindings[0]!.upToDate).toBe(false);
+  expect(observeSyncLock(e.a.clientDirectory)?.live).toBe(true);
+  await expect(runner.saveIgnores('# blind retry', 'absent', () => {})).rejects.toMatchObject({ code: 'CONFLICT' });
+  expect(readFileSync(join(e.firstFiles, '.nanosyncignore'), 'utf8')).toBe('*.tmp');
+  await stop(runner);
+});
+
 test("one-shot stale-head sync retains both concurrent edits and retries frozen accepted proposals", async () => {
   const e = await fixture();
   const a = start(e.a), b = start(e.b);
@@ -359,6 +380,15 @@ test("one-shot stale-head sync retains both concurrent edits and retries frozen 
   await stop(resumed);
   expect(await main(["client", "sync", "--client-dir", e.secondDir, "--path", e.secondFiles])).toBe(0);
   expect(readFileSync(join(e.secondFiles, "new"), "utf8")).toBe("published");
+  const { listConflicts, checkedConflictFolder } = await import('@nanosync/client-service');
+  const open = listConflicts(e.secondDir).bindings[0]!;
+  expect(open.conflicts.length).toBeGreaterThan(0);
+  expect(checkedConflictFolder(e.secondDir, open.connectionId, open.conflicts[0]!.id)).toBe(e.secondFiles);
+  expect(listConflicts(e.secondDir).bindings[0]!.conflicts).toEqual(open.conflicts);
+  for (const conflict of open.conflicts) unlinkSync(join(e.secondFiles, conflict.path));
+  expect(listConflicts(e.secondDir).bindings[0]!.conflicts).toEqual(open.conflicts);
+  expect(await main(['client', 'sync', '--client-dir', e.secondDir, '--path', e.secondFiles])).toBe(0);
+  expect(listConflicts(e.secondDir).bindings[0]!.conflicts).toEqual([]);
 });
 
 test("one-shot delete/edit merge retains the deletion and edited conflict copy", async () => {

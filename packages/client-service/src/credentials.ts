@@ -1,9 +1,9 @@
 import { SETTINGS, SETTINGS_LOCK, readSettings, validateSettingsStage, settingsStage } from './settings.ts';
 import { isDeepStrictEqual } from 'node:util';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { randomUUID, createHash } from 'node:crypto';
+import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { baseUrl } from './client.ts';
-import { existsSync, readdirSync, unlinkSync } from 'node:fs';
+import { existsSync, readdirSync, renameSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parseAuthToken, parseDeviceId, decodeCanonicalBase64Url } from '@nanosync/protocol';
 import { ClientError } from './errors.ts';
@@ -15,6 +15,8 @@ import {
   secureReplace,
   syncPrivateDirectory,
 } from './security.ts';
+
+import { assertNoRemoval, removalStatus, pathPresent, REMOVAL, removalStage, validateRemovalStage } from './removal-state.ts';
 
 export type CredentialMode = 'protected-file' | 'os-store';
 interface Descriptor {
@@ -41,6 +43,7 @@ export interface CredentialOptions {
 const MODE = 'credentials.json';
 const MIGRATION = 'credential-migration.json';
 const CLEANUP = 'credential-cleanup.json';
+const cleanupStage = /^credential-cleanup\.json\.[0-9a-f]{32}\.stage$/;
 const leaves = ['servers', 'pending', 'keys'] as const;
 const uuid = (value: unknown) =>
   typeof value === 'string' &&
@@ -65,11 +68,12 @@ function put(path: string, value: unknown) {
   else secureCreate(path, text);
 }
 function remove(path: string) {
-  if (existsSync(path)) {
+  if (pathPresent(path)) {
     secureRead(path, 1_000_000);
     unlinkSync(path);
-    syncPrivateDirectory(resolve(path, '..'));
   }
+  const parent = resolve(path, '..');
+  if (pathPresent(parent)) syncPrivateDirectory(parent);
 }
 function exact(value: object, allowed: string[]) {
   if (
@@ -193,7 +197,12 @@ function validateRecordValue(path: string, value: RecordValue) {
 }
 export function credentialStatus(directory: string) {
   const root = resolve(directory);
-  if (existsSync(root)) privateDirectory(root);
+  if (existsSync(root)) {
+    privateDirectory(root);
+    for (const name of readdirSync(root).filter(name => removalStage.test(name))) validateRemovalStage(join(root, name));
+    for (const name of readdirSync(root).filter(name => cleanupStage.test(name))) validateSettingsStage(join(root, name));
+  }
+  removalStatus(root);
   const saved = descriptor(root);
   const migration = existsSync(join(root, MIGRATION));
   const cleanupPending = existsSync(join(root, CLEANUP));
@@ -219,10 +228,10 @@ export function credentialStatus(directory: string) {
       'replicas',
       'registry-lock',
       'credential-operation',
-      SETTINGS, SETTINGS_LOCK,
+      SETTINGS, SETTINGS_LOCK, REMOVAL,
     ];
     for (const name of readdirSync(root).filter(name => settingsStage.test(name))) validateSettingsStage(join(root, name));
-    if (readdirSync(root).some((name) => !allowed.includes(name) && !settingsStage.test(name)))
+    if (readdirSync(root).some((name) => !allowed.includes(name) && !settingsStage.test(name) && !removalStage.test(name) && !cleanupStage.test(name)))
       stateInvalid('Unrecognized or incomplete client state; do not initialize as empty');
     readSettings(root);
     if (existsSync(join(root, SETTINGS_LOCK))) privateDirectory(join(root, SETTINGS_LOCK));
@@ -339,7 +348,7 @@ export function adoptLegacyCredentials(root: string): void {
 }
 export function initializeCredentials(root: string, mode?: CredentialMode): Descriptor {
   return registry(root, () => {
-    credentialBarrier(root);
+    credentialBarrier(root); assertNoRemoval(root);
     const status = credentialStatus(root);
     if (mode !== undefined && !['protected-file', 'os-store'].includes(mode))
       throw new ClientError('INVALID_INPUT', 'Invalid credential mode');
@@ -439,6 +448,7 @@ export async function readCredentialRecord<T>(
   options: CredentialOptions = {},
 ): Promise<T> {
   return withCredentialRegistry(root, async () => {
+    assertNoRemoval(root);
     if (existsSync(join(root, CLEANUP)))
       throw new ClientError(
         'CREDENTIAL_CLEANUP_PENDING',
@@ -477,7 +487,7 @@ export async function writeCredentialRecord(
   value: RecordValue,
   options: CredentialOptions = {},
 ) {
-  credentialBarrier(root);
+  credentialBarrier(root); assertNoRemoval(root);
   adoptLegacyCredentials(root);
   const saved = descriptor(root);
   if (existsSync(join(root, CLEANUP)))
@@ -530,6 +540,28 @@ interface Cleanup {
   paths: string[];
   references: { path: string; metadata: RecordValue; reference: Reference }[];
 }
+export function assertRemovalCredentialCleanup(root: string, paths: string[], serverId: string | null): void {
+  if (!pathPresent(join(root, CLEANUP))) return;
+  try {
+    const intent = read(join(root, CLEANUP)) as Cleanup;
+    exact(intent, ['version', 'paths', 'references']);
+    if (intent.version !== 1 || !Array.isArray(intent.paths) || !Array.isArray(intent.references) ||
+        JSON.stringify([...intent.paths].sort()) !== JSON.stringify([...paths].sort())) throw new Error('cleanup identity differs');
+    const saved = descriptor(root);
+    if (intent.references.length !== (saved?.mode === 'os-store' ? paths.length : 0) || new Set(intent.references.map(item => item.path)).size !== intent.references.length) throw new Error('cleanup reference inventory differs');
+    for (const item of intent.references) {
+      exact(item, ['path', 'metadata', 'reference']);
+      validateRecord(item.path, item.metadata);
+      if (!saved || !paths.includes(item.path) || item.metadata.serverId !== serverId || 'token' in item.metadata || 'masterKey' in item.metadata) throw new Error('cleanup server differs');
+      const expected = recordReference(item.path, item.metadata, saved);
+      address(saved, item.reference);
+      if (expected.itemId !== item.reference.itemId || expected.generation !== item.reference.generation) throw new Error('cleanup reference differs');
+    }
+  } catch {
+    throw new ClientError('REMOVAL_INVALID', 'Credential cleanup is unsafe or differs from the original removal; preserve private state.');
+  }
+}
+
 async function erase(saved: Descriptor, ref: Reference, options: CredentialOptions) {
   const target = address(saved, ref),
     store = storeFor(options);
@@ -545,8 +577,10 @@ export async function cleanupCredentialRecords(
   root: string,
   paths: string[],
   options: CredentialOptions = {},
+  retainIntent = false,
 ) {
   credentialBarrier(root);
+  if (!retainIntent) assertNoRemoval(root);
   const journalPath = join(root, CLEANUP),
     saved = descriptor(root);
   let intent: Cleanup;
@@ -569,7 +603,12 @@ export async function cleanupCredentialRecords(
         return [{ path, metadata, reference: recordReference(path, value, saved) }];
       });
     intent = { version: 1, paths, references };
-    put(journalPath, intent);
+    const stage = `${journalPath}.${randomBytes(16).toString('hex')}.stage`;
+    secureCreate(stage, JSON.stringify(intent));
+    options.checkpoint?.('cleanup-intent-staged');
+    renameSync(stage, journalPath);
+    options.checkpoint?.('cleanup-intent-published');
+    syncPrivateDirectory(root);
   }
   exact(intent, ['version', 'paths', 'references']);
   if (intent.version !== 1 || !Array.isArray(intent.paths) || !Array.isArray(intent.references))
@@ -588,6 +627,8 @@ export async function cleanupCredentialRecords(
     if (!/^(servers|keys|pending)\/[0-9a-f-]+\.json$/.test(path))
       stateInvalid('invalid cleanup path');
   if (intent.references.length && !saved) stateInvalid('cleanup descriptor missing');
+  // Replay can see an intent whose original publication fsync failed; flush it before erasing secrets.
+  secureRead(journalPath, 1_000_000, true);
   for (const item of intent.references) {
     exact(item, ['path', 'metadata', 'reference']);
     validateRecord(item.path, item.metadata);
@@ -612,13 +653,23 @@ export async function cleanupCredentialRecords(
   }
   for (const path of intent.paths) remove(join(root, path));
   options.checkpoint?.('cleanup-files');
-  remove(journalPath);
+  if (!retainIntent) finishCredentialCleanup(root);
+}
+export function finishCredentialCleanup(root: string): void {
+  const removal = removalStatus(root);
+  if (removal && removal.phase !== 'credentials-complete') throw new ClientError('REMOVAL_PENDING', 'Retain credential inventory until removal completion is durable.');
+  if (removal) secureRead(join(root, REMOVAL), 1_000_000, true);
+  for (const name of readdirSync(root).filter(name => cleanupStage.test(name))) {
+    validateSettingsStage(join(root, name)); unlinkSync(join(root, name));
+  }
+  remove(join(root, CLEANUP));
 }
 export async function resumeCredentialCleanup(
   root: string,
   confirmation: boolean,
   options: CredentialOptions = {},
 ) {
+  assertNoRemoval(root);
   if (!confirmation)
     throw new ClientError('CONFIRMATION_REQUIRED', 'Explicit --confirm-cleanup required');
   return withCredentialOperation(root, () =>
@@ -637,7 +688,7 @@ interface Migration {
   items: { path: string; metadata: RecordValue; reference: Reference }[];
 }
 async function migrationLock<T>(root: string, action: () => Promise<T>) {
-  privateDirectory(root);
+  privateDirectory(root); assertNoRemoval(root);
   const releases = [acquireSyncLock(privateDirectory(join(root, 'registry-lock')))];
   try {
     releases.push(acquireSyncLock(privateDirectory(join(root, 'credential-operation'))));

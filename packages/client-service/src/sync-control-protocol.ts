@@ -5,18 +5,24 @@ import { ClientError } from './errors.ts';
 import type { SyncEvent } from './events.ts';
 
 export const MAX_BODY = 16384;
+export const MAX_IGNORE_BODY = 400 * 1024;
 export const MAX_FRAME = 2048;
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const NONCE = /^[0-9a-f]{32}$/;
 export type Head = { revisionId: string; sequence: number };
-export type Operation = 'sync' | 'watch' | 'watch-accept' | 'stop-for-removal';
+export type Operation = 'sync' | 'watch' | 'watch-accept' | 'stop-for-removal' | 'ignore-set';
 export type ControlRequest = {
   version: 1; id: string; root: string; binding: string; instance: string; operation: Operation;
+  input?: { text: string; expectedFileSignature: string };
 };
 export type Outcome = {
   head: Head | null; events: SyncEvent[]; error: { code: string; exitCode: number } | null;
 };
 const LOCAL_ERRORS = {
+  CONFLICT: 'Ignore rules changed; refresh before saving.',
+  IGNORE_INVALID: 'Invalid exclusions-only ignore rules.',
+  IGNORE_RECOVERY_REQUIRED: 'Recover pending synchronization with its original ignore rules before saving.',
+  REMOVAL_PENDING: 'Removal pending; inspect and explicitly resume its original request.',
   SYNC_PAUSED: 'Sync paused; resume this folder or global syncing before retrying.',
   FOLDER_UNAVAILABLE: 'Folder unavailable; restore its original path and marker, then retry.',
   OWNER_UNAVAILABLE: 'Sync owner unavailable; stop it and retry with a compatible client.',
@@ -142,7 +148,7 @@ export async function streamedOutcome(
   finally { reader.releaseLock(); }
 }
 export async function boundedJson(
-  body: ReadableStream<Uint8Array> | null, signal?: AbortSignal,
+  body: ReadableStream<Uint8Array> | null, signal?: AbortSignal, limit = MAX_BODY,
 ): Promise<unknown> {
   if (!body) throw failure('OWNER_UNAVAILABLE');
   const reader = body.getReader();
@@ -156,7 +162,7 @@ export async function boundedJson(
       const next = await reader.read();
       if (next.done) break;
       size += next.value.length;
-      if (size > MAX_BODY) throw failure('OWNER_UNAVAILABLE');
+      if (size > limit) throw failure('OWNER_UNAVAILABLE');
       chunks.push(next.value);
     }
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
@@ -166,19 +172,24 @@ export async function boundedJson(
   }
 }
 export function request(value: unknown): ControlRequest {
-  const record = object(value, ['version', 'id', 'root', 'binding', 'instance', 'operation']);
+  const editing = !!value && typeof value === 'object' && 'operation' in value && value.operation === 'ignore-set';
+  const record = object(value, ['version', 'id', 'root', 'binding', 'instance', 'operation', ...(editing ? ['input'] : [])]);
+  if (editing) {
+    const input = object(record.input, ['text', 'expectedFileSignature']);
+    if (typeof input.text !== 'string' || Buffer.byteLength(input.text) > 65536 || typeof input.expectedFileSignature !== 'string' || !/^(absent|[0-9a-f]{64})$/.test(input.expectedFileSignature)) throw failure('OWNER_UNAVAILABLE');
+  }
   if (record.version !== 1 || typeof record.id !== 'string' || !UUID.test(record.id) ||
       typeof record.root !== 'string' || record.root.length > 4096 ||
       typeof record.binding !== 'string' || !UUID.test(record.binding) ||
       typeof record.instance !== 'string' || !UUID.test(record.instance) ||
-      !['sync', 'watch', 'watch-accept', 'stop-for-removal'].includes(record.operation as string))
+      !['sync', 'watch', 'watch-accept', 'stop-for-removal', 'ignore-set'].includes(record.operation as string))
     throw failure('OWNER_UNAVAILABLE');
   return record as ControlRequest;
 }
 export function safeError(error: unknown): Outcome['error'] {
   if (error instanceof RemoteError && (PROTOCOL_ERROR_CODES as readonly string[]).includes(error.code))
     return { code: error.code, exitCode: 5 };
-  if (error instanceof ClientError && Object.hasOwn(LOCAL_ERRORS, error.code))
+  if (error instanceof Error && 'code' in error && typeof error.code === 'string' && Object.hasOwn(LOCAL_ERRORS, error.code))
     return { code: error.code, exitCode: 2 };
   return { code: 'OPERATION_FAILED', exitCode: 2 };
 }

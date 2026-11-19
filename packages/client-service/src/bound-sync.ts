@@ -1,3 +1,4 @@
+import { assertNoRemoval } from './removal-state.ts';
 import { recordCredentialUnavailable } from './status.ts';
 import { pauseCauses, readSettings } from './settings.ts';
 import { join } from 'node:path';
@@ -12,6 +13,7 @@ export async function startBoundSync(
   directory: string, from: string, options: Pick<SyncOptions, 'onEvent' | 'now' | 'owner' | 'fetch'> & CredentialOptions = {},
 ): Promise<SyncRunner> {
   return withCredentialRegistry(directory, async () => {
+    assertNoRemoval(directory);
     const binding = discoverConnection(directory, from, true);
     try {
       const info = await authenticatedServer(directory, binding.serverId, options);
@@ -28,6 +30,7 @@ export async function startBoundSync(
           owner: options.owner, now: options.now, fetch: options.fetch,
           validateRoot: () => assertBindingRoot(directory, binding, true),
           beforeWork() {
+            assertNoRemoval(directory);
             const pause = pauseCauses(readSettings(directory), binding.connectionId);
             if (pause.global || pause.binding) throw new ClientError('SYNC_PAUSED', 'Sync paused; resume this folder or global syncing before retrying.');
             assertBindingRoot(directory, binding);

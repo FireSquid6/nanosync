@@ -49,7 +49,10 @@ function state(): DesktopSnapshot {
     freshness: 'observed' as const,
     enginePhase: null,
     progressUnit: 'completed-ciphertext-frames' as const,
-    progress: { upload: { count: 2, bytes: 144 }, download: { count: 3, bytes: 240 } },
+    progress: {
+      upload: { count: 2, bytes: 144 },
+      download: { count: 3, bytes: 240 },
+    },
     facts: {
       heads: {
         observed: { revisionId: deviceId, sequence: 7 },
@@ -77,6 +80,7 @@ function state(): DesktopSnapshot {
     error: null,
   };
   return {
+    removal: null,
     clientRoot: '/temporary/client',
     credentials: {
       mode: 'os-store',
@@ -92,10 +96,20 @@ function state(): DesktopSnapshot {
       globalPaused: false,
       bindingPaused: { [secondId]: true },
       continuousRequested: { [firstId]: 'desktop', [secondId]: 'cli' },
-      lifecycle: { startAtLogin: false, trayEnabled: false, keepSyncingAfterClose: true },
+      lifecycle: {
+        startAtLogin: false,
+        trayEnabled: false,
+        keepSyncingAfterClose: true,
+      },
     },
     connections: [
-      { serverId, deviceId, alias: 'home', url: 'https://example.test', status: 'approved' },
+      {
+        serverId,
+        deviceId,
+        alias: 'home',
+        url: 'https://example.test',
+        status: 'approved',
+      },
     ],
     pending: [],
     nativeEffects: {
@@ -131,7 +145,11 @@ function pause(snapshot: DesktopSnapshot, command: DesktopCommand): DesktopReply
   if (command.type !== 'pause-all' && command.type !== 'pause-folder')
     return { ok: true, snapshot };
   if (command.expectedRevision !== snapshot.settings.revision)
-    return { ok: false, code: 'CONFLICT', message: 'Settings changed. Refresh before retrying.' };
+    return {
+      ok: false,
+      code: 'CONFLICT',
+      message: 'Settings changed. Refresh before retrying.',
+    };
   snapshot.settings.revision++;
   if (command.type === 'pause-all') snapshot.settings.globalPaused = command.paused;
   else snapshot.settings.bindingPaused[command.binding] = command.paused;
@@ -176,7 +194,7 @@ test('folders start directly with real copy identities, orthogonal conflicts, in
   await expect(inspector).toContainText('Paused');
   await expect(inspector).toContainText('2 unresolved conflict(s)');
   await expect(inspector).toContainText('FORBIDDEN');
-  await expect(inspector).toContainText('Current owner counters');
+  await expect(inspector).toContainText('Observed pass counters');
   await expect(inspector).toContainText('Totals unknown');
   await page.getByRole('button', { name: 'Pause all', exact: true }).click();
   await page.getByRole('button', { name: 'Resume all', exact: true }).click();
@@ -338,7 +356,7 @@ test('failed polling demotes cached verified observations and owner counters unt
   await expect(page.locator('.folder-row').first()).not.toContainText('Up to date');
   await expect(page.locator('.healthy-marker')).toHaveCount(0);
   await expect(page.locator('.folder-row').first()).toContainText('stale or unknown');
-  await expect(page.locator('.folder-inspector')).toContainText('Historical owner counters');
+  await expect(page.locator('.folder-inspector')).toContainText('Historical pass counters');
   await expect(page.locator('.folder-inspector')).toContainText('Last observed: Desktop owner');
   fail = false;
   await page.clock.runFor(1500);
@@ -445,4 +463,215 @@ test('dashboard polling unmounts during setup and late replies never clear new s
   } finally {
     release.resolve();
   }
+});
+
+test('manual conflicts, validated ignore CAS and explicit removal have keyboard-accessible themed responsive screens', async ({
+  page,
+}) => {
+  const snapshot = state(),
+    commands: DesktopCommand[] = [];
+  let saved = '*.tmp\n',
+    signature = 'a'.repeat(64);
+  await page.exposeBinding(
+    'desktopPresentation',
+    async (_source, command: DesktopCommand): Promise<DesktopReply> => {
+      commands.push(structuredClone(command));
+      if (command.type === 'conflicts')
+        return {
+          ok: true,
+          snapshot,
+          conflicts: {
+            version: 1,
+            bindings: [
+              {
+                connectionId: firstId,
+                root: '/temporary/documents',
+                issue: null,
+                conflicts: [
+                  {
+                    id: deviceId,
+                    entryId: deviceId,
+                    path: 'notes/conflict-copy.md',
+                    sourceRevisionId: vaultId,
+                  },
+                ],
+              },
+            ],
+          },
+        };
+      if (command.type === 'ignores-validate')
+        return {
+          ok: true,
+          snapshot,
+          validation: command.text.startsWith('!')
+            ? { valid: false, code: 'IGNORE_INVALID', line: 1 }
+            : { valid: true },
+        };
+      if (command.type === 'ignores-set') {
+        expect(command.expectedFileSignature).toBe(signature);
+        saved = command.text;
+        signature = 'b'.repeat(64);
+      }
+      if (command.type === 'ignores-view' || command.type === 'ignores-set')
+        return {
+          ok: true,
+          snapshot,
+          ignores: {
+            version: 1,
+            connectionId: firstId,
+            text: saved,
+            fileSignature: signature,
+          },
+        };
+      if (command.type === 'inspect-disconnect') {
+        const source = snapshot.status!.bindings[0]!;
+        const connection = {
+          version: 1 as const,
+          connectionId: source.connectionId,
+          root: source.root,
+          serverId: source.serverId,
+          vaultId: source.vaultId,
+          deviceId: source.deviceId,
+        };
+        return {
+          ok: true,
+          snapshot,
+          removalPreview: {
+            version: 1,
+            selection: deviceId,
+            bindings: [
+              {
+                connection,
+                ownerPresent: true,
+                rootAvailable: true,
+                dirty: null,
+              },
+            ],
+          },
+        };
+      }
+      return { ok: true, snapshot };
+    },
+  );
+  await page.goto(url);
+  await page.getByRole('button', { name: 'Conflicts', exact: true }).focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('heading', { name: 'Conflicts', exact: true })).toBeVisible();
+  await expect(page.getByText('notes/conflict-copy.md', { exact: true })).toBeVisible();
+  await expect(
+    page.getByText('Only applied manifest reconciliation clears a conflict.', {
+      exact: false,
+    }),
+  ).toBeVisible();
+  await page.getByRole('button', { name: 'Open containing folder' }).click();
+  expect(commands.find((command) => command.type === 'open-conflict')).toEqual({
+    type: 'open-conflict',
+    binding: firstId,
+    conflict: deviceId,
+  });
+  await page.getByRole('button', { name: 'Back to folders' }).click();
+  await page.getByRole('button', { name: 'Edit ignore rules' }).click();
+  await page
+    .getByLabel('.nanosyncignore (maximum 64 KiB UTF-8)', { exact: true })
+    .fill('!PRIVATE_RULE');
+  await expect(page.getByRole('button', { name: 'Save validated rules' })).toBeDisabled();
+  await page.getByRole('button', { name: 'Validate rules' }).click();
+  await expect(page.getByRole('alert')).toContainText('Invalid rules at line 1');
+  await expect(page.getByRole('alert')).not.toContainText('PRIVATE_RULE');
+  await page
+    .getByLabel('.nanosyncignore (maximum 64 KiB UTF-8)', { exact: true })
+    .fill('# local\n*.bak\n');
+  await page.getByRole('button', { name: 'Validate rules' }).click();
+  await page.getByRole('button', { name: 'Save validated rules' }).click();
+  await expect(page.getByText('Ignore rules saved durably.', { exact: false })).toBeVisible();
+  for (const width of [1280, 700]) {
+    await page.setViewportSize({ width, height: 1000 });
+    for (const theme of ['light', 'dark']) {
+      await page.getByLabel('Theme', { exact: true }).selectOption(theme);
+      expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+        true,
+      );
+    }
+  }
+  await page.getByRole('button', { name: 'Back to folders' }).click();
+  await page.getByRole('button', { name: 'Inspect disconnect' }).click();
+  await expect(page.getByRole('heading', { name: 'Review local removal' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Confirm local removal' })).toBeDisabled();
+  await page
+    .getByLabel('Explicitly abandon pending synchronization state', {
+      exact: false,
+    })
+    .check();
+  await page.getByLabel('Explicitly stop affected live owners', { exact: false }).check();
+  await page.getByLabel('I confirm this local removal.', { exact: false }).check();
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  await page.getByRole('button', { name: 'Confirm local removal' }).click();
+  expect(commands.find((command) => command.type === 'remove')).toEqual({
+    type: 'remove',
+    selection: deviceId,
+    force: true,
+    stopOwner: true,
+    confirmed: true,
+  });
+  expect(
+    commands.some((command) =>
+      ['start', 'sync-now', 'pause-all', 'pause-folder'].includes(command.type),
+    ),
+  ).toBe(false);
+});
+
+test('incomplete removal remains visible and explicitly resumable with absent records and locked credentials', async ({
+  page,
+}) => {
+  const snapshot = state(),
+    commands: DesktopCommand[] = [];
+  const source = snapshot.status!.bindings[0]!;
+  snapshot.status = null;
+  snapshot.connections = [];
+  snapshot.credentials.cleanupPending = true;
+  snapshot.removal = {
+    version: 1,
+    requestId: deviceId,
+    kind: 'server',
+    serverId,
+    force: true,
+    phase: 'cleaning-credentials',
+    credentialPaths: [`servers/${serverId}.json`],
+    bindings: [
+      {
+        connection: {
+          version: 1,
+          connectionId: source.connectionId,
+          root: source.root,
+          serverId,
+          vaultId,
+          deviceId,
+        },
+        rootIdentity: { device: '1', inode: '2' },
+        rootWasMissing: false,
+      },
+    ],
+  };
+  await page.exposeBinding(
+    'desktopPresentation',
+    async (_source, command: DesktopCommand): Promise<DesktopReply> => {
+      commands.push(command);
+      return { ok: true, snapshot };
+    },
+  );
+  await page.goto(url);
+  await page.getByRole('button', { name: 'Review removal recovery' }).click();
+  await expect(
+    page.getByRole('heading', {
+      name: 'Incomplete removal — original identities preserved',
+    }),
+  ).toBeVisible();
+  await expect(page.getByText('/temporary/documents — local copy', { exact: false })).toBeVisible();
+  await page.getByRole('button', { name: 'Explicitly resume authorized removal' }).click();
+  expect(commands.find((command) => command.type === 'resume-removal')).toEqual({
+    type: 'resume-removal',
+    requestId: deviceId,
+    confirmed: true,
+  });
 });

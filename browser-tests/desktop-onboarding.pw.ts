@@ -36,6 +36,7 @@ const serverId = '11111111-1111-4111-8111-111111111111',
   binding = '44444444-4444-4444-8444-444444444444';
 function initial(): DesktopSnapshot {
   return {
+    removal: null,
     clientRoot: '/temporary/test-client',
     credentials: {
       mode: 'os-store',

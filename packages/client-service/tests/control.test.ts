@@ -141,6 +141,19 @@ test('a delayed attachment acceptance cannot overwrite a replacement CLI owner p
     await staleWork; await oldWork; await cliWork; http.stop(true);
   }
 });
+test('authenticated ignore replay binds the complete payload and refuses version, size and old-envelope mismatches', async () => {
+  const { root, files, replica } = fixture(); await open(root, files, 'cli');
+  const info = discovery(replica), payload = { ...info.payload, operation: 'ignore-set', input: { text: '# one\n', expectedFileSignature: 'absent' } };
+  const sendEdit = (body: unknown, editing = true) => fetch('http://localhost/control', { unix: info.socket, method: 'POST', headers: { 'content-type': 'application/json', 'x-nanosync-capability': info.capability, ...(editing ? { 'x-nanosync-operation': 'ignore-set' } : {}) }, body: JSON.stringify(body) });
+  const first = await sendEdit(payload); expect(first.status).toBe(200); const saved = await first.json();
+  expect(await (await sendEdit(payload)).json()).toEqual(saved);
+  expect((await sendEdit({ ...payload, input: { ...payload.input, text: '# different' } })).status).toBe(400);
+  expect((await sendEdit({ ...payload, id: randomUUID(), version: 2 })).status).toBe(400);
+  expect((await sendEdit({ ...payload, id: randomUUID(), input: { ...payload.input, text: 'a'.repeat(65537) } })).status).toBe(400);
+  expect((await sendEdit({ ...payload, id: randomUUID() }, false)).status).toBe(400);
+  expect(readFileSync(join(files, '.nanosyncignore'), 'utf8')).toBe('# one\n'); expect(observeSyncLock(replica)?.live).toBe(true);
+});
+
 test('private transport authenticates and rejects incompatible, malformed, misdirected and oversized input', async () => {
   const { root, files, replica } = fixture();
   await open(root, files, 'cli');

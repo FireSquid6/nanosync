@@ -11,7 +11,7 @@ import {
 } from "@nanosync/sync-core";
 import { ClientLocal, type Entry } from "@nanosync/client-local";
 import { IgnoreRules } from "./ignore.ts";
-export { IgnoreRules } from "./ignore.ts";
+export { IgnoreRules, validateIgnoreText, readIgnoreFile, saveIgnoreFile, IgnoreError } from "./ignore.ts";
 export { applyNewFiles, applyNewFiles as applyManifest } from "./apply.ts";
 export { hydrateFile } from "./hydration.ts";
 
@@ -158,11 +158,12 @@ export class LinuxScanner {
   rules() { this.assertRoot(); return new IgnoreRules(this.root); }
   snapshot() { const rules = this.rules(); return [...inventory(this.root, rules)]; }
   /** Read-only full-content check against the last applied inventory, including unscanned edits. */
-  hasUnsyncedChanges(): boolean {
+  async hasUnsyncedChanges(yieldWork: () => Promise<unknown> = () => new Promise(resolve => setImmediate(resolve))): Promise<boolean> {
     const rules = this.rules(), found = this.snapshot();
     const entries = this.local.entries().filter(e => e.kind !== 'tombstone' && !rules.ignores(e.path, e.kind === 'directory'));
     const prior = new Map(entries.map(e => [e.path, e]));
     for (const file of found) {
+      await yieldWork(); this.assertRoot();
       if (!file.path) continue; // Root identity/metadata changes do not constitute user work.
       const old = prior.get(file.path);
       if (!old || old.kind !== file.kind || old.hydration === 'evicted') return true;
@@ -176,6 +177,7 @@ export class LinuxScanner {
             const n = readSync(fd, buffer, 0, Math.min(buffer.length, Number(file.stat.size) - position), position);
             if (!n) throw new Error('file shortened during dirty check');
             hash.update(buffer.subarray(0, n)); position += n;
+            await yieldWork(); this.assertRoot();
           }
           if (!same(fstat(fd), file.stat)) throw new Error('file changed during dirty check');
           if (hash.digest('hex') !== old.fingerprint) return true;

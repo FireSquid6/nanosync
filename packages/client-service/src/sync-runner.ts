@@ -1,7 +1,7 @@
 import type { SyncEvent } from "./events.ts";
 import { randomUUID } from "node:crypto";
 import { ClientLocal } from "@nanosync/client-local";
-import { applyNewFiles, hydrateFile, LinuxScanner, LinuxWatcher, type ScanOptions, type ScanPlan } from "@nanosync/linux-client";
+import { saveIgnoreFile, applyNewFiles, hydrateFile, LinuxScanner, LinuxWatcher, type ScanOptions, type ScanPlan } from "@nanosync/linux-client";
 import { decryptManifest, HttpRemote, IntegrityError, RemoteError, mergeManifests, verifyReferenceSetMac, type ManifestV1, type RemoteOptions } from "@nanosync/sync-core";
 import { parseDeviceId, parseVaultId, type RevisionEnvelope, type VisibleObjectReference } from "@nanosync/protocol";
 import { acquireSyncLock } from "./sync-lock.ts";
@@ -34,6 +34,11 @@ export interface SyncOptions {
   owner?: { origin: "cli" | "desktop"; instanceId: string };
 }
 
+export function assertIgnoreBasis(local: ClientLocal): void {
+  const facts = local.statusFacts();
+  if (Object.values(facts.pending).some(count => count !== 0) || JSON.stringify(facts.heads.accepted) !== JSON.stringify(facts.heads.applied)) throw new ClientError('IGNORE_RECOVERY_REQUIRED', 'Finish interrupted synchronization with its original ignore rules before saving new rules.');
+}
+
 function sameTree(a: ManifestV1, b: ManifestV1): boolean {
   return JSON.stringify(a.entries) === JSON.stringify(b.entries);
 }
@@ -57,6 +62,7 @@ export class SyncRunner {
   private observation!: SyncObservation;
   private watcher?: LinuxWatcher;
   private active?: Promise<{ revisionId: string; sequence: number }>;
+  private maintenance?: Promise<string>;
   private stopped = false;
   private stopping?: Promise<void>;
   private readonly cancellation = new AbortController();
@@ -145,6 +151,7 @@ export class SyncRunner {
       try { this.watcher?.close(); }
       catch (error) { watcherFailure = error; }
       await this.active?.catch(() => {});
+      await this.maintenance?.catch(() => {});
       try { this.local.close(); }
       finally { this.key.fill(0); }
       if (watcherFailure) throw watcherFailure;
@@ -152,7 +159,26 @@ export class SyncRunner {
     })();
   }
 
+  saveIgnores(text: string, expected: string, validate: () => void): Promise<string> {
+    if (this.stopped) return Promise.reject(new ClientError('OWNER_STOPPED', 'Sync owner stopped.'));
+    if (this.maintenance) return Promise.reject(new ClientError('OWNER_BUSY', 'Ignore save already in progress.'));
+    const active = this.active;
+    const work = (async () => {
+      await active?.catch(() => {});
+      if (this.stopped) throw new ClientError('OWNER_STOPPED', 'Sync owner stopped.');
+      validate(); this.scanner.assertRoot();
+      assertIgnoreBasis(this.local);
+      this.observation.verified = false;
+      this.record(this.observation.phase);
+      return saveIgnoreFile(this.scanner.root, text, expected);
+    })();
+    this.maintenance = work;
+    void work.finally(() => { if (this.maintenance === work) this.maintenance = undefined; }).catch(() => {});
+    return work;
+  }
+
   syncOnce(): Promise<{ revisionId: string; sequence: number }> {
+    if (this.maintenance) return this.maintenance.then(() => this.syncOnce());
     if (this.stopped) return Promise.reject(new Error("sync runner stopped"));
     if (this.active) return this.active;
     const work = (async () => {
@@ -236,6 +262,7 @@ export class SyncRunner {
           if (error instanceof ClientError && error.code === "SYNC_PAUSED") this.reportFailure(error);
           else if (shouldSync) { lastPoll = now; this.reportFailure(error); onError(error); }
         }
+        if (this.maintenance) canWork = false;
         if (canWork && this.watcher) {
           try { shouldSync = this.watcher.ready(now) || shouldSync; }
           catch (error) { if (shouldSync) onError(error); }

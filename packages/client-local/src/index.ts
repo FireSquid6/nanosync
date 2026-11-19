@@ -202,7 +202,20 @@ export class ClientLocal implements ChunkJournal {
       throw new StatusReadError("JOURNAL_INVALID");
     }
   }
-  private static readStatusSnapshot(directory: string, vaultId: string, deviceId: string): StatusFacts | null {
+  static readConflicts(directory: string, vaultId: string, deviceId: string) {
+    try {
+      return ClientLocal.readStatusSnapshot(directory, vaultId, deviceId, db => all<{ id: string; entryId: string; path: string; sourceRevisionId: string }>(db,
+        "SELECT conflicts.id,entry_id entryId,path,source_revision sourceRevisionId FROM conflicts JOIN entries ON entries.id=entry_id WHERE state='open' ORDER BY conflicts.id").map(item => {
+          uuid(item.id); uuid(item.entryId); uuid(item.sourceRevisionId);
+          if (!item.path || item.path.startsWith('/') || item.path.split('/').some(part => !part || part === '.' || part === '..') || item.path.includes('\\0')) throw new StatusReadError('JOURNAL_INVALID');
+          return item;
+        })) ?? [];
+    } catch (error) {
+      if (error instanceof StatusReadError) throw error;
+      throw new StatusReadError('JOURNAL_INVALID');
+    }
+  }
+  private static readStatusSnapshot<T = StatusFacts>(directory: string, vaultId: string, deviceId: string, collect: (db: Database) => T = statusFacts as (db: Database) => T): T | null {
     parseVaultId(vaultId); parseDeviceId(deviceId);
     try { secureDir(directory); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
@@ -253,7 +266,7 @@ export class ClientLocal implements ChunkJournal {
         throw new Error("incompatible or corrupt local schema; sync with a compatible client first");
       const identity = row<{ vault: string; device: string }>(db, "SELECT vault,device FROM identity WHERE singleton=1");
       if (!identity || identity.vault !== vaultId || identity.device !== deviceId) throw new Error("conflicting local identity");
-      const facts = statusFacts(db);
+      const facts = collect(db);
       db.exec("COMMIT"); sidecars(filename);
       return facts;
     } finally {

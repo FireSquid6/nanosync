@@ -12,6 +12,16 @@ test('explicit command tree rejects legacy aliases and never guesses a server di
   } finally { err.mockRestore(); }
 });
 
+test('local operation command tree exposes conflict, ignore, containing-folder and removal replay equivalents', async () => {
+  const lines: string[] = [];
+  const out = spyOn(process.stdout, 'write').mockImplementation(value => { lines.push(String(value)); return true; }), err = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    for (const path of [['conflicts', 'view'], ['ignores', 'view'], ['ignores', 'validate'], ['ignores', 'set'], ['removals', 'view'], ['removals', 'resume'], ['open'], ['vaults', 'disconnect'], ['connections', 'remove']]) expect(await main(['client', ...path, '--help'])).toBe(0);
+    const help = lines.join('\n');
+    for (const flag of ['--conflict', '--expected-signature', '--confirm-removal', '--stop-owner']) expect(help).toContain(flag);
+  } finally { out.mockRestore(); err.mockRestore(); }
+});
+
 import { mkdtempSync, mkdirSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

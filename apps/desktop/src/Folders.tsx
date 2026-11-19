@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Button } from '../../../packages/admin-ui/src/paper/Button';
+import { LocalTools } from './LocalTools';
 import { ThemeControl } from '../../../packages/ui-theme/ThemeControl';
 import type { ClientSend } from './App';
 import type { DesktopCommand, DesktopSnapshot } from './rpc';
@@ -67,7 +68,7 @@ function Attention({ binding, runtime }: { binding: Binding; runtime?: string })
         binding.facts.conflicts > 0 && (
           <p className="attention">
             ◇ {binding.facts.conflicts} unresolved conflict(s). Both versions are preserved; resolve
-            files manually and sync. Conflict tools arrive separately.
+            files manually and sync. Open Conflicts to inspect preserved copies.
           </p>
         )
       )}
@@ -100,8 +101,8 @@ function Progress({ binding }: { binding: Binding }) {
         <>
           <p>
             {binding.freshness === 'observed'
-              ? 'Current owner counters'
-              : 'Historical owner counters (stale or unknown)'}
+              ? 'Observed pass counters'
+              : 'Historical pass counters (stale or unknown)'}
             :
           </p>
           <p>
@@ -127,6 +128,7 @@ export function Folders({
   onConnect(): void;
 }) {
   const [snapshot, setSnapshot] = useState(initial);
+  const [tools, setTools] = useState<'conflicts' | 'ignores' | 'removal' | 'connections'>();
   const [selectedId, setSelectedId] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -220,7 +222,23 @@ export function Folders({
     snapshot?.connections.find((item) => item.serverId === binding.serverId);
   const decision = snapshot?.credentials;
   const secretBlocked =
-    !decision || decision.mode !== 'os-store' || decision.migrationPending || decision.cleanupPending;
+    !decision ||
+    decision.mode !== 'os-store' ||
+    decision.migrationPending ||
+    decision.cleanupPending;
+  if (tools && snapshot)
+    return (
+      <LocalTools
+        send={send}
+        initial={snapshot}
+        binding={selected?.connectionId}
+        mode={tools}
+        onBack={() => {
+          setTools(undefined);
+          void refresh();
+        }}
+      />
+    );
   return (
     <div className="nv-root desktop folders">
       <header>
@@ -230,7 +248,20 @@ export function Folders({
       <div className="desktop-layout">
         <nav aria-label="Client">
           <strong aria-current="page">Folders</strong>
-          <p>Conflicts — not yet available</p>
+          <Button
+            variant="quiet"
+            disabled={busy || !snapshot}
+            onClick={() => setTools('conflicts')}
+          >
+            Conflicts
+          </Button>
+          <Button
+            variant="quiet"
+            disabled={busy || !snapshot}
+            onClick={() => setTools('connections')}
+          >
+            Connections / removal
+          </Button>
           <Button variant="quiet" disabled={busy} onClick={onConnect}>
             Connections / setup
           </Button>
@@ -274,6 +305,17 @@ export function Folders({
               Refresh observed status
             </Button>
           </div>
+          {snapshot?.removal && (
+            <section className="folder-message">
+              <p>
+                ◇ Removal incomplete. Original binding identities are preserved; normal work is
+                blocked.
+              </p>
+              <Button disabled={busy} onClick={() => setTools('removal')}>
+                Review removal recovery
+              </Button>
+            </section>
+          )}
           {error && <p role="alert">◇ {error}</p>}
           {readError && (
             <p role="alert">◇ {readError} Displayed data is not a current observation.</p>
@@ -484,7 +526,10 @@ export function Folders({
                           disabled={busy || !!secretBlocked}
                           onClick={() =>
                             void act(
-                              { type: 'sync-now', binding: selected.connectionId },
+                              {
+                                type: 'sync-now',
+                                binding: selected.connectionId,
+                              },
                               'One-shot pass completed. This does not enable continuous intent or prove current health.',
                             )
                           }
@@ -495,12 +540,23 @@ export function Folders({
                           disabled={busy}
                           onClick={() =>
                             void act(
-                              { type: 'open-folder', binding: selected.connectionId },
+                              {
+                                type: 'open-folder',
+                                binding: selected.connectionId,
+                              },
                               'Checked folder opened in the system file manager.',
                             )
                           }
                         >
                           Open local folder
+                        </Button>
+                      </div>
+                      <div className="nv-actions">
+                        <Button disabled={busy} onClick={() => setTools('ignores')}>
+                          Edit ignore rules
+                        </Button>
+                        <Button disabled={busy} onClick={() => setTools('removal')}>
+                          Inspect disconnect
                         </Button>
                       </div>
                       <details>

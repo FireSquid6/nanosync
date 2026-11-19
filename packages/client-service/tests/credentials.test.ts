@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { credentialStatus, initializeCredentials, desktopCredentials } from '../src/index.ts';
+import { credentialStatus, initializeCredentials, desktopCredentials, removalStatus, resumeRemoval } from '../src/index.ts';
 
 test('new roots require explicit mode; desktop refuses file mode without converting it', async () => {
   const root = mkdtempSync(join(tmpdir(), 'nanosync-credentials-'));
@@ -291,7 +291,7 @@ test('removal cleanup remains retryable and never reports another server removed
     await expect(
       removeServerConnection(root, second.serverId, false, { store }),
     ).rejects.toMatchObject({
-      code: 'CREDENTIAL_CLEANUP_PENDING',
+      code: 'REMOVAL_PENDING',
     });
     store.locked = true;
     await expect(
@@ -437,7 +437,8 @@ test('cleanup resumes after metadata deletion using only its durable inventory',
       }),
     ).rejects.toThrow('crash');
     expect(servers(root)).toEqual([]);
-    await resumeCredentialCleanup(root, true, { store });
+    await expect(resumeCredentialCleanup(root, true, { store })).rejects.toMatchObject({ code: 'REMOVAL_PENDING' });
+    await resumeRemoval(root, removalStatus(root)!.requestId, true, { store });
     expect(credentialStatus(root).cleanupPending).toBe(false);
     expect(store.values.size).toBe(0);
   } finally {

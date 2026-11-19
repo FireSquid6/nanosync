@@ -3,10 +3,15 @@ import type {
   RemoteVault,
   LifecyclePreferences,
   EnrollmentResult,
+  listConflicts,
+  viewIgnores,
+  inspectRemoval,
 } from '@nanosync/client-service';
 
 export type DesktopCommand =
-  | { type: 'snapshot' | 'initialize' | 'cancel-enrollment' | 'pick-folder' | 'quit' }
+  | {
+      type: 'snapshot' | 'initialize' | 'cancel-enrollment' | 'pick-folder' | 'quit';
+    }
   | {
       type: 'migrate' | 'resume-migration' | 'rollback-migration' | 'resume-cleanup';
       confirmed: true;
@@ -36,10 +41,39 @@ export type DesktopCommand =
       selection: string;
       confirmNonempty: boolean;
     }
-  | { type: 'settings'; lifecycle: LifecyclePreferences; expectedRevision: number }
+  | {
+      type: 'settings';
+      lifecycle: LifecyclePreferences;
+      expectedRevision: number;
+    }
   | { type: 'start' | 'sync-now' | 'open-folder'; binding: string }
   | { type: 'pause-all'; paused: boolean; expectedRevision: number }
-  | { type: 'pause-folder'; binding: string; paused: boolean; expectedRevision: number }
+  | {
+      type: 'pause-folder';
+      binding: string;
+      paused: boolean;
+      expectedRevision: number;
+    }
+  | { type: 'conflicts' }
+  | { type: 'open-conflict'; binding: string; conflict: string }
+  | { type: 'ignores-view'; binding: string }
+  | { type: 'ignores-validate'; text: string }
+  | {
+      type: 'ignores-set';
+      binding: string;
+      text: string;
+      expectedFileSignature: string;
+    }
+  | { type: 'inspect-disconnect'; binding: string }
+  | { type: 'inspect-server-removal'; serverId: string }
+  | {
+      type: 'remove';
+      selection: string;
+      force: boolean;
+      stopOwner: boolean;
+      confirmed: true;
+    }
+  | { type: 'resume-removal'; requestId: string; confirmed: true }
   | { type: 'administration'; urlIdentity: string };
 export type DesktopSnapshot = OnboardingSnapshot & {
   clientRoot: string;
@@ -57,9 +91,18 @@ export type DesktopReply =
       cancelled?: boolean;
       binding?: string;
       started?: boolean;
+      conflicts?: ReturnType<typeof listConflicts>;
+      ignores?: ReturnType<typeof viewIgnores>;
+      validation?: { valid: true } | { valid: false; code: string; line: number };
+      removalPreview?: Awaited<ReturnType<typeof inspectRemoval>> & {
+        selection: string;
+      };
     }
   | { ok: false; code: string; message: string };
 export type DesktopRPC = {
-  bun: { requests: { client: { params: DesktopCommand; response: DesktopReply } }; messages: {} };
+  bun: {
+    requests: { client: { params: DesktopCommand; response: DesktopReply } };
+    messages: {};
+  };
   webview: { requests: {}; messages: {} };
 };

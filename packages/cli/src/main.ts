@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import {
   clientStatus, setPaused, selectSavedBinding, readPreferences, setLifecycle, checkedBindingRoot,
+  listConflicts, checkedConflictFolder, viewIgnores, validateIgnoreText, readIgnoreFile, setIgnores, inspectRemoval, removalStatus, resumeRemoval, stopBoundSyncForRemoval,
   baseUrl, privateDirectory, secureCreate, secureRead, openBoundSync, listRemoteVaults,
   resolveRemoteVault, connectRegisteredVault, discoverConnection, records,
   disconnectConnections, removeServerConnection, enrollServer, key, keyWritePending, server as storedServer,
@@ -248,8 +249,10 @@ async function execute(args: string[], presentation: CliOutput): Promise<number>
           if (response.status === 'denied' || response.status === 'expired') { exitCode = 4; resultCode = response.status === 'denied' ? 'ENROLLMENT_DENIED' : 'ENROLLMENT_EXPIRED'; }
         } finally { process.off('SIGINT', stop); }
       });
-    flags(connections.command('remove'), ...clientFlags, ...common, '--server <alias-or-id>', '--force').action(async (_o, command) => {
-      const info = await selectServer(command), dir = root(command);
+    flags(connections.command('remove'), ...clientFlags, ...common, '--server <alias-or-id>', '--force', '--stop-owner').action(async (_o, command) => {
+      const dir = root(command), pending = removalStatus(dir);
+      const info = pending?.kind === 'server' && opts(command).server === pending.serverId ? { serverId: pending.serverId! } : await selectServer(command);
+      if (opts(command).stopOwner && !pending) for (const binding of records(dir).filter(item => item.serverId === info.serverId)) await stopBoundSyncForRemoval(dir, binding.root);
       output().warning('Local removal only: remote device access is NOT revoked. Files and remote data are preserved. --force discards pending synchronization state.');
       await removeServerConnection(dir, info.serverId, !!opts(command).force);
       result = {serverId:info.serverId, removed:true, remotelyRevoked:false};
@@ -277,14 +280,38 @@ async function execute(args: string[], presentation: CliOutput): Promise<number>
         result = connectRegisteredVault(dir, destination, info.serverId, vault.vaultId, info.deviceId, confirmed);
         if (presentation.json) output().info('Connected; no files transferred. Next: nanosync client sync');
       });
-    flags(bindings.command('disconnect'), ...clientFlags, ...common, '--path <directory>', '--force').action(async (_o, command) => {
-      const dir = root(command), binding = discoverConnection(dir, opts(command).path ?? process.cwd(), !!opts(command).force);
+    flags(bindings.command('disconnect'), ...clientFlags, ...common, '--path <directory>', '--force', '--stop-owner').action(async (_o, command) => {
+      const dir = root(command), binding = selectSavedBinding(dir, opts(command).path ?? process.cwd());
+      if (opts(command).stopOwner && !removalStatus(dir)) await stopBoundSyncForRemoval(dir, binding.root);
       if (opts(command).force) output().warning('Disconnect discards pending synchronization state. Local files and remote data are preserved.');
-      disconnectConnections(dir, [binding], !!opts(command).force); result = {connectionId:binding.connectionId, disconnected:true, filesPreserved:true};
+      await disconnectConnections(dir, [binding], !!opts(command).force); result = {connectionId:binding.connectionId, disconnected:true, filesPreserved:true};
     });
-    flags(client.command('open'), ...clientFlags, ...common, '--path <directory>').action(async (_o, command) => {
+    const conflicts = flags(client.command('conflicts'), ...clientFlags, ...common);
+    flags(conflicts.command('view'), ...clientFlags, ...common, '--path <directory>').action(async (_o, command) => {
+      result = { ...listConflicts(root(command), opts(command).path), instructions: 'Edit desired files and deliberately remove unwanted conflict copies, then sync. Only applied manifest reconciliation clears conflicts.' };
+    });
+    const ignores = flags(client.command('ignores'), ...clientFlags, ...common);
+    flags(ignores.command('view'), ...clientFlags, ...common, '--path <directory>').action(async (_o, command) => { result = viewIgnores(root(command), opts(command).path ?? process.cwd()); });
+    flags(ignores.command('validate'), ...clientFlags, ...common, '--file <protected-file>', '--path <directory>').action(async (_o, command) => {
+      result = validateIgnoreText(readIgnoreFile(await need(command, 'file'), true).text);
+      const validation = result as ReturnType<typeof validateIgnoreText>;
+      if (!validation.valid) throw new CliError('IGNORE_INVALID', `Invalid exclusions-only rules at line ${validation.line}.`);
+    });
+    flags(ignores.command('set'), ...clientFlags, ...common, '--file <protected-file>', '--path <directory>', '--expected-signature <signature>').action(async (_o, command) => {
+      result = await setIgnores(root(command), opts(command).path ?? process.cwd(), { text: readIgnoreFile(await need(command, 'file'), true).text, expectedFileSignature: await need(command, 'expected-signature') });
+    });
+    const removals = flags(client.command('removals'), ...clientFlags, ...common);
+    flags(removals.command('view'), ...clientFlags, ...common, '--path <directory>', '--server <alias-or-id>').action(async (_o, command) => {
+      const pending = removalStatus(root(command));
+      result = { version: 1, pending, inspection: pending ? null : opts(command).server ? await inspectRemoval(root(command), { serverId: (await selectServer(command)).serverId }) : opts(command).path ? await inspectRemoval(root(command), { binding: selectSavedBinding(root(command), opts(command).path).connectionId }) : null };
+    });
+    flags(removals.command('resume'), ...clientFlags, ...common, '--request-id <uuid>', '--confirm-removal').action(async (_o, command) => {
+      await resumeRemoval(root(command), await need(command, 'request-id'), !!opts(command).confirmRemoval);
+      result = { version: 1, completed: true, filesPreserved: true, remotelyRevoked: false };
+    });
+    flags(client.command('open'), ...clientFlags, ...common, '--path <directory>', '--conflict <uuid>').action(async (_o, command) => {
       const directory = root(command), binding = selectSavedBinding(directory, opts(command).path ?? process.cwd());
-      await openFolder(checkedBindingRoot(directory, binding.connectionId));
+      await openFolder(opts(command).conflict ? checkedConflictFolder(directory, binding.connectionId, parseVaultId(opts(command).conflict)) : checkedBindingRoot(directory, binding.connectionId));
       result = { connectionId: binding.connectionId, opened: true };
     });
     flags(client.command('status'), ...clientFlags, ...common, '--path <directory>').action(async (_o, command) => {

@@ -19,6 +19,13 @@
 .desktop [role=alert] { border-left: 2px solid var(--fg-link); padding-left: 14px; }
 .desktop article { padding-bottom: 18px; border-bottom: 1px solid var(--fg-border); }
 .desktop .verification { letter-spacing: 2px; }
+.local-tools main { max-width: 960px; margin: auto; }
+.local-tools section { padding: 20px 0; border-bottom: 1px solid var(--fg-border); }
+.local-tools label { display: block; margin: 16px 0; }
+.local-tools textarea { display: block; box-sizing: border-box; width: 100%; padding: 12px; background: var(--fg-code); color: var(--fg-text); border: 1px solid var(--fg-border); resize: vertical; font: inherit; font-family: monospace; }
+.local-tools li { overflow-wrap: anywhere; margin-bottom: 18px; }
+.local-tools .nv-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+.local-tools input[type=checkbox] { margin-right: 10px; }
 :root { --folder-good: #427b58; }
 .healthy-marker { color: var(--folder-good); }
 .attention { color: var(--fg-link); }

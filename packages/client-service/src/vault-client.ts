@@ -1,3 +1,4 @@
+import { assertNoRemoval } from './removal-state.ts';
 import { credentialBarrier, credentialMetadata, withCredentialOperation, readCredentialRecord, writeCredentialRecord, cleanupCredentialRecords, initializeCredentials, withCredentialRegistry, type CredentialOptions, type CredentialMode } from "./credentials.ts";
 import type { EnrollmentEvent } from "./events.ts";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -34,7 +35,7 @@ export function server(root: string, choice?: string): ServerMetadata {
   return selected[0]!;
 }
 export async function key(root: string, serverId: string, vaultId: string, options: CredentialOptions = {}): Promise<Uint8Array | null> {
-  credentialBarrier(root);
+  credentialBarrier(root); assertNoRemoval(root);
   parseDeviceId(serverId); parseDeviceId(vaultId);
   const path = `keys/${serverId}-${vaultId}.json`;
   if (!existsSync(join(dir(root, 'keys'), `${serverId}-${vaultId}.json`))) return null;
@@ -229,6 +230,7 @@ async function enrollLocked(root: string, url: string, password: string | undefi
 }
 
 export async function unlockVault(root: string, info: ServerMetadata, vaultId: string, secret: string, options: CredentialOptions = {}): Promise<void> {
+  assertNoRemoval(root);
   return withCredentialOperation(root, async () => {
   const credential = await authenticatedServer(root, info.serverId, options);
   const wrap = await api(credential.baseUrl, "/v1/recovery-wrap", { headers: { "x-nanosync-vault-id": vaultId } }, credential.token);

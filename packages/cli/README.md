@@ -383,6 +383,45 @@ for a clean replica; `MOVE_RECOVERY_REQUIRED` requires restoring/inspecting inte
 state rather than silently discarding it. Same-inode renames retain pending recovery;
 unscanned copies with no recovery/history can still be selected explicitly. No
 journal reindexing or automatic abandonment is performed. Force disconnect preserves files
-and remains subject to ownership locks; the later removal-recovery upgrade is not
-part of these commands. Stop old executables before upgrading: older owners cannot
-be made to honor the new pause settings.
+and remains subject to ownership locks. Stop old executables before upgrading: older
+owners cannot be made to honor new pause, maintenance or removal barriers.
+
+## Conflicts, ignore editing and durable removal
+
+See [shared local operation contracts](../../docs/desktop-local-operations.md) for
+exact result schemas, recovery phases and safety limits. CLI additions:
+
+```text
+client conflicts view [--path DIRECTORY]
+client open [--path DIRECTORY] [--conflict UUID]
+client ignores view [--path DIRECTORY]
+client ignores validate --file PROTECTED_FILE [--path DIRECTORY]
+client ignores set [--path DIRECTORY] --file PROTECTED_FILE --expected-signature SIGNATURE
+client removals view [--path DIRECTORY | --server ALIAS_OR_ID]
+client removals resume --request-id UUID --confirm-removal
+```
+
+Ignore files are bounded 64-KiB fatal UTF-8, owned/regular/nlink-1 mode-0600 input;
+empty input is valid. Use the signature from view (`absent` or SHA256). Validation
+uses the existing exclusions-only dialect, without printing invalid pattern text.
+Saving retains the actual owner's lock/origin and start/pause intent; it starts no
+work. Interrupted durable work requires recovery using its original rules first.
+A final checked signature comparison precedes atomic rename/fsync; POSIX rename
+is not a kernel conditional exchange against noncooperating external editors.
+
+Conflicts have no acknowledge/resolve command: edit/remove unwanted preserved
+copies deliberately and sync; applied-manifest reconciliation is authoritative.
+The conflict UUID option opens only its checked containing directory.
+
+Existing disconnect/server-remove flags and success shapes remain unchanged;
+`--stop-owner` is added as separate explicit consent to safe handoff. `--yes` never
+means `--force`, `--stop-owner` or `--confirm-removal`. Full content inventory includes
+unscanned edits and yields during streamed hashing. A saved missing root requires
+force; it is never recreated or scanned as empty. Foreign markers/replacement roots
+and live lock contention are never bypassed by force. Partial removal persists
+original identities in a secret-free intent and blocks normal mutation/start;
+nonsecret listing and explicit removals resume remain available after records or
+aliases disappear. Resume retains the existing provider cleanup inventory until
+the outer operation is durably complete. Files, conflict copies, ignore rules and
+remote data are preserved; remote access is not revoked. New local safety errors
+are exit 2, using the existing version-1 JSON envelopes/streams.

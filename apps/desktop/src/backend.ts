@@ -20,6 +20,17 @@ import {
   setLifecycle,
   setPaused,
   checkedBindingRoot,
+  listConflicts,
+  checkedConflictFolder,
+  viewIgnores,
+  validateIgnoreText,
+  setIgnores,
+  inspectRemoval,
+  resumeRemoval,
+  disconnectConnections,
+  removeServerConnection,
+  stopBoundSyncForRemoval,
+  withCredentialRegistry,
   openBoundSync,
   records,
   readPreferences,
@@ -52,6 +63,15 @@ const fields: Record<DesktopCommand['type'], string[]> = {
   'open-folder': ['binding'],
   'pause-all': ['paused', 'expectedRevision'],
   'pause-folder': ['binding', 'paused', 'expectedRevision'],
+  conflicts: [],
+  'open-conflict': ['binding', 'conflict'],
+  'ignores-view': ['binding'],
+  'ignores-validate': ['text'],
+  'ignores-set': ['binding', 'text', 'expectedFileSignature'],
+  'inspect-disconnect': ['binding'],
+  'inspect-server-removal': ['serverId'],
+  remove: ['selection', 'force', 'stopOwner', 'confirmed'],
+  'resume-removal': ['requestId', 'confirmed'],
   administration: ['urlIdentity'],
 };
 export function validateCommand(value: unknown): DesktopCommand {
@@ -64,9 +84,19 @@ export function validateCommand(value: unknown): DesktopCommand {
   const keys = ['type', ...fields[object.type as DesktopCommand['type']]];
   if (Object.keys(object).sort().join(',') !== keys.sort().join(',')) return invalid();
   for (const [name, item] of Object.entries(object)) {
-    if (['serverId', 'vaultId', 'selection', 'binding'].includes(name)) {
+    if (name === 'text') {
+      if (typeof item !== 'string' || Buffer.byteLength(item) > 65536) return invalid();
+    } else if (name === 'expectedFileSignature') {
+      if (typeof item !== 'string' || !/^(absent|[0-9a-f]{64})$/.test(item)) return invalid();
+    } else if (
+      ['serverId', 'vaultId', 'selection', 'binding', 'conflict', 'requestId'].includes(name)
+    ) {
       if (typeof item !== 'string' || !UUID.test(item)) return invalid();
-    } else if (['fresh', 'retryCredentialWrite', 'confirmNonempty', 'paused'].includes(name)) {
+    } else if (
+      ['fresh', 'retryCredentialWrite', 'confirmNonempty', 'paused', 'force', 'stopOwner'].includes(
+        name,
+      )
+    ) {
       if (typeof item !== 'boolean') return invalid();
     } else if (name === 'confirmed') {
       if (item !== true) return invalid();
@@ -91,6 +121,18 @@ export function validateCommand(value: unknown): DesktopCommand {
   return value as DesktopCommand;
 }
 const messages: Record<string, string> = {
+  REMOVAL_PENDING:
+    'Removal is incomplete. Inspect its preserved original identities and explicitly resume; normal work is blocked.',
+  REMOVAL_INVALID:
+    'Removal state is unsafe or changed. Preserve private state and inspect it; do not reset it.',
+  UNSYNCED_WORK:
+    'Possible unsynced work remains. Explicit abandonment is required; local files and remote data are preserved.',
+  CONNECTION_IN_USE:
+    'Folders remain attached. Disconnect them or explicitly acknowledge abandonment.',
+  IGNORE_INVALID:
+    'Invalid exclusions-only ignore rules. Validate for a safe line number before saving.',
+  IGNORE_RECOVERY_REQUIRED:
+    'Finish interrupted synchronization with its original ignore rules before saving new rules.',
   INVALID_INPUT: 'Invalid input. Check your entries and retry.',
   INPUT_REQUIRED: 'Complete the required fields.',
   CONFLICT: 'Saved state changed or this choice is already in use. Refresh and retry.',
@@ -165,6 +207,10 @@ export function createDesktopBackend(
 ) {
   const instanceId = randomUUID();
   const administration = new Map<string, string>();
+  const removalSelections = new Map<
+    string,
+    { target: { binding: string } | { serverId: string }; bindings: string }
+  >();
   const runtimeErrors: Record<string, string> = {};
   type Running = {
     session?: BoundSyncSession;
@@ -203,7 +249,10 @@ export function createDesktopBackend(
     const binding = records(root).find((item) => item.connectionId === bindingId);
     if (!binding) throw new ClientError('NOT_FOUND', 'Binding not found');
     const ready = Promise.withResolvers<void>();
-    const entry: Running = { controller: new AbortController(), accepted: ready.promise };
+    const entry: Running = {
+      controller: new AbortController(),
+      accepted: ready.promise,
+    };
     running.set(bindingId, entry);
     entry.done = (async () => {
       try {
@@ -304,6 +353,85 @@ export function createDesktopBackend(
       const data: Omit<Extract<DesktopReply, { ok: true }>, 'ok' | 'snapshot'> = {};
       switch (command.type) {
         case 'snapshot':
+          break;
+        case 'conflicts':
+          data.conflicts = listConflicts(root);
+          break;
+        case 'open-conflict': {
+          const path = checkedConflictFolder(root, command.binding, command.conflict);
+          if (!native.openFolder)
+            throw new ClientError('NATIVE_INTEGRATION_UNAVAILABLE', 'Folder opener unavailable');
+          if (!(await native.openFolder(path)).ok)
+            throw new ClientError('OPEN_FAILED', 'Folder opening failed');
+          break;
+        }
+        case 'ignores-view':
+          data.ignores = viewIgnores(root, checkedBindingRoot(root, command.binding));
+          break;
+        case 'ignores-validate':
+          data.validation = validateIgnoreText(command.text);
+          break;
+        case 'ignores-set':
+          await setIgnores(root, { binding: command.binding }, {
+            text: command.text,
+            expectedFileSignature: command.expectedFileSignature,
+          });
+          data.ignores = viewIgnores(root, checkedBindingRoot(root, command.binding));
+          break;
+        case 'inspect-disconnect':
+        case 'inspect-server-removal': {
+          const target =
+            command.type === 'inspect-disconnect'
+              ? { binding: command.binding }
+              : { serverId: command.serverId };
+          const inspection = await inspectRemoval(root, target),
+            selection = randomUUID();
+          removalSelections.clear();
+          removalSelections.set(selection, {
+            target,
+            bindings: JSON.stringify(
+              inspection.bindings
+                .map((item) => item.connection)
+                .sort((left, right) => left.connectionId.localeCompare(right.connectionId)),
+            ),
+          });
+          data.removalPreview = { ...inspection, selection };
+          break;
+        }
+        case 'remove': {
+          const choice = removalSelections.get(command.selection);
+          if (!choice) throw new ClientError('SELECTION_CHANGED', 'Inspect removal again.');
+          const target = choice.target,
+            force = command.force;
+          const selectedBindings = () =>
+            records(root)
+              .filter((item) =>
+                'binding' in target
+                  ? item.connectionId === target.binding
+                  : item.serverId === target.serverId,
+              )
+              .sort((left, right) => left.connectionId.localeCompare(right.connectionId));
+          if (JSON.stringify(selectedBindings()) !== choice.bindings)
+            throw new ClientError('SELECTION_CHANGED', 'Attached folders changed; inspect again.');
+          if (command.stopOwner)
+            for (const binding of selectedBindings())
+              await stopBoundSyncForRemoval(root, binding.root);
+          await withCredentialRegistry(root, async () => {
+            const bindings = selectedBindings();
+            if (JSON.stringify(bindings) !== choice.bindings)
+              throw new ClientError(
+                'SELECTION_CHANGED',
+                'Attached folders changed; inspect again.',
+              );
+            if ('binding' in target)
+              await disconnectConnections(root, bindings, force, credentials);
+            else await removeServerConnection(root, target.serverId, force, credentials);
+          });
+          removalSelections.delete(command.selection);
+          break;
+        }
+        case 'resume-removal':
+          await resumeRemoval(root, command.requestId, command.confirmed, credentials);
           break;
         case 'cancel-enrollment':
           enrollment?.abort();
@@ -415,7 +543,10 @@ export function createDesktopBackend(
                   server(root, command.serverId),
                   command.vaultId,
                   command.recovery,
-                  { ...credentials, retryCredentialWrite: command.retryCredentialWrite },
+                  {
+                    ...credentials,
+                    retryCredentialWrite: command.retryCredentialWrite,
+                  },
                 );
               } finally {
                 command.recovery = '';
@@ -533,6 +664,7 @@ export function createDesktopBackend(
   async function resumeDesktopWork() {
     const state = snapshot();
     if (
+      state.removal ||
       state.credentials.mode !== 'os-store' ||
       state.credentials.migrationPending ||
       state.credentials.cleanupPending

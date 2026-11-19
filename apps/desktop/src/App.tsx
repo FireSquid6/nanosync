@@ -20,7 +20,7 @@ export function App({ send }: { send: ClientSend }) {
           return;
         }
         setInitial(reply.snapshot);
-        setScreen(reply.snapshot.status?.bindings.length ? 'folders' : 'setup');
+        setScreen(reply.snapshot.removal || reply.snapshot.status?.bindings.length ? 'folders' : 'setup');
       })
       .catch(() => {
         if (active) setError('Client state unavailable. Retry without resetting local state.');

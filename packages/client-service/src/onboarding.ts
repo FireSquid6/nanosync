@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { removalStatus, assertNoRemoval } from './removal-state.ts';
 import { present } from './settings.ts';
 import { enrollmentVerificationCode } from '@nanosync/protocol';
 import { credentialDecision, type CredentialOptions } from './credentials.ts';
@@ -16,12 +17,14 @@ import {
 } from './vault-client.ts';
 
 export function onboardingSnapshot(root: string) {
+  const removal = removalStatus(root);
   const credentials = credentialDecision(root);
   const settings = readPreferences(root);
   const blocked =
     credentials.mode === 'uninitialized' || credentials.migrationPending || credentials.cleanupPending;
   return {
     credentials,
+    removal,
     settings,
     nativeEffects: {
       startup: 'not-installed',
@@ -40,10 +43,11 @@ export function onboardingSnapshot(root: string) {
           status: Date.now() >= item.expiresAtMs ? 'expired' : (item.status ?? 'pending'),
           verificationCode: enrollmentVerificationCode(item.deviceId, item.fingerprint),
         })),
-    status: blocked ? null : clientStatus(root),
+    status: blocked || removal ? null : clientStatus(root),
   };
 }
 export function requireDesktopCredentials(root: string): void {
+  assertNoRemoval(root);
   const decision = credentialDecision(root);
   if (decision.migrationPending)
     throw new ClientError('CREDENTIAL_MIGRATION_PENDING', 'Resume credential migration first.');

@@ -2,6 +2,7 @@ import { join, resolve } from 'node:path';
 import { ClientLocal, parseStatusFacts, StatusReadError, type StatusFacts } from '@nanosync/client-local';
 import { parseDeviceId, PROTOCOL_ERROR_CODES } from '@nanosync/protocol';
 import { RemoteError } from '@nanosync/sync-core';
+import { removalStatus } from './removal-state.ts';
 import { records, discoverConnection, assertBindingRoot, type Connection } from './connections.ts';
 import { readSettings, pauseCauses, present } from './settings.ts';
 import { privateDirectory, secureCreate, secureRead, secureReplace } from './security.ts';
@@ -34,7 +35,7 @@ const phases: SyncPhase[] = [
 ];
 const localCodes = [
   'SYNC_PAUSED', 'FOLDER_UNAVAILABLE', 'CREDENTIALS_UNAVAILABLE',
-  'CREDENTIALS_LOCKED', 'OPERATION_FAILED',
+  'CREDENTIALS_LOCKED', 'OPERATION_FAILED', 'REMOVAL_PENDING',
 ];
 const observationKeys = [
   'attentionError', 'enginePhase', 'error', 'facts', 'lastRemoteCheck', 'lastSuccess',
@@ -152,20 +153,22 @@ function observedPhase(observation: SyncObservation | null, fresh: boolean, star
   return started ? 'idle' : 'not-started';
 }
 export function clientStatus(root: string, from?: string, now: () => number = Date.now) {
-  const settings = readSettings(root);
+  const settings = readSettings(root), removal = removalStatus(root);
   let bindings: Connection[] = [];
   if (from) bindings = [selectSavedBinding(root, from)];
   else if (present(root)) bindings = records(root);
 
   return {
     settingsRevision: settings.revision, globalPaused: settings.globalPaused, observedAt: now(),
+    ...(removal ? { removal } : {}),
     bindings: bindings.map(binding => {
       const replica = join(root, 'replicas', binding.connectionId);
       const causes = pauseCauses(settings, binding.connectionId), paused = causes.global || causes.binding;
       const issues: StatusIssueCode[] = [];
-      const facts = observe(
+      const removing = removal?.bindings.some(item => item.connection.connectionId === binding.connectionId) ?? false;
+      const facts = removing ? null : observe(
         () => ClientLocal.readStatus(replica, binding.vaultId, binding.deviceId), issues, 'JOURNAL_INVALID');
-      const observation = observe(() => readObservation(replica), issues);
+      const observation = removing ? null : observe(() => readObservation(replica), issues);
       const lock = observe(
         () => present(replica) ? observeSyncLock(replica) : null, issues, 'OWNER_UNAVAILABLE');
       for (const code of observation?.statusIssues ?? []) if (!issues.includes(code)) issues.push(code);
@@ -176,7 +179,7 @@ export function clientStatus(root: string, from?: string, now: () => number = Da
       const sameFacts = facts !== null && observation !== null &&
         JSON.stringify(facts) === JSON.stringify(observation.facts);
       let unavailable = false;
-      try { assertBindingRoot(root, binding); }
+      try { if (!removing) assertBindingRoot(root, binding); }
       catch (error) {
         if (error instanceof StatusReadError) {
           if (!issues.includes(error.code)) issues.push(error.code);
@@ -191,6 +194,7 @@ export function clientStatus(root: string, from?: string, now: () => number = Da
       }
       if (paused) phase = owned && observation?.phase === 'syncing' ? 'pausing' : 'paused';
       if (unavailable) phase = 'folder-unavailable';
+      if (removing) phase = 'failed';
       const upToDate = !unavailable && !paused && fresh && observation?.verified === true && phase === 'idle' &&
         facts !== null && facts.conflicts === 0 && Object.values(facts.pending).every(count => count === 0) &&
         facts.heads.applied.revisionId !== null &&
@@ -203,16 +207,16 @@ export function clientStatus(root: string, from?: string, now: () => number = Da
         download: { count: observation.progress.download.count, bytes: observation.progress.download.bytes },
       } : null;
       const savedError = observation?.attentionError ?? observation?.error;
-      const error = unavailable ? 'FOLDER_UNAVAILABLE' : savedError ?? issues[0] ?? null;
+      const error = removing ? 'REMOVAL_PENDING' : unavailable ? 'FOLDER_UNAVAILABLE' : savedError ?? issues[0] ?? null;
       return {
-        ...binding, owner, ownerPresent: !!lock?.live, pause: { ...causes, effective: paused }, phase,
+        ...binding, ...(removing ? { removalPending: true as const } : {}), owner, ownerPresent: !!lock?.live, pause: { ...causes, effective: paused }, phase,
         freshness: fresh ? 'observed' as const : 'stale-or-unknown' as const,
         enginePhase: fresh ? observation?.enginePhase ?? null : null,
         progressUnit: 'completed-ciphertext-frames' as const, progress, facts, upToDate,
         lastRemoteCheck: observation?.lastRemoteCheck ?? null,
         lastSuccessfulSync: observation?.lastSuccess ?? null,
         observationTime: observation?.observedAt ?? null,
-        attentionRequired: (facts?.conflicts ?? 0) > 0 || unavailable || !!observation?.attentionError ||
+        attentionRequired: removing || (facts?.conflicts ?? 0) > 0 || unavailable || !!observation?.attentionError ||
           statusNeedsAttention,
         statusIssues: issues.map(code => ({ code, ...issueDetails[code] })),
         error,

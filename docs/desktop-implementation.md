@@ -745,3 +745,126 @@ workspace/tools/native types, binary/default Nix/stable desktop builds, and the
 packaged fatal/normal SDK gates with zero remaining fixture groups. Independent
 review found no concrete ownership, credential or false-success issue in the new
 folder actions. Real installed-session native smoke remains unclaimed.
+
+## Step 9 — conflicts, coordinated ignore editing and durable local removal
+
+The Folders rail now opens persistent manual Conflicts and Connections/removal;
+folder inspectors open the exact-dialect ignore editor and disconnect inspection.
+Paper controls and existing Field Guide light/dark tokens are reused. Trusted main
+accepts IDs and narrow typed requests, never arbitrary renderer paths or native
+execution. [Local operation contracts](desktop-local-operations.md) document exact
+CLI flags/results, JSON bounds, state schemas, recovery phases and POSIX CAS limits.
+All new operations have headless CLI equivalents; existing removal result shapes
+and version-1 envelopes/exits are retained.
+
+Conflict listing extends the existing checked readonly SQLite snapshot path; there
+is no new database/migration, writer constructor or full-integrity poll. Open
+containing resolves current lineage by trusted IDs, checks root/path components,
+then uses the existing argv opener. No acknowledge/resolve API was added. Real
+engine tests retain both divergent versions across reopen; deliberate manual file
+changes clear conflicts only after successful manifest reconciliation.
+
+Ignore parsing is the existing exclusions-only implementation extracted behind a
+pure text seam. A runtime owner maintenance gate blocks new pass/readiness admission
+without making the active pass wait on its own gate. It waits admitted work, checks
+durable pending basis, persists verified=false before committing any rules, then
+checks the expected signature and stage identity/content, renames and fsyncs.
+Post-rename durability failure cannot leave status verified, even without a watcher.
+Stop waits maintenance before close/key cleanup/unlock. Actual owner origin/lock and
+continuous intent stay unchanged; no persistent pause toggles, promotion, implicit
+scan/start or competing writable journal is used. An unowned edit first recovers
+its owned private WAL, then checks historical root identity and pending basis;
+passive view never recovers/writes. Exact root-local ignore stage names are reserved,
+not all `.nanosync-*` apply/hydration names. Invalid/stale/incompatible work preserves
+rules and reports safe code/line information without reflected patterns.
+
+Removal inventories full content with bounded streamed hashing and event-loop
+yields. Separate abandonment and stop-owner consent are required; --yes supplies
+neither. Safe stop occurs outside gates; all UUID-ordered locks and identities are
+reacquired/rechecked before durable intent or destruction. Missing saved roots are
+never recreated; replacement roots and foreign markers are preserved/refused.
+Secret-free original identities survive partial marker/record/server deletion in
+`removal.json`; listings/status/recovery remain available and normal mutation/start
+cannot run through it. Replay interprets absence only under that intent, not by
+rescanning an apparently unbound root. It fsyncs absent-entry directories again and
+reestablishes journal-file plus containing-directory durability before irreversible
+work; visible publication after a failed fsync is not accepted as durable proof.
+
+Provider cleanup reuses the existing marker-set/readback/delete/get erasure
+algorithm, not delete-false-as-absent or a replacement provider. Its exact reference
+inventory is atomically published and retained until the outer credentials-complete
+phase is durable; replay flushes that inventory before erasure/finalization. Every
+server-associated key/pending path is validated; different servers' references,
+local files, conflict copies, ignore rules and remote data are preserved. There is
+no rollback after destructive cleanup and no remote revocation/forensic-erasure
+claim. Intent/device/inode/path schemas and malformed JSON diagnostics are checked
+without leaking raw parse snippets. No generic transaction/store/daemon framework
+was introduced.
+
+The existing transfer-caption wording is corrected to observed/historical **pass**
+counters: the runner already resets them at each pass; no backend counter semantics
+were changed. SDK patches/bootstrap/CSP/navigation, argv opener constraints, Paper
+provenance notice, dependency locks and build pipeline are unchanged. Lifecycle,
+notifications/diagnostics and release packaging remain steps 10–12.
+
+Verification of this slice (implementation-agent evidence, pending parent acceptance):
+
+- **539 tests passed, 0 failed** on Bun **1.4.4** and locked-nixpkgs Bun **1.4.2**,
+  run sequentially; workspace/tools and native desktop typechecks passed. New tests
+  use explicit promise barriers, fake/in-memory providers, temporary roots and
+  failpoints rather than sleeps or wall-clock correctness assertions. Earlier
+  simultaneous full-runtime runs collided on existing fixed-port server fixtures;
+  sequential final runs passed.
+- **26 browser tests passed**, including manual conflict/open, validated ignore CAS,
+  separate abandonment/owner-stop confirmation, missing-record/locked-provider
+  recovery, keyboard, light/dark axe and responsive layouts. Browser mocks are
+  presentation-only; actual shared backend/HTTP/engine/journal tests are separate.
+- Crash tests cover original identities after partial marker/record removal,
+  staged/published intents, every removal/provider phase, copied/missing roots,
+  unsafe schema/parse diagnostics, unlink-to-fsync failures and visible-but-not-yet-
+  durable publication. Fsync-order traces prove checked journal-file plus directory
+  flushes precede marker deletion, provider erasure and retained-inventory unlink.
+  These are deterministic failure-injection proofs, not physical power-loss tests.
+- A post-ignore-rename directory-fsync failure changes rules while verified status
+  is already false, with no watcher timing dependency or blind write retry. Owned
+  legacy WAL/no-SHM tests recover before historical root verification; copied-marker
+  replacements still refuse before writing rules and passive view remains readonly.
+  Streamed hashing tests prove bounded chunk yielding; no 50-GB hardware benchmark
+  is claimed.
+- CLI binary, `nix build path:. --no-link`, and stable desktop build passed; no
+  dependency/lock/generated Nix, SDK patch, build-pipeline or flake changes were
+  necessary. Tools were obtained from the project's pinned Nix input, not global
+  mutable installs.
+- Packaged SDK gate passed fatal **1** / normal Quit **0**, authenticated RPC/privacy/
+  navigation checks and zero remaining fixture process groups. Core/preload hashes
+  remain unchanged. The product was rebuilt after the SDK fixture gate, and its
+  extracted stable payload contains actual local-operation screens, linked CSS,
+  byte-identical CSP HTML and Paper notice, with presentation fixtures absent.
+- Scoped codehygiene ran on the new parser/state/action seams; formatting removed
+  density warnings. Its remaining advisory is the retained exact-dialect regex
+  expression. The optional 0.6.1 tool update was not installed. Whitespace checks
+  passed. Logs are `/tmp/nanosync-step9-*.log`.
+
+No real user client roots, keyring, host windows, focus or global input were used.
+Installed-session native operation, hardware-scale performance and steps 10–12
+remain unclaimed. No staging, commit or push was performed by this agent.
+
+Post-parent-review RPC fix: desktop ignore save now passes a concrete binding UUID
+selector directly to the shared service. Selection occurs under its initial registry
+gate, before replica/owner coordination; there is no premature readonly historical
+root check and no outer registry lease while awaiting owner IPC. CLI path semantics
+are unchanged. Three additional real-backend tests prove protected-file legacy WAL
+recovery with no OS-provider access, copied-marker historical-root refusal, and a
+barrier-injected disconnect/rebind at the same path that cannot redirect the old
+UUID request. The parent's additional post-rename durability/status test was left
+untouched. Final suites pass **543 tests** on each Bun runtime, workspace/tools/native
+types, binary/default Nix/stable desktop builds, and fatal/normal SDK gates. Evidence
+for this fix is `/tmp/nanosync-step9-rpc-id-*.log`.
+
+Parent acceptance repeated 543 tests on both Bun versions, all 26 browser tests,
+workspace/tools/native types, CLI binary/default Nix/stable desktop builds, and the
+packaged fatal/normal SDK gates with no orphan fixture groups. Independent replay
+review verified the original missing-fsync finding closed before destructive work;
+the parent's post-rename ignore fault test also passed. New action/state seams passed
+scoped codehygiene. These checks do not claim physical power-loss or installed-session
+validation.
