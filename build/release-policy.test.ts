@@ -122,12 +122,28 @@ test("publication verifies drafts and never overwrites public assets", async () 
 test("release publication queues tags and waits for CLI, macOS installer, and Android checks", async () => {
   const file = new URL("../.github/workflows/release.yml", import.meta.url);
   const workflow = Bun.YAML.parse(await Bun.file(file).text()) as {
+    on: { pull_request?: unknown; push: { tags: string[]; branches?: string[] } };
     jobs: {
-      publish: { needs: string[]; concurrency: Record<string, unknown> };
-      android: { uses: string };
+      checks: { steps: { run?: string }[] };
+      publish: { if: string; needs: string[]; concurrency: Record<string, unknown> };
+      android: { if: string; uses: string };
       build: { steps: { name?: string; if?: string; run?: string }[] };
     };
   };
+  expect(Object.hasOwn(workflow.on, "pull_request")).toBe(true);
+  expect(workflow.on.push).toEqual({ tags: ["v*"] });
+  expect(workflow.jobs.publish.if).toBe(
+    "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')",
+  );
+  expect(workflow.jobs.android.if).toBe("github.event_name == 'push'");
+  const checks = workflow.jobs.checks.steps.find(step => step.run?.includes("nix develop"))!.run!;
+  for (const command of [
+    "nix develop .#checks", "bun test", "bun run typecheck", "bash build/test-install.sh",
+    "bun run build:binary", "bash build/test-standalone.sh", "bun run test:browser",
+    "NANOSYNC_TEST_BINARY=", "bun run build:site", "bun run test:site",
+  ]) expect(checks).toContain(command);
+  expect(checks).toContain('export CHROMIUM_PATH="$(command -v chromium)"');
+  expect(checks).toContain('if [[ "$GITHUB_EVENT_NAME" == push ]]');
   expect(workflow.jobs.publish.needs).toEqual(["checks", "build", "android"]);
   expect(workflow.jobs.publish.concurrency).toEqual({
     group: "nanosync-release-publication", queue: "max", "cancel-in-progress": false,

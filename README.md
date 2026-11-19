@@ -100,6 +100,8 @@ curl -fsSL https://raw.githubusercontent.com/FireSquid6/nanosync/main/build/inst
 
 ## Acceptance checks
 
+Pull requests run the host tests, installer fixtures, typechecking, standalone CLI build/checks, both browser suites, all four CLI target builds, and Android build/unit-test/lint tasks. Ordinary branch pushes do not trigger these workflows; version-tag pushes still run release validation and publication. Android emulator/device acceptance tests remain the separate commands in [Android testing](apps/android/README.md). The browser checks use the project-local `nix develop .#checks` shell for Bun, Node, Python, and Chromium.
+
 ```sh
 bun test
 bun run typecheck
