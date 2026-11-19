@@ -1,38 +1,117 @@
-name: Release Linux binary
+name: CLI checks and releases
 
 on:
+  pull_request:
   push:
     tags:
       - 'v*'
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: cli-validation-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Tests, typechecking, binary build, and browser suites
+        run: |
+          nix develop .#checks --command bash -eu <<'CHECKS'
+            if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+              bun build/release-policy.ts tag "$GITHUB_REF_NAME"
+            fi
+            export CHROMIUM_PATH="$(command -v chromium)"
+            bun install --frozen-lockfile
+            bun test
+            bun run typecheck
+            bash build/test-install.sh
+            bun run build:binary
+            bash build/test-standalone.sh
+            bun run test:browser
+            NANOSYNC_TEST_BINARY="$PWD/dist/nanosync" bun run test:browser
+            bun run build:site
+            bun run test:site
+          CHECKS
+
+  build:
+    needs: checks
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            runner: ubuntu-24.04
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+          - target: darwin-x64
+            runner: macos-15
+          - target: darwin-arm64
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.2
       - run: bun install --frozen-lockfile
-      - run: bun run test
-      - run: bun run typecheck
-      - run: bash build/test-install.sh
-      - run: bun run build:binary
-      - name: Check binary and prepare release assets
+      - run: bash build/binary.sh '${{ matrix.target }}' 'dist/nanosync-${{ matrix.target }}'
+      - name: Installer fixtures on macOS Bash 3.2
+        if: matrix.target == 'darwin-arm64'
+        run: /bin/bash build/test-install.sh
+      - name: Native Linux standalone checks
+        if: startsWith(matrix.target, 'linux-')
         run: |
-          ./dist/nanosync --help
-          mv dist/nanosync dist/nanosync-linux-x64
-          (cd dist && sha256sum nanosync-linux-x64 > nanosync-linux-x64.sha256)
-          (cd dist && sha256sum --check nanosync-linux-x64.sha256)
-      - name: Publish GitHub release
+          ./dist/nanosync-${{ matrix.target }} --help
+          bash build/test-standalone.sh dist/nanosync-${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nanosync-${{ matrix.target }}
+          path: dist/nanosync-${{ matrix.target }}
+          if-no-files-found: error
+
+  android:
+    if: github.event_name == 'push'
+    needs: checks
+    uses: ./.github/workflows/android.yml
+
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [checks, build, android]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    # The latest decision and draft publication must be one serialized operation across tags.
+    concurrency:
+      group: nanosync-release-publication
+      queue: max
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: nanosync-linux-*
+          merge-multiple: true
+          path: release-assets
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: nanosync-darwin-*
+          merge-multiple: true
+          path: release-assets
+      - uses: actions/download-artifact@v4
+        with:
+          name: nanosync-android-debug
+          path: release-assets
+      - run: bun build/release-policy.ts checksums release-assets
+      - run: bun build/release-policy.ts verify release-assets
+      - name: Stage, verify, then publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/nanosync-linux-x64 dist/nanosync-linux-x64.sha256 --clobber
-          else
-            gh release create "$GITHUB_REF_NAME" dist/nanosync-linux-x64 dist/nanosync-linux-x64.sha256 --verify-tag --generate-notes
-          fi
+        run: bun build/release-policy.ts publish "$GITHUB_REF_NAME"

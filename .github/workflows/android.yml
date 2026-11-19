@@ -1,17 +1,17 @@
 name: Android build and protocol checks
 
 on:
+  workflow_call:
   pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: android-${{ github.ref }}
-  cancel-in-progress: true
+  # Keep this namespace distinct from the caller's release concurrency group.
+  group: android-validation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   android:
@@ -27,15 +27,27 @@ jobs:
             bun test
             bun run typecheck
             bun run typecheck:android
-            gradle --no-daemon -p apps/android :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
+            gradle --no-daemon -p apps/android :app:assembleDebug :app:assembleDebugAndroidTest :app:testDebugUnitTest :app:lintDebug
           '
-      - name: Upload validation APKs (debug signing, not production releases)
+      - name: Prepare debug-signed APK (not production signed)
+        run: |
+          mkdir -p dist/android-debug
+          cp apps/android/app/build/outputs/apk/debug/app-debug.apk dist/android-debug/nanosync-android-debug.apk
+          cd dist/android-debug
+          sha256sum nanosync-android-debug.apk > nanosync-android-debug.apk.sha256
+          sha256sum --check nanosync-android-debug.apk.sha256
+      - name: Upload debug-signed APK and checksum (not production signed)
         uses: actions/upload-artifact@v4
         with:
           name: nanosync-android-debug
-          path: |
-            apps/android/app/build/outputs/apk/debug/app-debug.apk
-            apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+          path: dist/android-debug/*
+          if-no-files-found: error
+      - name: Upload instrumentation test APK (validation only, not distributable)
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-instrumentation-test
+          path: apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+          if-no-files-found: error
       - name: Upload lint reports
         if: always()
         uses: actions/upload-artifact@v4

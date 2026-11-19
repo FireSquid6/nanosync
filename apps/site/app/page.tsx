@@ -30,16 +30,17 @@ export default function Home() {
       <li><label><input type="checkbox" checked disabled /> End-to-end encryption</label></li>
       <li><label><input type="checkbox" checked disabled /> Self-hostable</label></li>
       <li><label><input type="checkbox" checked disabled /> CLI</label></li>
-      <li><label><input type="checkbox" disabled /> Mobile App</label></li>
+      <li><label><input type="checkbox" checked disabled /> Android 12+ app (debug validation build; no iOS app)</label></li>
       <li><label><input type="checkbox" disabled /> Desktop App</label></li>
     </ul>
 
     <h2>A small place to start</h2>
     <p>Run the server on your machine. Connect a folder on another. Work with your files as usual.</p>
     <ul><li>Your own server.</li><li>Ordinary local files.</li><li>A command-line workflow.</li></ul>
-    <h2>Start from source</h2>
-    <pre tabIndex={0}><code>{'# in the nanosync checkout\nbun install\nbun run build:binary\n./dist/nanosync --help'}</code></pre>
-    <p className="note">Linux x86-64. Build from source for now; release installation is not available yet.</p>
+    <h2>Install from the checkout</h2>
+    <p>Linux x86-64: use the local Nix flake if you use Nix, or build with Bun.</p>
+    <pre tabIndex={0}><code>{'# in the nanosync checkout, with Nix flakes enabled\nnix profile install .#nanosync\n\n# or build from source with Bun\nbun install\nbun run build:binary\n./dist/nanosync --help'}</code></pre>
+    <p className="note">No release assets are published yet. The installation guide includes future CLI installer and manual-download commands, gated on publication. Planned macOS CLI binaries have untested runtime behavior. Android APKs are debug-signed validation builds, not production releases; no iOS build is available.</p>
     <p><Link href="/docs/installation">Installation notes →</Link></p>
   </article></main>;
 }
