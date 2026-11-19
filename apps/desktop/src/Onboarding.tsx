@@ -6,7 +6,15 @@ import { ThemeControl } from '../../../packages/ui-theme/ThemeControl';
 import type { RemoteVault, LifecyclePreferences } from '@nanosync/client-service';
 import type { DesktopCommand, DesktopReply, DesktopSnapshot } from './rpc';
 
-export function Onboarding({ send }: { send(command: DesktopCommand): Promise<DesktopReply> }) {
+export function Onboarding({
+  send,
+  onDone,
+  onCancel,
+}: {
+  send(command: DesktopCommand): Promise<DesktopReply>;
+  onDone(): void;
+  onCancel(): void;
+}) {
   const [snapshot, setSnapshot] = useState<DesktopSnapshot>();
   const [step, setStep] = useState(1);
   const [busy, setBusy] = useState(false);
@@ -201,7 +209,7 @@ export function Onboarding({ send }: { send(command: DesktopCommand): Promise<De
         ? 'Continuous sync accepted. Current health is shown below.'
         : 'Connected; no files transferred. Start syncing only when you are ready.',
     );
-    move(6);
+    onDone();
   }
   const pending = snapshot?.pending.find((item) => item.alias === alias);
   const credentials = snapshot?.credentials;
@@ -231,6 +239,9 @@ export function Onboarding({ send }: { send(command: DesktopCommand): Promise<De
       <div className="desktop-layout">
         <nav aria-label="Client">
           <strong>Connect folder</strong>
+          <Button variant="quiet" disabled={busy} onClick={onCancel}>
+            Return to folders
+          </Button>
           <p>Shared desktop / CLI state</p>
           <Button variant="quiet" disabled={busy} onClick={() => void request({ type: 'quit' })}>
             Quit Nanosync
@@ -238,7 +249,7 @@ export function Onboarding({ send }: { send(command: DesktopCommand): Promise<De
         </nav>
         <main aria-busy={busy}>
           <h1 ref={heading} tabIndex={-1}>
-            {blocked ? 'Credential storage' : step <= 5 ? titles[step - 1] : 'Connected folders'}
+            {blocked ? 'Credential storage' : titles[step - 1]}
           </h1>
           {error && (
             <>
@@ -795,74 +806,6 @@ export function Onboarding({ send }: { send(command: DesktopCommand): Promise<De
                       Back
                     </Button>
                   </>
-                )}
-                {step === 6 && (
-                  <>
-                    {(snapshot.status?.bindings ?? []).map((item) => (
-                      <article key={item.connectionId}>
-                        <h2>{item.root}</h2>
-                        <p>
-                          Status:{' '}
-                          {item.upToDate
-                            ? '● Up to date (observed)'
-                            : item.phase === 'paused'
-                              ? 'Ⅱ Paused'
-                              : `○ ${item.phase}`}{' '}
-                          — {item.freshness}
-                        </p>
-                        <p>
-                          Owner:{' '}
-                          {item.owner?.origin ??
-                            (item.ownerPresent ? 'unavailable live owner' : 'none')}
-                        </p>
-                        {(item.error || snapshot.runtimeErrors[item.connectionId]) && (
-                          <p role="alert">
-                            ◇ {snapshot.runtimeErrors[item.connectionId] ?? item.error}. Restore
-                            unavailable folders or unlock credentials before retrying. Live owners
-                            must be stopped explicitly, never bypassed.
-                          </p>
-                        )}
-                        {item.statusIssues.map((issue) => (
-                          <p key={issue.code}>
-                            {issue.message} {issue.recoveryAction}
-                          </p>
-                        ))}
-                        <p>
-                          Last successful sync:{' '}
-                          {item.lastSuccessfulSync === null
-                            ? 'Not observed'
-                            : new Date(item.lastSuccessfulSync).toLocaleString()}
-                        </p>
-                        <Button
-                          disabled={busy}
-                          onClick={() =>
-                            void request({ type: 'start', binding: item.connectionId })
-                          }
-                        >
-                          Start continuous syncing
-                        </Button>
-                      </article>
-                    ))}
-                    <Button disabled={busy} onClick={() => void request({ type: 'snapshot' })}>
-                      Refresh observed status
-                    </Button>
-                    <Button
-                      disabled={busy}
-                      onClick={() => {
-                        setFolder(undefined);
-                        setBinding('');
-                        setAcknowledged(false);
-                        move(1);
-                      }}
-                    >
-                      Connect another folder
-                    </Button>
-                  </>
-                )}
-                {step === 1 && !!snapshot.status?.bindings.length && (
-                  <Button disabled={busy} onClick={() => move(6)}>
-                    View connected folders
-                  </Button>
                 )}
               </section>
             </>

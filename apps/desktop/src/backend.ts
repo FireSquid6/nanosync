@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { lstatSync } from 'node:fs';
+import { lstatSync, existsSync } from 'node:fs';
 import {
   ClientError,
   onboardingSnapshot,
@@ -18,6 +18,8 @@ import {
   inspectDestination,
   connectRegisteredVault,
   setLifecycle,
+  setPaused,
+  checkedBindingRoot,
   openBoundSync,
   records,
   readPreferences,
@@ -46,6 +48,10 @@ const fields: Record<DesktopCommand['type'], string[]> = {
   connect: ['serverId', 'vaultId', 'selection', 'confirmNonempty'],
   settings: ['lifecycle', 'expectedRevision'],
   start: ['binding'],
+  'sync-now': ['binding'],
+  'open-folder': ['binding'],
+  'pause-all': ['paused', 'expectedRevision'],
+  'pause-folder': ['binding', 'paused', 'expectedRevision'],
   administration: ['urlIdentity'],
 };
 export function validateCommand(value: unknown): DesktopCommand {
@@ -60,7 +66,7 @@ export function validateCommand(value: unknown): DesktopCommand {
   for (const [name, item] of Object.entries(object)) {
     if (['serverId', 'vaultId', 'selection', 'binding'].includes(name)) {
       if (typeof item !== 'string' || !UUID.test(item)) return invalid();
-    } else if (['fresh', 'retryCredentialWrite', 'confirmNonempty'].includes(name)) {
+    } else if (['fresh', 'retryCredentialWrite', 'confirmNonempty', 'paused'].includes(name)) {
       if (typeof item !== 'boolean') return invalid();
     } else if (name === 'confirmed') {
       if (item !== true) return invalid();
@@ -121,7 +127,10 @@ const messages: Record<string, string> = {
     'This folder contains files. Return to folder selection, choose it again, and explicitly acknowledge reconciliation before connecting.',
   SELECTION_CHANGED: 'Folder selection changed. Choose the folder again and review its contents.',
   KEY_REQUIRED: 'Unlock this vault with its recovery key before connecting.',
-  OPEN_FAILED: 'The system browser could not open the advertised administration page.',
+  OPEN_FAILED:
+    'The system application could not open the checked folder or advertised administration page.',
+  NATIVE_INTEGRATION_UNAVAILABLE:
+    'Folder opening is unavailable in this session. Use a desktop session with xdg-open installed; syncing does not require it.',
   SETTINGS_INVALID:
     'Saved settings are invalid or incompatible. Stop older clients and inspect settings before retrying.',
   NOT_FOUND:
@@ -146,6 +155,7 @@ export function safeDesktopError(error: unknown): Extract<DesktopReply, { ok: fa
 export interface DesktopNative {
   pickFolder(): Promise<string[]>;
   openAdministration(url: string): Promise<{ ok: boolean }>;
+  openFolder?(checkedRoot: string): Promise<{ ok: boolean }>;
   quit(): void;
 }
 export function createDesktopBackend(
@@ -164,6 +174,8 @@ export function createDesktopBackend(
   };
   const running = new Map<string, Running>();
   const active = new Set<Promise<DesktopReply>>();
+  const once = new Map<string, Promise<void>>();
+  const temporarySessions = new Set<BoundSyncSession>();
   let shutdownWork: Promise<void> | undefined;
   let enrollment: AbortController | undefined;
   let selected:
@@ -227,11 +239,46 @@ export function createDesktopBackend(
     })();
     return entry.accepted;
   }
+  function syncNow(bindingId: string): Promise<void> {
+    const current = once.get(bindingId);
+    if (current) return current;
+    const work = (async () => {
+      const binding = records(root).find((item) => item.connectionId === bindingId);
+      if (!binding) throw new ClientError('NOT_FOUND', 'Binding not found');
+      const session = await openBoundSync(root, binding.root, {
+        ...credentials,
+        origin: 'desktop',
+        instanceId,
+      });
+      temporarySessions.add(session);
+      try {
+        if (closing) throw new ClientError('OWNER_STOPPED', 'Closing');
+        await session.syncOnce();
+        delete runtimeErrors[bindingId];
+      } catch (error) {
+        runtimeErrors[bindingId] = safeDesktopError(error).code;
+        throw error;
+      } finally {
+        try {
+          await session.close();
+        } finally {
+          temporarySessions.delete(session);
+        }
+      }
+    })();
+    once.set(bindingId, work);
+    void work.then(
+      () => once.delete(bindingId),
+      () => once.delete(bindingId),
+    );
+    return work;
+  }
   function shutdown(): Promise<void> {
     return (shutdownWork ??= (async () => {
       closing = true;
       enrollment?.abort();
       for (const entry of running.values()) entry.controller.abort();
+      await Promise.all([...temporarySessions].map((session) => session.close()));
       // Native store calls are not cancellable: finish their crash-safe operation before exit.
       await Promise.all([...active]);
       await stopOwnedSync(instanceId);
@@ -265,6 +312,27 @@ export function createDesktopBackend(
           await shutdown();
           native.quit();
           break;
+        case 'pause-all':
+          setPaused(root, { all: true }, command.paused, command.expectedRevision);
+          break;
+        case 'pause-folder': {
+          const bindingId = command.binding;
+          if (!existsSync(root) || !records(root).some((item) => item.connectionId === bindingId))
+            throw new ClientError('NOT_FOUND', 'Binding not found');
+          setPaused(root, { binding: command.binding }, command.paused, command.expectedRevision);
+          break;
+        }
+        case 'settings':
+          setLifecycle(root, command.lifecycle, command.expectedRevision);
+          break;
+        case 'open-folder': {
+          const path = checkedBindingRoot(root, command.binding);
+          if (!native.openFolder)
+            throw new ClientError('NATIVE_INTEGRATION_UNAVAILABLE', 'Folder opener unavailable');
+          if (!(await native.openFolder(path)).ok)
+            throw new ClientError('OPEN_FAILED', 'Folder opening failed');
+          break;
+        }
         case 'initialize':
           initializeCredentials(root, 'os-store');
           break;
@@ -438,8 +506,8 @@ export function createDesktopBackend(
               }
               break;
             }
-            case 'settings':
-              setLifecycle(root, command.lifecycle, command.expectedRevision);
+            case 'sync-now':
+              await syncNow(command.binding);
               break;
             case 'start':
               await start(command.binding);

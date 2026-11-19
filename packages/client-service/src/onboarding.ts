@@ -1,3 +1,5 @@
+import { join } from 'node:path';
+import { present } from './settings.ts';
 import { enrollmentVerificationCode } from '@nanosync/protocol';
 import { credentialDecision, type CredentialOptions } from './credentials.ts';
 import { ClientError } from './errors.ts';
@@ -17,7 +19,7 @@ export function onboardingSnapshot(root: string) {
   const credentials = credentialDecision(root);
   const settings = readPreferences(root);
   const blocked =
-    credentials.mode !== 'os-store' || credentials.migrationPending || credentials.cleanupPending;
+    credentials.mode === 'uninitialized' || credentials.migrationPending || credentials.cleanupPending;
   return {
     credentials,
     settings,
@@ -26,8 +28,8 @@ export function onboardingSnapshot(root: string) {
       tray: 'not-installed',
       backgroundPolicy: 'not-applied',
     } as const,
-    connections: blocked ? [] : servers(root).map(connectionSummary),
-    pending: blocked
+    connections: blocked || !present(join(root, 'servers')) ? [] : servers(root).map(connectionSummary),
+    pending: blocked || !present(join(root, 'pending'))
       ? []
       : pendingEnrollments(root).map((item) => ({
           url: item.url,

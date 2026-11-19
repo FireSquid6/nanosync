@@ -256,8 +256,42 @@ vault/key/native existing folder, lifecycle intent, and finish or explicit Start
 Pending identity survives cancellation/restart; recovery is requested only for a
 genuinely absent key (or explicitly retried interrupted key write), never for a
 locked store. Existing nonempty folders require acknowledgment. Finish connects
-without transfer. Start uses the actual shared continuous runner. The initial
-completion view is not yet the full connected-folders dashboard from step 8.
+without transfer. Start uses the actual shared continuous runner. Completion now returns
+to the connected-folders list/inspector, also shown directly when saved bindings exist.
+
+## Checked local folder opening
+
+```sh
+nanosync client open --path /absolute/connected/folder --json
+```
+
+Open resolves the saved binding, validates its original root identity and marker,
+and opens only that root. It does not create missing folders, unlock credentials,
+start sync, or enable continuous intent. The JSON success data is
+`{connectionId,opened:true}` in the existing version-1 envelope. An ancestor/CWD
+selection follows normal client path selection; this is not an arbitrary file opener.
+
+The Linux CLI adapter requires a desktop session and `xdg-open` on the current PATH;
+it launches the resolved program with argv and discarded streams, never a shell.
+Headless/unavailable integration returns `NATIVE_INTEGRATION_UNAVAILABLE`, local exit
+2; a failed opener returns `OPEN_FAILED`, local exit 2. Ordinary sync/status/pauses
+remain headless. The packaged desktop instead retains its build-selected trusted
+Nix-store opener, exposed through a binding-UUID-only RPC, not a renderer path.
+
+The desktop Folders list/inspector uses the same non-secret status and independent
+pause flags. Protected-file/locked-store metadata and pause intent remain available
+without probing a keyring; desktop transfers still require explicit OS-store mode.
+Global resume preserves folder pauses; folder resume never bypasses a global pause.
+Sync now corresponds to one-shot `client sync`, not `--watch`; it neither persists
+continuous intent nor takes over a live owner. Closing its temporary session releases
+only its own writer or detaches an external owner. Quit leaves independent CLI work.
+
+Dashboard polling is serialized, stops during setup and rejects pre-mutation replies.
+After a failed refresh, cached rows/owner counters are explicitly historical, never
+shown as currently observed/up to date. Names not cached locally are not guessed:
+server aliases, vault UUIDs and independent copy IDs are shown without secret network
+lookups. Conflict/error attention stays visible alongside pause and progress; conflict,
+ignore and removal tools are later work.
 
 ## Shared status and durable pauses
 
@@ -299,8 +333,9 @@ its existing identity/path, `owner` (origin/instance), `ownerPresent`, independe
 `pause` causes/effective flag, `phase`, `enginePhase`, `freshness`, `progressUnit`,
 `progress`, `facts`, `upToDate`, `attentionRequired`, safe `error` code, `statusIssues`,
 `observationTime`, `lastRemoteCheck`, and `lastSuccessfulSync`. Progress is completed
-ciphertext-frame counts/bytes **for the latest pass**, not plaintext, partial stream
-bytes, or a percentage. Cache reads do not count as network transfers. Totals are
+ciphertext-frame counts/bytes **reported by the observed owner**, not plaintext,
+partial stream bytes, a percentage or a known total. The UI labels current-owner
+counters separately from historical owner counters. Cache reads do not count as network transfers. Totals are
 unknown. Stale progress is historical, not evidence of active work.
 
 `facts` is null for an uninitialized journal; otherwise it contains observed,

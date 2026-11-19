@@ -106,6 +106,15 @@ export function discoverConnection(globalDirectory: string, from: string, allowM
   }
 }
 
+export function checkedBindingRoot(global: string, bindingId: string): string {
+  parseVaultId(bindingId);
+  if (!present(global)) throw new ClientError('NOT_FOUND', 'Saved folder binding not found.');
+  const binding = records(global).find(item => item.connectionId === bindingId);
+  if (!binding) throw new ClientError('NOT_FOUND', 'Saved folder binding not found.');
+  assertBindingRoot(global, binding);
+  return binding.root;
+}
+
 const ROOT_IDENTITY = 'root-identity.json';
 function saveRootIdentity(global: string, connection: Connection, replace = false): void {
   const replicas = privateDirectory(join(global, 'replicas'));

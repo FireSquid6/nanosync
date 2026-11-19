@@ -199,7 +199,7 @@ for (const start of [false, true])
       })
       .click();
     await expect(
-      page.getByRole('heading', { name: 'Connected folders', exact: true }),
+      page.getByRole('heading', { name: 'Folders', exact: true }),
     ).toBeVisible();
     expect(commands.filter((command) => command.type === 'connect')).toHaveLength(1);
     expect(commands.filter((command) => command.type === 'start')).toHaveLength(start ? 1 : 0);

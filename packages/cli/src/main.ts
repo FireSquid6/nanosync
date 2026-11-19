@@ -1,12 +1,13 @@
 #!/usr/bin/env bun
 import {
-  clientStatus, setPaused, selectSavedBinding, readPreferences, setLifecycle,
+  clientStatus, setPaused, selectSavedBinding, readPreferences, setLifecycle, checkedBindingRoot,
   baseUrl, privateDirectory, secureCreate, secureRead, openBoundSync, listRemoteVaults,
   resolveRemoteVault, connectRegisteredVault, discoverConnection, records,
   disconnectConnections, removeServerConnection, enrollServer, key, keyWritePending, server as storedServer,
   servers, unlockVault, pendingEnrollments, connectionSummary, credentialStatus, initializeCredentials, migrateCredentials, resumeCredentialMigration, resumeCredentialCleanup, rollbackCredentialMigration, type CredentialMode,
 } from '@nanosync/client-service';
 import { join } from 'node:path';
+import { openFolder } from './open-folder.ts';
 import { hostname } from 'node:os';
 import { readdirSync } from 'node:fs';
 import { Command, CommanderError, Option } from 'commander';
@@ -280,6 +281,11 @@ async function execute(args: string[], presentation: CliOutput): Promise<number>
       const dir = root(command), binding = discoverConnection(dir, opts(command).path ?? process.cwd(), !!opts(command).force);
       if (opts(command).force) output().warning('Disconnect discards pending synchronization state. Local files and remote data are preserved.');
       disconnectConnections(dir, [binding], !!opts(command).force); result = {connectionId:binding.connectionId, disconnected:true, filesPreserved:true};
+    });
+    flags(client.command('open'), ...clientFlags, ...common, '--path <directory>').action(async (_o, command) => {
+      const directory = root(command), binding = selectSavedBinding(directory, opts(command).path ?? process.cwd());
+      await openFolder(checkedBindingRoot(directory, binding.connectionId));
+      result = { connectionId: binding.connectionId, opened: true };
     });
     flags(client.command('status'), ...clientFlags, ...common, '--path <directory>').action(async (_o, command) => {
       result = clientStatus(root(command), opts(command).path);

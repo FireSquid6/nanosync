@@ -655,3 +655,93 @@ the CSP-aligned packaged native gate (fatal 1 / normal 0), and the stable deskto
 build. Independent safety review closed both provenance and reflected-parser findings.
 The actual stable payload also includes the unchanged Paper UI provenance notice;
 its existing licensing-review warning is retained, not replaced with a license grant.
+
+## Step 8 — connected folders and observation-safe dashboard
+
+Existing bindings now open directly in the Field Guide Folders list and selected-copy
+inspector. The setup wizard is a separate mounted screen and returns to this dashboard;
+its former nested completion placeholder is removed. Shared aliases, original roots,
+server/vault/device/copy UUIDs, actual owner origin or unavailable ownership, pause
+causes, health, conflict/error attention and last success/check times remain distinct.
+Multiple copies of one vault stay separate rows/journals. Vault names are explicitly
+not cached rather than guessed or fetched using credentials merely to render a list.
+Layout uses the approved rail/list/288px inspector, compact light/dark tokens and
+small-window inspector stacking, with keyboard buttons and non-color status labels.
+
+The dashboard uses metadata-only shared snapshots, including protected-file roots and
+OS-store-unavailable observations. Snapshot and pause/settings operations never probe
+or unlock the credential provider. The credential decision still blocks desktop
+secret-dependent enrollment and transfers, with no file fallback. Migration/recovery
+barriers remain barriers; missing inventory is not treated as empty client state.
+
+New exact RPCs use binding UUIDs only for Sync now/open, and UUID/boolean/expected
+revision for folder pause (boolean/revision for global pause). Native main resolves
+saved bindings, validates original root/marker identity and calls the existing trusted
+argv opener. The shared checked-root helper also serves `client open --path`; Linux
+CLI integration uses an explicit PATH-resolved xdg-open argv, and unavailable/headless
+integration returns a local exit-2 error without affecting headless synchronization.
+No renderer path, URL, SQL, secret-store or generic shell capability was introduced.
+
+Sync now routes through `openBoundSync`, coalesces per-copy duplicate requests, and
+closes its own temporary session or detaches an existing owner. It never enables
+continuous intent. Explicit Start keeps step 7's host-owned provenance, compatible
+owner routing and honest temporary-owner refusal. Quit also cancels/detaches active
+one-shot sessions before draining requests, without stopping independent CLI owners
+or releasing an active writer early. Global/folder pauses retain independent flags;
+resuming a folder explains when global pause still prevents work.
+
+Polling is serialized and confined to the dashboard. An epoch rejects pre-mutation
+snapshots; failed mutation refreshes never silently retry/rebase an action. Setup
+unmounts dashboard polling entirely, so no poll can invalidate enrollment or clear a
+new password/recovery field. A failed read explicitly demotes all cached healthy
+markers/freshness/owner observations and engine progress until a successful reply.
+Counters are labeled current-owner or historical owner counters with completed
+ciphertext-frame units and unknown totals, never invented percentages or totals.
+Only the shared `upToDate` predicate permits the healthy label; last success is not
+reset by viewing. Historical local request errors are labeled separately from shared
+current attention. Pauses do not hide conflicts, revoked access or missing roots.
+
+Step 9 conflict/ignore/removal tools, step 10 integrations, and step 11 notification/
+diagnostics screens are not implemented or simulated. The sidebar states unavailable
+surfaces honestly; saved lifecycle intent still reports native effects as not applied.
+The maintained SDK bootstrap/hash/navigation/CSP/opener source pipeline and copied
+Paper provenance/licensing-review notice remain unchanged.
+
+Step-8 verification:
+
+- **498 default tests passed** on Bun 1.4.4 and locked-nixpkgs Bun 1.4.2, sequentially.
+  Six new backend/CLI cases cover strict payloads, real independent copy identities,
+  zero provider reads for protected/locked metadata and pause/open, stale-revision
+  refusal, replacement/missing roots, real verified one-shot sync/coalescing without
+  continuous intent, routing to an independent CLI owner, and Quit during held own/
+  external one-shot work. Test native opening uses an isolated fake executable only.
+- **24 browser tests passed**, including six new Folders cases and all eleven setup
+  regressions. Folders cases cover real DTO identity/alias distinctions, independent
+  pause causes with conflict/error attention, actual/unavailable owners, unknown
+  counters, locked/missing-root guidance, explicit retry, light/dark axe checks,
+  keyboard selection and 1280/960/700px layouts. Fake clocks and deferred replies prove
+  failure demotion/recovery, pre-mutation poll rejection and setup isolation without
+  wall-clock sleeps/deadline correctness assertions.
+- Workspace/tools and native desktop types passed; CLI binary, default Nix and stable
+  desktop builds passed. No dependency/lock/generated Nix changes were needed.
+- Actual extracted stable payload checks passed for Folders JS, linked CSS, unchanged
+  CSP and byte-identical Paper notice; presentation RPC names/sample paths are absent.
+  The notice's licensing-review warning remains intact, not a license grant.
+- Post-build packaged SDK gate passed fatal **1** / normal Quit **0**, real RPC,
+  privacy/auth/navigation assertions and zero remaining fixture process groups.
+  Core/preload hashes and the maintained SDK source pipeline remain unchanged.
+- Scoped codehygiene passed the small app shell. Remaining advisories are formatted
+  JSX nesting/layout, long fixed recovery messages and an intentional headless-session
+  availability guard (not a swallowed exception). Optional 0.6.1 update is available.
+  Diff whitespace checks passed. Evidence logs are `/tmp/nanosync-step8-*.log`.
+
+Native installed folder-opening/onboarding/lifecycle smoke remains release validation;
+tests use only temporary state, isolated credential adapters/HTTP servers and headless
+browser input. No user client root/keyring, host windows, focus or global input is used.
+No staging, commit or push was performed by the implementation agent.
+
+Parent acceptance repeated all 498 tests on both Bun versions, 24 browser tests,
+workspace/tools/native types, binary/default Nix/stable desktop builds, and the
+packaged fatal/normal SDK gates with zero remaining fixture groups. Independent
+review found no concrete ownership, credential or false-success issue in the new
+folder actions. Real installed-session native smoke remains unclaimed.

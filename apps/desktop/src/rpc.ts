@@ -37,7 +37,9 @@ export type DesktopCommand =
       confirmNonempty: boolean;
     }
   | { type: 'settings'; lifecycle: LifecyclePreferences; expectedRevision: number }
-  | { type: 'start'; binding: string }
+  | { type: 'start' | 'sync-now' | 'open-folder'; binding: string }
+  | { type: 'pause-all'; paused: boolean; expectedRevision: number }
+  | { type: 'pause-folder'; binding: string; paused: boolean; expectedRevision: number }
   | { type: 'administration'; urlIdentity: string };
 export type DesktopSnapshot = OnboardingSnapshot & {
   clientRoot: string;

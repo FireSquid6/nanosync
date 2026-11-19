@@ -12,6 +12,6 @@ export { credentialStatus, initializeCredentials, desktopCredentials, migrateCre
 
 export { readSettings, readPreferences, setLifecycle, setPaused, pauseCauses, type ClientSettings, type ClientPreferences, type LifecyclePreferences } from './settings.ts';
 export { credentialDecision } from './credentials.ts';
-export { inspectDestination } from './connections.ts';
+export { inspectDestination, checkedBindingRoot } from './connections.ts';
 export { onboardingSnapshot, requireDesktopCredentials, vaultKeyStatus, type OnboardingSnapshot } from './onboarding.ts';
 export { clientStatus, selectSavedBinding, type SyncPhase, type TransferProgress, type ClientStatusSnapshot, type StatusIssueCode } from './status.ts';

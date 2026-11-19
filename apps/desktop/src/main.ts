@@ -3,7 +3,7 @@ import { join, resolve } from 'node:path';
 import Electrobun, { BrowserView, BrowserWindow, Utils } from 'electrobun/main';
 import type { DesktopRPC } from './rpc';
 import { createDesktopBackend } from './backend';
-import { openAdministration } from './open-native';
+import { openAdministration, openCheckedFolder } from './open-native';
 
 const args = process.argv.slice(2);
 const rootFlag = args.indexOf('--client-dir');
@@ -14,6 +14,7 @@ let shutdown: Promise<void> | undefined;
 const backend = createDesktopBackend(root, {
   pickFolder: () => Utils.openFileDialog({ startingFolder: homedir(), canChooseFiles: false, canChooseDirectory: true, allowsMultipleSelection: false }),
   openAdministration,
+  openFolder: openCheckedFolder,
   quit() { quitSafe = true; Utils.quit(); },
 });
 const rpc = BrowserView.defineRPC<DesktopRPC>({ handlers: { requests: { client: value => backend.execute(value) } } });

@@ -24,6 +24,7 @@ const headings: Record<string, string> = {
   'client vaults disconnect': 'Vault disconnected.',
   'client settings view': 'Shared lifecycle intent (native effects not applied)',
   'client settings set': 'Shared lifecycle intent saved; native effects not applied.',
+  'client open': 'Checked folder opened in the system file manager.',
   'client status': 'Synchronization status (observed facts, not a live guarantee)',
   'client pause': 'Pause saved; active operations stop at their next safe boundary.',
   'client resume': 'Resume saved; folder pauses remain independent.',
