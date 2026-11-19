@@ -17,6 +17,7 @@ import {
 } from '@nanosync/client-service';
 import { createDesktopBackend } from '../src/backend';
 import type { DesktopReply } from '../src/rpc';
+import { sessionMonitor } from '../src/linux-session';
 import {
   initializeServerOwner,
   runServer,
@@ -237,9 +238,13 @@ test('protected/locked metadata, multiple copies, independent CAS pauses and che
     rmSync(f.parent, { recursive: true, force: true });
   }
 });
-test.each(['desktop', 'cli'] as const)(
-  'Quit during a held %s one-shot closes only desktop work or detaches the CLI',
-  async (origin) => {
+test.each([
+  ['desktop', 'quit'], ['cli', 'quit'],
+  ['desktop', 'session-closing'], ['cli', 'session-closing'],
+  ['desktop', 'monitor-loss'], ['cli', 'monitor-loss'],
+] as const)(
+  '%s held one-shot on %s closes only desktop work or detaches the CLI',
+  async (origin, cause) => {
     const entered = Promise.withResolvers<void>(),
       release = Promise.withResolvers<void>();
     const http = Bun.serve({
@@ -276,7 +281,18 @@ test.each(['desktop', 'cli'] as const)(
         });
       const work = backend.execute({ type: 'sync-now', binding: f.bindings[0]!.connectionId });
       await entered.promise;
-      await backend.shutdown();
+      const saved = readPreferences(f.root);
+      let associated = true, available = true;
+      let stopped: Promise<void> | undefined;
+      const session = sessionMonitor(() => ({ available: associated, applied: associated, message: 'fixture' }),
+        () => available, () => { stopped = backend.shutdown(); });
+      if (cause === 'session-closing') associated = false;
+      if (cause === 'monitor-loss') available = false;
+      if (cause === 'quit') stopped = backend.shutdown();
+      else session.check();
+      expect(stopped).toBeDefined();
+      await stopped;
+      expect(readPreferences(f.root)).toEqual(saved);
       expect((await work).ok).toBe(false);
       const binding = clientStatus(f.root).bindings.find(
         (item) => item.connectionId === f.bindings[0]!.connectionId,

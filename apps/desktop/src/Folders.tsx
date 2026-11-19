@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { Button } from '../../../packages/admin-ui/src/paper/Button';
 import { LocalTools } from './LocalTools';
+import { General } from './General';
 import { ThemeControl } from '../../../packages/ui-theme/ThemeControl';
 import type { ClientSend } from './App';
-import type { DesktopCommand, DesktopSnapshot } from './rpc';
+import type { DesktopCommand, DesktopReply, DesktopSnapshot } from './rpc';
 
 type Binding = NonNullable<DesktopSnapshot['status']>['bindings'][number];
 const phases: Record<Binding['phase'], string> = {
@@ -67,8 +68,8 @@ function Attention({ binding, runtime }: { binding: Binding; runtime?: string })
       ) : (
         binding.facts.conflicts > 0 && (
           <p className="attention">
-            ◇ {binding.facts.conflicts} unresolved conflict(s). Both versions are preserved; resolve
-            files manually and sync. Open Conflicts to inspect preserved copies.
+            ◇ {binding.facts.conflicts} unresolved conflict(s). Both versions are preserved;
+            resolve files manually and sync. Open Conflicts to inspect preserved copies.
           </p>
         )
       )}
@@ -128,6 +129,7 @@ export function Folders({
   onConnect(): void;
 }) {
   const [snapshot, setSnapshot] = useState(initial);
+  const [general, setGeneral] = useState(false);
   const [tools, setTools] = useState<'conflicts' | 'ignores' | 'removal' | 'connections'>();
   const [selectedId, setSelectedId] = useState('');
   const [busy, setBusy] = useState(false);
@@ -172,8 +174,13 @@ export function Folders({
       clearInterval(timer);
     };
   }, [send]);
-  async function act(command: DesktopCommand, message: string) {
-    if (mutating.current) return;
+  async function act(command: DesktopCommand, message = ''): Promise<DesktopReply> {
+    if (mutating.current)
+      return {
+        ok: false,
+        code: 'OWNER_BUSY',
+        message: 'A request is pending. Wait before retrying.',
+      };
     mutating.current = true;
     const version = ++epoch.current;
     setBusy(true);
@@ -182,15 +189,21 @@ export function Folders({
     let failed = false;
     try {
       const reply = await send(command);
-      if (!alive.current || version !== epoch.current) return;
+      if (!alive.current || version !== epoch.current)
+        return {
+          ok: false,
+          code: 'OWNER_STOPPED',
+          message: 'The view changed. Refresh before retrying.',
+        };
       if (!reply.ok) {
         setError(reply.message);
         failed = true;
-        return;
+        return reply;
       }
       setSnapshot(reply.snapshot);
       setReadError('');
       setNotice(message);
+      return reply;
     } catch {
       if (alive.current) {
         setError(
@@ -198,6 +211,12 @@ export function Folders({
         );
         failed = true;
       }
+      return {
+        ok: false,
+        code: 'OUTCOME_UNKNOWN',
+        message:
+          'Request outcome unknown. Refresh before retrying; no local takeover was attempted.',
+      };
     } finally {
       mutating.current = false;
       if (alive.current && version === epoch.current) {
@@ -226,6 +245,18 @@ export function Folders({
     decision.mode !== 'os-store' ||
     decision.migrationPending ||
     decision.cleanupPending;
+  if (general && snapshot)
+    return (
+      <General
+        send={(command) => act(command)}
+        initial={snapshot}
+        observationError={readError}
+        onBack={() => {
+          setGeneral(false);
+          void refresh();
+        }}
+      />
+    );
   if (tools && snapshot)
     return (
       <LocalTools
@@ -265,7 +296,9 @@ export function Folders({
           <Button variant="quiet" disabled={busy} onClick={onConnect}>
             Connections / setup
           </Button>
-          <p>Settings integrations — pending</p>
+          <Button variant="quiet" disabled={busy || !snapshot} onClick={() => setGeneral(true)}>
+            Settings
+          </Button>
           <Button
             className="quit"
             variant="quiet"
@@ -350,13 +383,13 @@ export function Folders({
               </p>
               {snapshot.status === null ? (
                 <p>
-                  Folder inventory unavailable until the credential decision or recovery barrier is
-                  resolved. Saved state is not treated as empty.
+                  Folder inventory unavailable until the credential decision or recovery barrier
+                  is resolved. Saved state is not treated as empty.
                 </p>
               ) : !bindings.length ? (
                 <p>
-                  No connected folders. Connect an existing local folder; no transfer starts until
-                  you explicitly request work.
+                  No connected folders. Connect an existing local folder; no transfer starts
+                  until you explicitly request work.
                 </p>
               ) : (
                 <div className="folder-workspace">
@@ -384,7 +417,9 @@ export function Folders({
                                 {marker(binding)}
                               </span>{' '}
                               {stateLabel(binding)} —{' '}
-                              {binding.freshness === 'observed' ? 'observed' : 'stale or unknown'}
+                              {binding.freshness === 'observed'
+                                ? 'observed'
+                                : 'stale or unknown'}
                             </span>
                             <span>{ownerLabel(binding)}</span>
                             {binding.pause.effective && (
@@ -400,13 +435,18 @@ export function Folders({
                               </span>
                             )}
                             {(binding.error || binding.statusIssues.length > 0) && (
-                              <span className={binding.attentionRequired ? 'attention' : undefined}>
-                                {binding.attentionRequired ? '◇ Needs attention' : '○ Last issue'}:{' '}
-                                {binding.error ?? 'observation unavailable'}
+                              <span
+                                className={binding.attentionRequired ? 'attention' : undefined}
+                              >
+                                {binding.attentionRequired
+                                  ? '◇ Needs attention'
+                                  : '○ Last issue'}
+                                : {binding.error ?? 'observation unavailable'}
                               </span>
                             )}
                             {snapshot.runtimeErrors[binding.connectionId] &&
-                              snapshot.runtimeErrors[binding.connectionId] !== binding.error && (
+                              snapshot.runtimeErrors[binding.connectionId] !==
+                                binding.error && (
                                 <span>
                                   Last desktop request issue (historical):{' '}
                                   {snapshot.runtimeErrors[binding.connectionId]}
@@ -415,7 +455,8 @@ export function Folders({
                             {binding.progress && (
                               <span>
                                 Uploaded {binding.progress.upload.bytes} / downloaded{' '}
-                                {binding.progress.download.bytes} ciphertext bytes; totals unknown
+                                {binding.progress.download.bytes} ciphertext bytes; totals
+                                unknown
                               </span>
                             )}
                             <span>Last success: {time(binding.lastSuccessfulSync)}</span>
@@ -507,8 +548,8 @@ export function Folders({
                         </Button>
                         {globalPaused && (
                           <p>
-                            Global pause still blocks both directions. Resuming this folder does not
-                            resume all folders.
+                            Global pause still blocks both directions. Resuming this folder does
+                            not resume all folders.
                           </p>
                         )}
                         <Button
@@ -562,7 +603,8 @@ export function Folders({
                       <details>
                         <summary>Saved lifecycle intent</summary>
                         <p>
-                          Login: {snapshot.settings.lifecycle.startAtLogin ? 'requested' : 'off'};
+                          Login:{' '}
+                          {snapshot.settings.lifecycle.startAtLogin ? 'requested' : 'off'};
                           tray:{' '}
                           {snapshot.settings.lifecycle.trayEnabled === null
                             ? 'not chosen'
@@ -570,9 +612,13 @@ export function Folders({
                               ? 'requested'
                               : 'off'}
                           ; background after close:{' '}
-                          {snapshot.settings.lifecycle.keepSyncingAfterClose ? 'requested' : 'off'}.
-                          Startup/tray are not installed; background policy is not applied. Closing
-                          currently safely quits.
+                          {snapshot.settings.lifecycle.keepSyncingAfterClose
+                            ? 'requested'
+                            : 'off'}
+                          .
+                          {snapshot.lifecycle
+                            ? ` Startup: ${snapshot.lifecycle.startup.message} Tray: ${snapshot.lifecycle.tray.message} Session: ${snapshot.lifecycle.session.message}`
+                            : ' Native effects not observed; saved intent is not proof of availability.'}
                         </p>
                       </details>
                     </aside>

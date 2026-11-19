@@ -738,10 +738,10 @@ export function Onboarding({
                       Keep syncing after closing the window
                     </label>
                     <p>
-                      These are shared saved intentions, not installed integrations. Startup and
-                      tray are not installed; close/background policy is not applied until desktop
-                      lifecycle integration. Currently closing exits safely. Explicit Quit stops
-                      only this desktop's runners, never an independent CLI owner.
+                      Saved intent is separate from native availability; see Settings — General for actual effects.
+                      With background on, Close hides even without a tray; the launcher reopens it.
+                      With it off, Close safely quits. Explicit Quit stops only this desktop's runners,
+                      never an independent CLI owner.
                     </p>
                     <Button
                       disabled={busy || lifecycle.trayEnabled === null}
@@ -780,7 +780,9 @@ export function Onboarding({
                         tray: {snapshot.settings.lifecycle.trayEnabled ? 'requested' : 'off'};
                         background after close:{' '}
                         {snapshot.settings.lifecycle.keepSyncingAfterClose ? 'requested' : 'off'}.
-                        Native effects not applied.
+                        {snapshot.lifecycle
+                          ? ` Startup: ${snapshot.lifecycle.startup.message} Tray: ${snapshot.lifecycle.tray.message} Session: ${snapshot.lifecycle.session.message}`
+                          : ' Native effects have not been observed.'}
                       </dd>
                     </dl>
                     <p>

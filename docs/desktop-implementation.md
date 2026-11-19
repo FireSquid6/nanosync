@@ -868,3 +868,100 @@ review verified the original missing-fsync finding closed before destructive wor
 the parent's post-rename ignore fault test also passed. New action/state seams passed
 scoped codehygiene. These checks do not claim physical power-loss or installed-session
 validation.
+
+## Step 10 — desktop lifecycle and honest native availability
+
+Implemented login/Close/Quit/logout policy, profile-scoped authenticated singleton
+activation and optional status/reopen tray in trusted main. The exact security,
+association, startup-launcher contract and limits are in
+[desktop-lifecycle.md](desktop-lifecycle.md). No synchronization/encryption engine,
+SQLite location, recovery/ignore barrier, daemon or notification delivery was added.
+Existing CSP, SDK source/provenance/bootstrap, argv opener and Paper notice remain;
+the app alone selects the validated GTK X11/XWayland backend before SDK import.
+
+Close vetoes synchronously and hides with keep-on even without a tray. Keep-off
+and explicit Quit coalesce existing own-only backend cleanup before approved SDK
+Quit. New work is refused, attached CLI clients detach, independent CLI owners and
+pause flags survive. Authenticated launcher activation restores the known window
+or creates a fresh window/view after destruction; uncertain/live ownership and
+cross-session activation never authorize a second owner. The singleton reuses
+shared checked private state and PID/starttime/inode locks, including definitive
+stale recovery and root-replacement refusal. Initially absent roots get only an
+empty private directory before identity capture, not credential initialization.
+
+Native availability/applied/error observations are separate from persisted intent.
+Periodic reconciliation rereads CLI preferences without cached writeback and skips
+busy ticks rather than accumulating slow-probe follow-ups. General settings shows
+fresh native observations without rebasing an unsaved draft/CAS revision. Its save
+and explicit refresh share the Folders epoch; old pre-save polls are rejected and
+failed observations become unknown/historical instead of stale Available/Applied.
+
+Session shutdown uses maintained libsystemd session association/state/monitor APIs,
+rechecked at work admission and every second. Closing/removal or observation loss
+invokes own-only shutdown, not shared pause or CLI termination. Own-PID Wayland
+login association can support the XWayland app backend; native GTK Wayland remains
+unvalidated. Inherited IDs retain provenance and need a positive display match;
+a stale inherited Wayland session-A ID plus empty logind display/current display B
+fails closed and cannot become singleton session authority. Unknown association
+blocks desktop sync honestly. No arbitrary UID-session choice or user-manager
+cgroup inference is used; actual installed login/logout remains step 12.
+
+Tray construction requires explicit true choice and a real registered host, not
+`Tray.visible` or watcher-name ownership alone. Applied status also observes this
+process/current native item registration. Menu-only Linux exposes exactly Open
+Nanosync. Shared actionable attention selects red diamond/exclamation vs normal
+green and status text without vault filenames/paths. Missing/disabled tray never
+blocks hiding, syncing or authenticated launcher reopening.
+
+Startup manages only an exactly marked profile-specific owned XDG entry, using
+Desktop Entry argv escaping and a proven active consumer/generator. Foreign or
+unsafe/read-only entries are preserved, failures retain intent, and durability is
+rechecked before claiming installation. Startup remains unavailable until a trusted
+installed public wrapper has actual verified Resources/main.js → Worker argv
+forwarding evidence. The parent-owned SDK prerequisite `82f6117` fixes and verifies
+the Worker seam; it does **not** make the upstream outer launcher forward argv or
+certify the unbuilt step-12 Nix wrapper. No development/inner Bun path, covert argv
+environment channel or runtime-verification bypass is registered as startup.
+
+Final implementation-agent verification (all after the review fixes):
+
+- `bun test`: **560 passed, 0 failed**, Bun **1.4.4**.
+- `nix shell --inputs-from . nixpkgs#bun --command bun test`: **560 passed, 0 failed**,
+  locked-nixpkgs Bun **1.4.2**; suites run sequentially.
+- `bun run typecheck` and `bun run --cwd apps/desktop typecheck:native`: passed.
+- `bun run test:browser`: **28 passed**, including General native-loss/draft/CAS,
+  failed-read demotion and deferred pre-save poll tests with fake clocks/barriers.
+- `bun run build:binary` and `nix build path:. --no-link`: passed. Project Nix adds
+  libsystemd/systemctl plus test-only Python dbus-next; no Bun dependency/lock or
+  generated Nix dependency expression changed.
+- `nix develop --command bun build/desktop/lifecycle-gate.ts`: passed both explicit
+  Quit and keep-off Close. Actual private fake watcher proves owned-but-host-false
+  remains unavailable, registration, sole Open menu activation, title/icon updates
+  and host loss. Actual helpers/backend/singleton prove no-tray hide/reopen, fresh
+  window recreation, authenticated cross-process activation and deferred cleanup.
+  Private gio launch checks Desktop Entry special-character argv. **Zero fixture
+  process groups remain.** No host panel/system bus/service activation is used.
+- `nix develop --command bun run --cwd apps/desktop security:gate`: fatal **1** and
+  normal Quit **0**, real RPC/privacy/auth/navigation checks, zero fixture groups;
+  core `0660514…` and preload `de08a1…` unchanged. Parent prerequisite separately
+  validated inner-runtime argv on its four-gate run; the outer launcher still drops
+  ordinary argv, as its gate honestly records.
+- Rebuilt the stable product after fixture gates with
+  `nix develop --command bun run --cwd apps/desktop build`. Extracted actual payload
+  verification passed: current SDK/runtime manifest, product lifecycle code, linked
+  CSS, byte-identical CSP HTML/Paper notice, both tray images and no fixture entry.
+- Scoped codehygiene executed with project-pinned Nix Python/NumPy. Lifecycle
+  passes; retained advisories (including General) are long fixed guidance text, intentional
+  repeated security revalidation/descriptor cleanup and fail-closed missing-display
+  handling. Optional codehygiene 0.6.1 update was not installed. Whitespace checks
+  passed. Logs: `/tmp/nanosync-step10-*.log`.
+
+Tests use deferred barriers/fake clocks, private roots and synthetic credential or
+session adapters, never correctness sleeps. Existing real held-transfer tests now
+exercise Quit, session-closing and monitor-loss for both own desktop and independent
+CLI owners. No real client root, keyring, host window/focus/input, compositor/PAM or
+startup state was used. Installed-session startup/logout/focus and host-panel smoke,
+native GTK Wayland and steps 11/12 remain unclaimed. No staging, commit or push was
+performed by the step-10 implementation agent.
+
+Parent acceptance reran the final Git-visible scope independently: **560 tests / 6484 assertions** on each Bun, **28 browser tests**, workspace/tools/native types, binary/default Nix builds, stable product build and actual compressed-payload notice/CSP/SDK verification. Actual lifecycle and SDK fatal/normal gates passed again with **zero fixture process groups**. Independent reviewer verified the stale inherited-Wayland association finding closed (13 focused tests / 118 assertions); no remaining concrete safety issue in that bounded review. Scoped hygiene retained intentional fail-closed catches and repeated descriptor/security checks. Initial concurrent parent Bun-suite runs collided on existing fixed server ports 7570/7571; both passed when rerun sequentially, so the two full suites must not be run together. Evidence: `/tmp/nanosync-step10-parent-*.log`. Installed-session claims remain reserved for step 12.

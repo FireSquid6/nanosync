@@ -75,10 +75,16 @@ export type DesktopCommand =
     }
   | { type: 'resume-removal'; requestId: string; confirmed: true }
   | { type: 'administration'; urlIdentity: string };
-export type DesktopSnapshot = OnboardingSnapshot & {
+export type DesktopSnapshot = Omit<OnboardingSnapshot, 'nativeEffects'> & {
+  nativeEffects: {
+    startup: 'not-installed' | 'applied' | 'unavailable';
+    tray: 'not-installed' | 'applied' | 'unavailable';
+    backgroundPolicy: 'not-applied' | 'applied';
+  };
   clientRoot: string;
   administration: string[];
   runtimeErrors: Record<string, string>;
+  lifecycle?: import('./lifecycle').LifecycleStatus;
 };
 export type DesktopReply =
   | {

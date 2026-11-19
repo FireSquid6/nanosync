@@ -159,6 +159,8 @@ const messages: Record<string, string> = {
     'Stop older or unadvertised sync owners before upgrading shared settings. No lock was bypassed.',
   OWNER_BUSY: 'Sync is already starting. Refresh and retry.',
   OWNER_STOPPED: 'The owner stopped. Explicitly start again.',
+  DESKTOP_INSTANCE_UNAVAILABLE: 'The desktop profile or private instance identity changed. Desktop work is stopping; preserve state and relaunch after the old instance has safely stopped.',
+  DESKTOP_SESSION_UNAVAILABLE: 'Graphical-session association or monitoring is unavailable. Desktop synchronization is blocked; relaunch from a supported associated X11/XWayland graphical session. Independent CLI work is unaffected.',
   SYNC_PAUSED:
     'Sync is paused. Resume the global or folder pause through the client before retrying.',
   FOLDER_UNAVAILABLE:
@@ -199,6 +201,11 @@ export interface DesktopNative {
   openAdministration(url: string): Promise<{ ok: boolean }>;
   openFolder?(checkedRoot: string): Promise<{ ok: boolean }>;
   quit(): void;
+  lifecycleStatus?(): import('./lifecycle').LifecycleStatus;
+  canSync?(): boolean;
+  preferencesChanged?(): Promise<void>;
+  requestQuit?(): void;
+  authorize?(): void;
 }
 export function createDesktopBackend(
   root: string,
@@ -236,14 +243,26 @@ export function createDesktopBackend(
       }
     | undefined;
   let closing = false;
-  const snapshot = (): DesktopSnapshot => ({
-    ...onboardingSnapshot(root),
-    clientRoot: root,
-    administration: [...administration.keys()],
-    runtimeErrors: { ...runtimeErrors },
-  });
+  const snapshot = (): DesktopSnapshot => {
+    const lifecycle = native.lifecycleStatus?.();
+    return {
+      ...onboardingSnapshot(root),
+      clientRoot: root,
+      administration: [...administration.keys()],
+      runtimeErrors: { ...runtimeErrors },
+      ...(lifecycle ? {
+        lifecycle,
+        nativeEffects: {
+          startup: lifecycle.startup.applied ? 'applied' : lifecycle.startup.available === false ? 'unavailable' : 'not-installed',
+          tray: lifecycle.tray.applied ? 'applied' : lifecycle.tray.available === false ? 'unavailable' : 'not-installed',
+          backgroundPolicy: 'applied',
+        } as DesktopSnapshot['nativeEffects'],
+      } : {}),
+    };
+  };
   async function start(bindingId: string): Promise<void> {
     if (closing) throw new ClientError('OWNER_STOPPED', 'Closing');
+    if (native.canSync && !native.canSync()) throw new ClientError('DESKTOP_SESSION_UNAVAILABLE', 'Session unproven');
     const current = running.get(bindingId);
     if (current) return current.accepted;
     const binding = records(root).find((item) => item.connectionId === bindingId);
@@ -289,6 +308,7 @@ export function createDesktopBackend(
     return entry.accepted;
   }
   function syncNow(bindingId: string): Promise<void> {
+    if (native.canSync && !native.canSync()) return Promise.reject(new ClientError('DESKTOP_SESSION_UNAVAILABLE', 'Session unproven'));
     const current = once.get(bindingId);
     if (current) return current;
     const work = (async () => {
@@ -332,7 +352,7 @@ export function createDesktopBackend(
       await Promise.all([...active]);
       await stopOwnedSync(instanceId);
       await Promise.all([...running.values()].map((entry) => entry.done));
-    })());
+    })().catch(error => { shutdownWork = undefined; throw error; }));
   }
   function execute(value: unknown): Promise<DesktopReply> {
     if (value && typeof value === 'object' && 'type' in value && value.type === 'quit')
@@ -349,7 +369,8 @@ export function createDesktopBackend(
     let command: DesktopCommand | undefined;
     try {
       command = validateCommand(value);
-      if (closing) throw new ClientError('OWNER_STOPPED', 'Closing');
+      if (command.type !== 'quit') native.authorize?.();
+      if (closing && command.type !== 'quit' && command.type !== 'snapshot') throw new ClientError('OWNER_STOPPED', 'Closing');
       const data: Omit<Extract<DesktopReply, { ok: true }>, 'ok' | 'snapshot'> = {};
       switch (command.type) {
         case 'snapshot':
@@ -437,8 +458,8 @@ export function createDesktopBackend(
           enrollment?.abort();
           break;
         case 'quit':
-          await shutdown();
-          native.quit();
+          if (native.requestQuit) native.requestQuit();
+          else { await shutdown(); native.quit(); }
           break;
         case 'pause-all':
           setPaused(root, { all: true }, command.paused, command.expectedRevision);
@@ -452,6 +473,7 @@ export function createDesktopBackend(
         }
         case 'settings':
           setLifecycle(root, command.lifecycle, command.expectedRevision);
+          await native.preferencesChanged?.();
           break;
         case 'open-folder': {
           const path = checkedBindingRoot(root, command.binding);

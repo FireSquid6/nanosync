@@ -6,6 +6,7 @@
     "typecheck": "tsc -p tsconfig.check.json --noEmit",
     "typecheck:native": "tsc -p tsconfig.json --noEmit",
     "security:gate": "bun ../../build/desktop/native-gate.ts && bun ../../build/desktop/native-gate.ts --quit",
+    "lifecycle:gate": "bun ../../build/desktop/lifecycle-gate.ts",
     "prepare:native": "bash tooling.sh prepare",
     "build": "bash tooling.sh build --env=stable",
     "dev": "bash tooling.sh dev"

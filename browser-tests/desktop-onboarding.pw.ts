@@ -180,7 +180,7 @@ for (const start of [false, true])
     ).toBeDisabled();
     expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
     await page.getByRole('radio', { name: 'No', exact: true }).check();
-    await expect(page.getByText(/Startup and tray are not installed/)).toBeVisible();
+    await expect(page.getByText(/Saved intent is separate from native availability/)).toBeVisible();
     await page.getByRole('button', { name: 'Save choices and review', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'Ready to sync', exact: true })).toBeFocused();
     expect(
@@ -459,7 +459,7 @@ test('background draft captures metadata revision, refreshes explicitly after co
     await expect(page.getByRole('heading', { name: 'Ready to sync' })).toBeVisible();
     await expect(
       page.getByText(
-        'Login: off; tray: off; background after close: off. Native effects not applied.',
+        'Login: off; tray: off; background after close: off. Native effects have not been observed.',
         { exact: true },
       ),
     ).toBeVisible();

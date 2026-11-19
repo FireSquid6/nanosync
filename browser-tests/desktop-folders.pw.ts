@@ -181,9 +181,9 @@ test('folders start directly with real copy identities, orthogonal conflicts, in
   await expect(page.getByRole('heading', { name: 'Folders', exact: true })).toBeVisible();
   await expect(page.locator('.folder-row')).toHaveCount(2);
   await expect(page.locator('.folder-row').first()).toContainText('Up to date (observed)');
-  expect(commands.some((command) => ['start', 'sync-now', 'enroll'].includes(command.type))).toBe(
-    false,
-  );
+  expect(
+    commands.some((command) => ['start', 'sync-now', 'enroll'].includes(command.type)),
+  ).toBe(false);
   const copy = page.locator('.folder-row').filter({ hasText: '/temporary/documents-copy' });
   await copy.focus();
   await page.keyboard.press('Enter');
@@ -220,9 +220,9 @@ test('folders start directly with real copy identities, orthogonal conflicts, in
     for (const theme of ['light', 'dark']) {
       await page.getByLabel('Theme', { exact: true }).selectOption(theme);
       expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
-      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
-        true,
-      );
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+      ).toBe(true);
     }
   }
 });
@@ -258,8 +258,12 @@ test('locked and missing folders retain metadata, unknown progress, error recove
   );
   await page.goto(url);
   await expect(page.locator('.folder-inspector')).toContainText('Unlock the credential store');
-  await expect(page.locator('.folder-inspector')).toContainText('Transfer counters not observed');
-  await expect(page.locator('.folder-inspector')).toContainText('Conflict observation unavailable');
+  await expect(page.locator('.folder-inspector')).toContainText(
+    'Transfer counters not observed',
+  );
+  await expect(page.locator('.folder-inspector')).toContainText(
+    'Conflict observation unavailable',
+  );
   await page.getByRole('button', { name: 'Sync now', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('Unlock the credential store');
   await page.locator('.folder-row').filter({ hasText: '/temporary/documents-copy' }).click();
@@ -295,7 +299,8 @@ test('unavailable live ownership and never-started copies stay distinct and requ
       code: 'OWNER_UNAVAILABLE',
       message: 'The sync owner cannot be safely inspected.',
       retryable: false,
-      recoveryAction: 'Stop the owner and retry with a compatible client; do not bypass its lock.',
+      recoveryAction:
+        'Stop the owner and retry with a compatible client; do not bypass its lock.',
     },
   ];
   const never = snapshot.status!.bindings[1]!;
@@ -320,7 +325,8 @@ test('unavailable live ownership and never-started copies stay distinct and requ
         ? {
             ok: false,
             code: 'OWNER_UNAVAILABLE',
-            message: 'Owner unavailable. Stop it explicitly and retry; its lock was not bypassed.',
+            message:
+              'Owner unavailable. Stop it explicitly and retry; its lock was not bypassed.',
           }
         : { ok: true, snapshot };
     },
@@ -331,7 +337,9 @@ test('unavailable live ownership and never-started copies stay distinct and requ
   await expect(page.getByRole('alert')).toContainText('lock was not bypassed');
   await page.locator('.folder-row').filter({ hasText: '/temporary/documents-copy' }).click();
   await expect(page.locator('.folder-inspector')).toContainText('Not started');
-  await expect(page.locator('.folder-inspector')).toContainText('Transfer counters not observed');
+  await expect(page.locator('.folder-inspector')).toContainText(
+    'Transfer counters not observed',
+  );
   expect(
     commands.every((command) => command.type === 'snapshot' || command.type === 'sync-now'),
   ).toBe(true);
@@ -589,9 +597,9 @@ test('manual conflicts, validated ignore CAS and explicit removal have keyboard-
     for (const theme of ['light', 'dark']) {
       await page.getByLabel('Theme', { exact: true }).selectOption(theme);
       expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
-      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
-        true,
-      );
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+      ).toBe(true);
     }
   }
   await page.getByRole('button', { name: 'Back to folders' }).click();
@@ -667,11 +675,177 @@ test('incomplete removal remains visible and explicitly resumable with absent re
       name: 'Incomplete removal — original identities preserved',
     }),
   ).toBeVisible();
-  await expect(page.getByText('/temporary/documents — local copy', { exact: false })).toBeVisible();
+  await expect(
+    page.getByText('/temporary/documents — local copy', { exact: false }),
+  ).toBeVisible();
   await page.getByRole('button', { name: 'Explicitly resume authorized removal' }).click();
   expect(commands.find((command) => command.type === 'resume-removal')).toEqual({
     type: 'resume-removal',
     requestId: deviceId,
     confirmed: true,
   });
+});
+
+test('General settings separates intent/effects and refuses a draft made stale by CLI without overwriting pauses', async ({
+  page,
+}) => {
+  const snapshot = state();
+  snapshot.lifecycle = {
+    startup: {
+      available: false,
+      applied: false,
+      message: 'No proven active XDG autostart consumer.',
+    },
+    tray: {
+      available: false,
+      applied: false,
+      message: 'No StatusNotifierWatcher; reopen with launcher.',
+    },
+    session: {
+      available: true,
+      applied: true,
+      message: 'Associated graphical session monitored.',
+    },
+    closing: false,
+  };
+  await page.exposeBinding(
+    'desktopPresentation',
+    async (_source, command: DesktopCommand): Promise<DesktopReply> => {
+      if (command.type === 'settings') {
+        if (command.expectedRevision !== snapshot.settings.revision)
+          return {
+            ok: false,
+            code: 'CONFLICT',
+            message: 'Settings changed. Refresh before retrying.',
+          };
+        snapshot.settings.lifecycle = command.lifecycle;
+        snapshot.settings.revision++;
+      }
+      return { ok: true, snapshot };
+    },
+  );
+  await page.goto(url);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Settings — General' })).toBeVisible();
+  await expect(page.getByText('No StatusNotifierWatcher;', { exact: false })).toBeVisible();
+  await page.getByLabel('Start at login').check();
+  snapshot.settings.globalPaused = true;
+  snapshot.settings.revision++;
+  await page.getByRole('button', { name: 'Save preferences' }).click();
+  await expect(page.getByRole('alert')).toContainText('Settings changed');
+  expect(snapshot.settings.lifecycle.startAtLogin).toBe(false);
+  expect(snapshot.settings.globalPaused).toBe(true);
+  await page.getByRole('button', { name: 'Refresh saved settings' }).click();
+  await expect(page.getByLabel('Start at login')).not.toBeChecked();
+  await page.getByLabel('Start at login').check();
+  await page.getByRole('button', { name: 'Save preferences' }).click();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  expect(snapshot.settings.lifecycle.startAtLogin).toBe(true);
+  expect(snapshot.settings.globalPaused).toBe(true);
+  await expect(page.getByText('No proven active XDG autostart consumer.')).toBeVisible();
+  for (const theme of ['light', 'dark']) {
+    await page.evaluate((value) => (document.documentElement.dataset.theme = value), theme);
+    expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  }
+});
+
+test('General observes native loss without rebasing drafts, rejects pre-save polls and demotes failed observations', async ({
+  page,
+}) => {
+  await page.clock.install({ time: 0 });
+  await page.clock.pauseAt(1000);
+  const snapshot = state(),
+    entered = Promise.withResolvers<void>(),
+    release = Promise.withResolvers<void>();
+  snapshot.lifecycle = {
+    startup: { available: null, applied: false, message: 'Login off.' },
+    tray: { available: true, applied: true, message: 'Tray registered.' },
+    session: { available: true, applied: true, message: 'Session associated.' },
+    closing: false,
+  };
+  let reads = 0,
+    fail = false;
+  await page.exposeBinding(
+    'desktopPresentation',
+    async (_source, command: DesktopCommand): Promise<DesktopReply> => {
+      if (command.type === 'snapshot') {
+        if (fail) throw Error('synthetic transport loss');
+        if (++reads === 2) {
+          const old = structuredClone(snapshot);
+          entered.resolve();
+          await release.promise;
+          return { ok: true, snapshot: old };
+        }
+      }
+      if (command.type === 'settings') {
+        if (command.expectedRevision !== snapshot.settings.revision)
+          return {
+            ok: false,
+            code: 'CONFLICT',
+            message: 'Settings changed. Refresh before retrying.',
+          };
+        snapshot.settings.lifecycle = command.lifecycle;
+        snapshot.settings.revision++;
+        snapshot.lifecycle!.tray = {
+          available: false,
+          applied: false,
+          message: 'Watcher lost.',
+        };
+      }
+      return { ok: true, snapshot };
+    },
+  );
+  try {
+    await page.goto(url);
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    const tray = page.getByRole('heading', { name: 'tray', exact: true }).locator('..');
+    await expect(tray).toContainText('Available · Applied');
+    await page.getByLabel('Start at login').check();
+    await page.evaluate(() => {
+      const host = window as unknown as {
+        desktopPresentation(command: DesktopCommand): Promise<DesktopReply>;
+        pollReply?: Promise<DesktopReply>;
+      };
+      const original = host.desktopPresentation;
+      host.desktopPresentation = (command) => {
+        const reply = original(command);
+        if (command.type === 'snapshot') host.pollReply = reply;
+        return reply;
+      };
+    });
+    await page.clock.runFor(1500);
+    await entered.promise;
+    await page.getByRole('button', { name: 'Save preferences' }).click();
+    await expect(tray).toContainText('Unavailable · Not applied');
+    release.resolve();
+    await page.evaluate(async () => {
+      await (window as unknown as { pollReply: Promise<DesktopReply> }).pollReply;
+    });
+    await expect(tray).toContainText('Watcher lost.');
+    await page.getByLabel('Keep syncing after closing the window').uncheck();
+    snapshot.settings.revision++;
+    snapshot.settings.globalPaused = true;
+    snapshot.lifecycle!.session = {
+      available: false,
+      applied: false,
+      message: 'Session lost.',
+    };
+    await page.clock.runFor(1500);
+    await expect(page.getByText('Session lost.', { exact: false })).toBeVisible();
+    await expect(page.getByLabel('Start at login')).toBeChecked();
+    await expect(page.getByLabel('Keep syncing after closing the window')).not.toBeChecked();
+    await page.getByRole('button', { name: 'Save preferences' }).click();
+    await expect(page.getByRole('alert')).toContainText('Settings changed');
+    expect(snapshot.settings.lifecycle.keepSyncingAfterClose).toBe(true);
+    expect(snapshot.settings.globalPaused).toBe(true);
+    fail = true;
+    await page.clock.runFor(1500);
+    await expect(
+      page.getByText('Native observation unavailable.', { exact: false }),
+    ).toBeVisible();
+    await expect(page.getByText('Available · Applied', { exact: false })).toHaveCount(0);
+    await expect(page.getByLabel('Keep syncing after closing the window')).not.toBeChecked();
+  } finally {
+    release.resolve();
+  }
 });

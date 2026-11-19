@@ -29,13 +29,15 @@
           desktopBun nodejs curl gnutar gzip xz git util-linux binutils patchelf pkg-config
           xorg-server
           gtk3 webkitgtk_4_1 libayatana-appindicator librsvg libsecret
-          glib dbus xdg-utils
+          glib dbus xdg-utils systemd
+          (python3.withPackages (python: [ python.dbus-next ]))
         ];
         shellHook = ''
           export HUTCH_HOME="$PWD/.cache/hutch"
           export NANOSYNC_XVFB="${pkgs.xorg-server}/bin/Xvfb"
           export NANOSYNC_DBUS="${pkgs.dbus}/bin/dbus-daemon"
           export NANOSYNC_XDG_OPEN="${pkgs.xdg-utils}/bin/xdg-open"
+          export NANOSYNC_LIBSYSTEMD="${pkgs.systemd}/lib/libsystemd.so.0"
           export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath (with pkgs; [
             gtk3 webkitgtk_4_1 libayatana-appindicator librsvg libsecret
           ])}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
