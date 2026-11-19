@@ -154,20 +154,31 @@ export function createConnection(globalDirectory: string, destination: string, s
 }
 
 /** Client adapter: revalidate the selected server while mutation is serialized with removal. */
-export function connectRegisteredVault(globalDirectory: string, destination: string, serverId: string, vaultId: string, deviceId: string, confirmNonempty = false): Connection {
+export function connectRegisteredVault(globalDirectory: string, destination: string, serverId: string, vaultId: string, deviceId: string, confirmNonempty = false, expectedRoot?: { dev: string; ino: string }): Connection {
   return withConnectionRegistry(globalDirectory, () => {
     const saved = credentialMetadata(globalDirectory, `servers/${parseVaultId(serverId)}.json`);
     if (saved.serverId !== serverId || saved.deviceId !== deviceId) throw new Error('server connection changed; select it again');
+    if (expectedRoot) {
+      const current = lstatSync(rootPath(destination), { bigint: true });
+      if (String(current.dev) !== expectedRoot.dev || String(current.ino) !== expectedRoot.ino) throw new ClientError('SELECTION_CHANGED', 'Folder changed; select it again.');
+    }
     return createLocked(globalDirectory, destination, serverId, vaultId, deviceId, confirmNonempty);
   });
 }
-function createLocked(globalDirectory: string, destination: string, serverId: string, vaultId: string, deviceId: string, confirmNonempty: boolean): Connection {
+export function inspectDestination(globalDirectory: string, destination: string): { path: string; nonempty: boolean } {
+  return withConnectionRegistry(globalDirectory, () => checkedDestination(globalDirectory, destination));
+}
+function checkedDestination(globalDirectory: string, destination: string): { path: string; nonempty: boolean } {
   const global = privateDirectory(globalDirectory), root = rootPath(destination);
   if (overlaps(root, global)) throw new Error("sync destination overlaps private global state");
   if (ancestorMarker(root, global)) throw new Error("sync destination is nested under a marked sync root");
   if (records(global).some(item => overlaps(root, item.root))) throw new Error("sync roots may not overlap or already be bound");
   if (existsSync(join(root, MARKER))) throw new Error("destination already has a marker; use explicit move or copy repair");
-  if (readdirSync(root).length && !confirmNonempty) throw new Error("destination contains files; confirm that existing files participate in synchronization");
+  return { path: root, nonempty: readdirSync(root).length > 0 };
+}
+function createLocked(globalDirectory: string, destination: string, serverId: string, vaultId: string, deviceId: string, confirmNonempty: boolean): Connection {
+  const global = privateDirectory(globalDirectory), selected = checkedDestination(global, destination), root = selected.path;
+  if (selected.nonempty && !confirmNonempty) throw new Error("destination contains files; confirm that existing files participate in synchronization");
   if (!serverId || serverId.includes("\0")) throw new Error("invalid server registration");
   const connection: Connection = { version: 1, connectionId: randomUUID(), root, serverId, vaultId: parseVaultId(vaultId), deviceId: parseDeviceId(deviceId) };
   const directory = privateDirectory(join(global, "connections"));

@@ -5,7 +5,7 @@ import { existsSync, readdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { decodeRecoverySecret, unwrapMasterKey, RemoteError } from "@nanosync/sync-core";
-import { enrollmentVerificationCode, parseCapabilityResponse, parseDeviceId } from "@nanosync/protocol";
+import { enrollmentVerificationCode, parseCapabilityResponse, parseDeviceId, parseVaultId, parseRecoveryWrap } from "@nanosync/protocol";
 import { api, baseUrl, login } from "./client.ts";
 import { privateDirectory, syncPrivateDirectory } from "./security.ts";
 
@@ -69,10 +69,13 @@ export function pendingEnrollments(root: string): Omit<PendingEnrollment, 'token
 }
 function pendingFile(root: string, url: string) { return join(dir(root, "pending"), createHash("sha256").update(baseUrl(url)).digest("hex") + ".json"); }
 export function connectionSummary(info: ServerMetadata) {
-  return { serverId: info.serverId, alias: info.name, url: info.baseUrl, deviceId: info.deviceId, status: "approved" };
+  return { serverId: info.serverId, alias: info.name, url: info.baseUrl, deviceId: info.deviceId, status: "approved" as const };
 }
+export type EnrollmentResult = ReturnType<typeof connectionSummary> | {
+  status: 'pending' | 'denied' | 'expired'; alias: string; url: string; deviceId: string; deviceName: string;
+};
 async function enrollLocked(root: string, url: string, password: string | undefined, deviceName: string,
-  waitMs = 60_000, options: { alias?: string; fresh?: boolean; signal?: AbortSignal; password?: () => Promise<string>; onEvent?: (event: EnrollmentEvent) => void } & CredentialOptions = {}): Promise<Record<string, unknown> & { status: string }> {
+  waitMs = 60_000, options: { alias?: string; fresh?: boolean; signal?: AbortSignal; password?: () => Promise<string>; onEvent?: (event: EnrollmentEvent) => void } & CredentialOptions = {}): Promise<EnrollmentResult> {
   const waitDeadline = waitMs > 0 ? Date.now() + waitMs : Infinity;
   const interrupted = () => new ClientError("INTERRUPTED", "Enrollment interrupted; retry the same command to resume", 130);
   // Every exchange is bounded, even submit-and-exit and interactive enrollment.
@@ -176,7 +179,13 @@ async function enrollLocked(root: string, url: string, password: string | undefi
     }
   }
   const caps = await retry(signal => api(canonical, "/v1/capabilities", {signal}));
-  if (caps) { const admin = parseCapabilityResponse(caps).webAdministration; if (admin.enabled && admin.url) options.onEvent?.({ type: 'administration', url: admin.url }); }
+  if (caps) {
+    let capabilities;
+    try { capabilities = parseCapabilityResponse(caps); }
+    catch { throw new ClientError('INVALID_RESPONSE', 'Invalid server capabilities', 5); }
+    const admin = capabilities.webAdministration;
+    if (admin.enabled && admin.url) options.onEvent?.({ type: 'administration', url: admin.url });
+  }
   let status = Date.now() >= request.expiresAtMs ? "expired" : request.status ?? "pending";
   if (status === "pending") {
     try {
@@ -199,6 +208,7 @@ async function enrollLocked(root: string, url: string, password: string | undefi
     }
   }
   if (status === "pending" && Date.now() >= request.expiresAtMs) status = "expired";
+  if (!['pending', 'approved', 'denied', 'expired'].includes(status)) throw new ClientError('INVALID_RESPONSE', 'Invalid enrollment response', 5);
   if (status === "approved") {
     const info: ServerRegistration = { version: 1, serverId: request.serverId, baseUrl: canonical, deviceId: request.deviceId, name: alias, token: request.token };
     const path = join(dir(root, "servers"), `${request.serverId}.json`);
@@ -215,16 +225,19 @@ async function enrollLocked(root: string, url: string, password: string | undefi
     await withCredentialRegistry(root, () => writeCredentialRecord(root, `pending/${pendingPath.split("/").pop()!}`, {...request, status}, options));
     options.onEvent?.({ type: 'terminal', status });
   }
-  return { status, alias, url: canonical, deviceId: request.deviceId, deviceName: request.name };
+  return { status: status as 'pending' | 'denied' | 'expired', alias, url: canonical, deviceId: request.deviceId, deviceName: request.name };
 }
 
 export async function unlockVault(root: string, info: ServerMetadata, vaultId: string, secret: string, options: CredentialOptions = {}): Promise<void> {
   return withCredentialOperation(root, async () => {
   const credential = await authenticatedServer(root, info.serverId, options);
   const wrap = await api(credential.baseUrl, "/v1/recovery-wrap", { headers: { "x-nanosync-vault-id": vaultId } }, credential.token);
+  let recoveryWrap;
+  try { recoveryWrap = parseRecoveryWrap(wrap.recoveryWrap); }
+  catch { throw new ClientError('INVALID_RESPONSE', 'Invalid server recovery wrap', 5); }
   const recovery = await decodeRecoverySecret(secret);
   try {
-    const master = await unwrapMasterKey(wrap.recoveryWrap, recovery, vaultId);
+    const master = await unwrapMasterKey(recoveryWrap, recovery, vaultId);
     try { await saveKey(root, info, vaultId, master, options); } finally { master.fill(0); }
   } finally { recovery.fill(0); }
   });
@@ -233,7 +246,18 @@ export async function unlockVault(root: string, info: ServerMetadata, vaultId: s
 export interface RemoteVault { vaultId: string; name: string }
 export async function listRemoteVaults(root: string, info: ServerMetadata, options: CredentialOptions = {}): Promise<RemoteVault[]> {
   const credential = await authenticatedServer(root, info.serverId, options);
-  return (await api(credential.baseUrl, '/v1/vaults', {}, credential.token)).vaults;
+  const value = (await api(credential.baseUrl, '/v1/vaults', {}, credential.token)).vaults;
+  if (!Array.isArray(value) || value.length > 10000) throw new ClientError('INVALID_RESPONSE', 'Invalid vault list', 5);
+  const seen = new Set<string>();
+  return value.map(item => {
+    if (!item || typeof item !== 'object' || typeof item.name !== 'string' || !item.name.trim() || Buffer.byteLength(item.name) > 1024 || /[\u0000-\u001f\u007f]/u.test(item.name))
+      throw new ClientError('INVALID_RESPONSE', 'Invalid vault list', 5);
+    let vaultId: string;
+    try { vaultId = parseVaultId(item.vaultId); } catch { throw new ClientError('INVALID_RESPONSE', 'Invalid vault list', 5); }
+    if (seen.has(vaultId)) throw new ClientError('INVALID_RESPONSE', 'Invalid vault list', 5);
+    seen.add(vaultId);
+    return { vaultId, name: item.name };
+  });
 }
 export function resolveRemoteVault(list: RemoteVault[], choice: string): RemoteVault {
   const matches = list.filter(vault => vault.vaultId === choice || vault.name === choice);

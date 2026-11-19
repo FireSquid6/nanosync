@@ -1,15 +1,6 @@
 <!doctype html>
+<!-- Paper UI: https://github.com/FireSquid6/paper-ui @ f6cd7e07c88aa780618717a388c3762fd406bef1; see bundled PAPER-UI-NOTICE.md -->
 <html lang="en">
-<head><meta charset="UTF-8"><title>Nanosync validation</title></head>
-<body>
-  <h1>Nanosync Linux validation spike</h1>
-  <p>No sync, enrollment, user credentials, or updater. Disposable tests only.</p>
-  <p>Closing hides this window. Use the tray’s Open Nanosync menu to reopen.</p>
-  <button id="hide">Close / hide</button>
-  <button id="picker">Choose test folder</button>
-  <button id="open">Open disposable folder</button>
-  <button id="quit">Quit</button>
-  <p><output aria-live="polite">SQLite checked; no credential-store access at startup.</output></p>
-  <script type="module" src="views://main/index.js"></script>
-</body>
+<head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src views:; style-src views: 'unsafe-inline'; connect-src ws://127.0.0.1:*; frame-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Nanosync</title><link rel="stylesheet" href="views://main/view.css"></head>
+<body><div id="root"></div><script type="module" src="views://main/index.js"></script></body>
 </html>

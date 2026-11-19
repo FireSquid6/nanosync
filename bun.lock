@@ -17,7 +17,17 @@
       "name": "@nanosync/desktop",
       "dependencies": {
         "@nanosync/client-local": "workspace:*",
+        "@nanosync/client-service": "workspace:*",
+        "@nanosync/protocol": "workspace:*",
+        "@nanosync/ui-theme": "workspace:*",
+        "@radix-ui/react-dialog": "^1.1.15",
         "electrobun": "2.0.6",
+        "react": "^19.2.0",
+        "react-dom": "^19.2.0",
+      },
+      "devDependencies": {
+        "@types/react": "^19.2.0",
+        "@types/react-dom": "^19.2.0",
       },
     },
     "apps/site": {

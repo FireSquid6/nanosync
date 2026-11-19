@@ -23,6 +23,7 @@ export default {
     copy: {
       [fixture ? "tests/native/index.html" : "src/index.html"]: "views/main/index.html",
       "src/tray.svg": "views/main/tray.svg",
+      "../../packages/admin-ui/PAPER-UI-NOTICE.md": "views/main/PAPER-UI-NOTICE.md",
       ...(fixture ? {
         "tests/native/failure.html": "views/main/failure.html",
         "tests/native/transport.html": "views/main/transport.html",

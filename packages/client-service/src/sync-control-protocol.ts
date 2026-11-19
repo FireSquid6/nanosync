@@ -9,7 +9,7 @@ export const MAX_FRAME = 2048;
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const NONCE = /^[0-9a-f]{32}$/;
 export type Head = { revisionId: string; sequence: number };
-export type Operation = 'sync' | 'watch' | 'stop-for-removal';
+export type Operation = 'sync' | 'watch' | 'watch-accept' | 'stop-for-removal';
 export type ControlRequest = {
   version: 1; id: string; root: string; binding: string; instance: string; operation: Operation;
 };
@@ -171,7 +171,7 @@ export function request(value: unknown): ControlRequest {
       typeof record.root !== 'string' || record.root.length > 4096 ||
       typeof record.binding !== 'string' || !UUID.test(record.binding) ||
       typeof record.instance !== 'string' || !UUID.test(record.instance) ||
-      !['sync', 'watch', 'stop-for-removal'].includes(record.operation as string))
+      !['sync', 'watch', 'watch-accept', 'stop-for-removal'].includes(record.operation as string))
     throw failure('OWNER_UNAVAILABLE');
   return record as ControlRequest;
 }

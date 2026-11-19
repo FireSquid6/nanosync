@@ -541,3 +541,117 @@ privacy, authenticated loopback transport and navigation gates passed independen
 Scoped codehygiene retained density advisories and intentional issue-reporting catches;
 its optional 0.6.1 update is available. No real credentials or physical power-loss
 validation is claimed.
+
+## Step 7 — service-backed terminal-free setup
+
+The desktop now replaces spike actions with the Field Guide five-step React setup:
+real enrollment and retained pending resume, verification/external capability-only
+administration, approved vault/key and native existing-folder selection, shared
+lifecycle intentions, and connect-without-transfer or explicit continuous Start.
+Existing Paper controls and theme leaves are reused without admin application code.
+No production fixtures, response selectors or fake keyring adapters are present.
+
+Credential decisions precede secret use. Protected-file roots offer leave-unchanged
+CLI use or confirmed whole-root migration; interrupted migration exposes only a
+validated safe phase/rollback decision. Cleanup intent is forward-only. OS-store
+unavailability blocks access without recovery prompts or file fallback. Only a
+truly absent vault key or explicitly retried pending write requests recovery input.
+Renderer RPC has exact bounded runtime schemas, fixed allowlisted errors and picked
+folder tokens, never generic filesystem/SQL/credential/native access. Typed enrollment
+results supply actual status, alias and canonical URL, including existing connections
+whose alias differs from new form input. Malformed successful capability/vault/recovery
+responses become fixed `INVALID_RESPONSE` errors (remote exit 5), not parser paths. Password and
+recovery fields are cleared on submission, completion, cancellation, back and unmount;
+JavaScript strings cannot guarantee physical zeroization.
+
+Shared settings v2 retains independent pauses and CAS revision, adds three lifecycle
+intentions and accepted continuous origin per binding. Missing continuous entries
+mean false/not requested. The origin-valued map avoids a second provenance map and
+records the accepting owner, not the requesting interface. Lifecycle defaults are
+login false, tray null/unanswered, background-after-close true. Reads normalize v1
+without writes; explicit save/watch upgrades under registry then settings locking.
+Upgrade refuses older/unadvertised live owners before changing state. Owner discovery
+metadata v2 advertises this compatibility; control requests remain v1. Existing
+pause/resume CLI envelopes/data remain v1. `client settings view|set` exposes shared
+intent with `nativeEffects:not-applied`; CLI watch and desktop Start share the same
+acceptance/persistence seam, while one-shot does not set continuous intent.
+
+Start invokes real authenticated bound watch and coalesces duplicate requests. An
+attached temporary owner is rejected actionably, never promoted/stolen. A continuous
+CLI owner retains its origin and survives desktop Quit. Only the host persists accepted
+origin; attachment replies never write it. A barrier regression delays an old desktop
+acceptance until a replacement CLI watch has persisted its origin, then proves the
+late reply cannot overwrite CLI provenance. The authenticated acceptance operation
+also does not wait for a held remote transfer/pass. Restart resumes only accepted
+desktop-origin work, not new bindings or CLI-origin intent. A failed Start after
+connect leaves one connected binding with a retry action. Main resolves the saved
+binding and holds real watch promises; renderer does not own the engine lifetime.
+
+The validated SDK bootstrap, hashes, aliases, trusted argv opener and packaged-only
+navigation remain intact. Main creates about:blank, sets rules, then loads local
+content. No tray is initialized and no spike probes run. The synchronous cancelable
+before-quit hook vetoes immediately, asynchronously awaits own-runner cleanup and
+CLI detachment, drains in-flight operations (including uncancellable credential-store
+writes), then reissues Quit only on success; it does not assume SDK event handlers
+are awaited. Startup/tray/background effects are explicitly not installed
+or applied in this slice; closing currently safely quits. Full lifecycle policy is
+step 10, and the small completion view is not step 8's full folders dashboard.
+
+UI concurrency regressions hold replies at explicit barriers: old cancelled enrollment
+cannot erase a new password; mutable drafts are disabled while busy without disabling
+cancellation; lifecycle values and their base revision are captured together on entering
+the background step. Unrelated metadata refresh cannot bless an older draft. An explicit
+conflict refresh replaces both draft and revision, and Ready displays actual saved
+snapshot values. Enrollment retry, key retry, fresh enrollment and migration confirmation
+have separate consent state, reset on identity changes/attempt/cancel. No consent carries
+from one credential/key operation to another.
+
+New secret-bearing product HTML adds a restrictive CSP: packaged `views:` scripts and
+styles, only loopback SDK WebSocket connections, no inline/eval scripts, forms, frames,
+workers, objects or base injection. Inline styles are allowed for house controls.
+This is additional hardening over the spike's absent product CSP, not a regression
+claim or a trusted-preload/renderer sandbox. The actual native SDK RPC fixture uses
+the identical policy, verified by a default unit test and the real packaged gate;
+trusted WebKit console-observer injection remains functional. No SDK source/patches,
+bootstrap, hashes, build pipeline or opener protections were changed. Product package
+inspection also checks real linked JS/CSS assets; Hutch names the CSS `view.css`, not
+`index.css`, so the shipped HTML links the actual bundled stylesheet.
+
+Verification on this slice:
+
+- **492 default tests passed** on Bun 1.4.4 and locked-nixpkgs Bun 1.4.2, run sequentially.
+  An earlier simultaneous two-runtime run collided on existing fixed-port server tests;
+  sequential reruns passed. New tests use barriers/event synchronization, not sleeps or
+  wall-clock deadline correctness assertions.
+- Workspace/tools and native desktop types passed. **18 browser tests passed**, including
+  **11 desktop presentation cases**, light/dark axe checks, focus, nonempty acknowledgment,
+  canonical/existing enrollment identities, separate Start/Finish, stale replies, shared
+  settings revisions and operation-scoped consent. Presentation fixtures are separate
+  from real service/HTTP/credential-adapter integration and never enter the product bundle.
+- Real disposable server/vault integration proves recovery, locked-vs-missing handling,
+  no journal/transfer on connect, real continuous work on a subsequent file edit,
+  coalesced Start, desktop-only restart intent, temporary-owner refusal and independent
+  CLI survival. Memory credential adapters are test-only; no real keyring is used.
+- CLI binary, default Nix build and stable desktop build passed. `bun2nix` was regenerated
+  using the pinned project input; its generated expression was unchanged because all
+  dependencies already existed. Workspace dependency declarations and `bun.lock` changed.
+- CSP-aligned packaged SDK gate passed fatal **1** / normal Quit **0**, actual RPC,
+  privacy/auth/navigation checks and zero remaining fixture process groups; original
+  core/preload hashes remained unchanged. This is SDK-policy evidence, not product GUI
+  onboarding/lifecycle certification.
+- Scoped codehygiene ran with project-pinned Nix Python/NumPy. Shared onboarding code
+  passed; remaining advisories are JSX nesting/layout and long fixed recovery messages.
+  New UI/backend code was formatted for readability; no schema/framework abstraction
+  was introduced solely to satisfy these early-preview advisories. Optional 0.6.1 update
+  is available. Diff whitespace checks passed.
+
+Native picker/session behavior and keyboard onboarding in an installed product are
+not claimed by headless integration/browser presentation tests; those remain release
+validation. No user client roots, credentials, host display or global input are used.
+
+Parent acceptance independently repeated 492 tests on both Bun runtimes, full
+workspace/tools/native types, all 18 browser tests, CLI binary/default Nix builds,
+the CSP-aligned packaged native gate (fatal 1 / normal 0), and the stable desktop
+build. Independent safety review closed both provenance and reflected-parser findings.
+The actual stable payload also includes the unchanged Paper UI provenance notice;
+its existing licensing-review warning is retained, not replaced with a license grant.

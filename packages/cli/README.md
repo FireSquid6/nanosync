@@ -206,7 +206,58 @@ This covers application-owned entries in the default collection, not manually mo
 or duplicated entries elsewhere. No forensic erasure from media/backups is promised.
 Desktop trusted code can initialize OS mode explicitly; opening file mode returns a
 decision-required result (leave unchanged/use CLI, or explicitly migrate the root).
-No desktop onboarding UI is implemented in this step.
+Desktop onboarding now presents this explicit decision before secret-dependent operations.
+
+## Shared lifecycle intent and explicit continuous Start
+
+```sh
+nanosync client settings view --json
+nanosync client settings set --start-at-login false --tray-enabled false \
+  --keep-syncing-after-close true --expected-revision 0 --json
+nanosync client sync --path /absolute/folder --watch
+```
+
+`settings set` requires all three boolean flags as exactly `true` or `false`.
+`--expected-revision` is optional (defaults to the revision just read); stale edits
+fail with `CONFLICT`, local exit 2. View/set use the existing JSON envelope with
+`data: {settings, nativeEffects:"not-applied"}`. Saving intent does **not** install
+startup/tray integration or enforce window-close/background behavior. These native
+effects remain desktop lifecycle step 10. Until then the desktop closes by safely
+quitting; no tray is installed, including when a tray preference is requested.
+
+Settings v2 adds `lifecycle:{startAtLogin,trayEnabled,keepSyncingAfterClose}` and
+`continuousRequested:{[bindingId]:"desktop"|"cli"}` to the existing revision and
+pause fields. Missing continuous entries mean not requested; the value is the
+**accepting owner's origin**, not the latest requesting interface. Defaults are
+startup false, tray null (not yet chosen), background-after-close true. Desktop
+setup requires an explicit yes/no tray choice. Reads normalize v1 in memory only;
+explicit lifecycle save or accepted watch durably upgrades the record. Pause-only
+v1 roots stay v1 until that upgrade; the existing pause/resume JSON result remains
+`{version:1,revision,globalPaused,bindingPaused}` even when stored settings are v2.
+
+Stop older clients before upgrading. Upgrade serializes registry then settings
+and refuses live older/unadvertised owners (`OWNER_INCOMPATIBLE`, local exit 2)
+before changing the record. New owner discovery metadata is version 2; the private
+control request protocol remains version 1. Old discovery is not silently accepted
+or stolen. Older binaries reject v2 settings instead of discarding new preferences.
+
+Connecting and one-shot sync do not request continuous work. Explicit desktop
+Start and CLI `sync --watch` persist accepted intent through the same shared watch
+seam. A temporary owner rejects an incoming watch with `OWNER_TEMPORARY` (local
+exit 2); retry after it finishes or explicitly start continuous sync in that owner.
+The desktop never promotes or steals it. A continuous CLI owner remains CLI-owned
+even after a desktop request and survives desktop Quit. On desktop restart only
+previous desktop-origin accepted intent is eligible; never-started bindings and
+CLI-origin intent are not auto-started. Pauses, credential availability, root
+identity and owner locks still apply. Closing/Quit does not erase accepted intent.
+
+Desktop setup has five real steps: server enrollment/resume, external approval,
+vault/key/native existing folder, lifecycle intent, and finish or explicit Start.
+Pending identity survives cancellation/restart; recovery is requested only for a
+genuinely absent key (or explicitly retried interrupted key write), never for a
+locked store. Existing nonempty folders require acknowledgment. Finish connects
+without transfer. Start uses the actual shared continuous runner. The initial
+completion view is not yet the full connected-folders dashboard from step 8.
 
 ## Shared status and durable pauses
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import {
-  clientStatus, setPaused, selectSavedBinding,
+  clientStatus, setPaused, selectSavedBinding, readPreferences, setLifecycle,
   baseUrl, privateDirectory, secureCreate, secureRead, openBoundSync, listRemoteVaults,
   resolveRemoteVault, connectRegisteredVault, discoverConnection, records,
   disconnectConnections, removeServerConnection, enrollServer, key, keyWritePending, server as storedServer,
@@ -198,6 +198,23 @@ async function execute(args: string[], presentation: CliOutput): Promise<number>
       });
     flags(credentials.command('rollback').description('Remove staged OS entries before source cleanup begins'), ...clientFlags, ...common, '--confirm-rollback')
       .action(async (_o, command) => { result = await rollbackCredentialMigration(root(command), !!opts(command).confirmRollback); });
+    const settings = flags(client.command('settings').description('Shared lifecycle intent; native effects are installed separately by desktop integration'), ...clientFlags, ...common);
+    flags(settings.command('view'), ...clientFlags, ...common).action(async (_o, command) => {
+      result = { settings: readPreferences(root(command)), nativeEffects: 'not-applied' };
+    });
+    flags(settings.command('set'), ...clientFlags, ...common, '--start-at-login <boolean>', '--tray-enabled <boolean>', '--keep-syncing-after-close <boolean>', '--expected-revision <revision>')
+      .action(async (_o, command) => {
+        const o = opts(command), directory = root(command);
+        const boolean = (name: string): boolean => {
+          if (o[name] !== 'true' && o[name] !== 'false') throw new CliError('INVALID_INPUT', 'Supply all three lifecycle flags as true or false.');
+          return o[name] === 'true';
+        };
+        const revision = o.expectedRevision === undefined ? readPreferences(directory).revision : Number(o.expectedRevision);
+        if (!Number.isSafeInteger(revision) || revision < 0) throw new CliError('INVALID_INPUT', 'Expected revision must be a nonnegative integer.');
+        result = { settings: setLifecycle(directory, {
+          startAtLogin: boolean('startAtLogin'), trayEnabled: boolean('trayEnabled'), keepSyncingAfterClose: boolean('keepSyncingAfterClose'),
+        }, revision), nativeEffects: 'not-applied' };
+      });
     const connections = flags(client.command('connections'), ...clientFlags, ...common);
     flags(connections.command('view'), ...clientFlags, ...common).action(async (_o, command) => {
       result = {connections:servers(root(command)).map(connectionSummary), pending:pendingEnrollments(root(command)).map(p => ({alias:p.alias, url:p.url, deviceId:p.deviceId, deviceName:p.name, status:Date.now() >= p.expiresAtMs ? 'expired' : p.status ?? 'pending'}))};
@@ -273,7 +290,8 @@ async function execute(args: string[], presentation: CliOutput): Promise<number>
         if (!o.all && !o.path) throw new CliError('INPUT_REQUIRED', 'Choose exactly one of --all or --path <directory>.');
         if (o.all && o.path) throw new CliError('INVALID_INPUT', 'Choose exactly one of --all or --path <directory>.');
         const target = o.all ? { all: true as const } : { binding: selectSavedBinding(root(command), o.path).connectionId };
-        result = setPaused(root(command), target, action === 'pause');
+        const saved = setPaused(root(command), target, action === 'pause');
+        result = { version: 1, revision: saved.revision, globalPaused: saved.globalPaused, bindingPaused: saved.bindingPaused };
       });
     }
     flags(client.command('sync'), ...clientFlags, ...common, '--path <directory>', '--watch').action(async (_o, command) => {

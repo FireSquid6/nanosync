@@ -75,6 +75,72 @@ async function raw(info: ReturnType<typeof discovery>, changes: Record<string, u
     headers: { 'content-type': 'application/json', 'x-nanosync-capability': capability },
     body: body ?? JSON.stringify({ ...info.payload, ...changes }), redirect: 'error' });
 }
+test('continuous acceptance is authenticated and does not wait for a held remote sync or promote an owner', async () => {
+  const received = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  const http = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch() {
+    received.resolve(); await release.promise;
+    return new Response(null, { status: 503 });
+  } });
+  const { root, files } = fixture(http.url.href);
+  const controller = new AbortController(), attachedController = new AbortController();
+  const owner = await open(root, files, 'cli');
+  const ownerWork = owner.watch(controller.signal, () => {}, () => {});
+  let attachedWork: Promise<void> | undefined;
+  try {
+    await received.promise;
+    const attached = await open(root, files, 'desktop');
+    const accepted = Promise.withResolvers<void>();
+    attachedWork = attached.watch(attachedController.signal, () => {}, () => {}, accepted.resolve);
+    await accepted.promise;
+    expect(attached.owner.origin).toBe('cli');
+    const { readPreferences } = await import('../src/index.ts');
+    expect(Object.values(readPreferences(root).continuousRequested)).toEqual(['cli']);
+    attachedController.abort();
+    await attachedWork;
+  } finally {
+    controller.abort(); attachedController.abort(); release.resolve();
+    await attachedWork; await ownerWork; http.stop(true);
+  }
+});
+test('a delayed attachment acceptance cannot overwrite a replacement CLI owner provenance', async () => {
+  const http = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch() { return new Response(null, { status: 503 }); } });
+  const { root, files } = fixture(http.url.href);
+  const oldController = new AbortController(), cliController = new AbortController(), attachmentController = new AbortController();
+  const oldOwner = await open(root, files, 'desktop');
+  const oldWork = oldOwner.watch(oldController.signal, () => {}, () => {});
+  const attachment = await open(root, files, 'cli');
+  const received = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  const accepted = Promise.withResolvers<void>();
+  const originalFetch = globalThis.fetch;
+  let held = false;
+  globalThis.fetch = (async (input, options) => {
+    const response = await originalFetch(input, options);
+    if (!held && typeof options?.body === 'string' && JSON.parse(options.body).operation === 'watch-accept') {
+      held = true; received.resolve(); await release.promise;
+    }
+    return response;
+  }) as typeof fetch;
+  let cliWork: Promise<void> | undefined;
+  const staleWork = attachment.watch(attachmentController.signal, () => {}, () => {}, accepted.resolve)
+    .then(() => null, error => error);
+  try {
+    await received.promise;
+    await oldOwner.close(); await oldWork;
+    const cliOwner = await open(root, files, 'cli');
+    const cliAccepted = Promise.withResolvers<void>();
+    cliWork = cliOwner.watch(cliController.signal, () => {}, () => {}, cliAccepted.resolve);
+    await cliAccepted.promise;
+    const { readPreferences } = await import('../src/index.ts');
+    expect(Object.values(readPreferences(root).continuousRequested)).toEqual(['cli']);
+    release.resolve(); await accepted.promise;
+    expect(await staleWork).toMatchObject({ code: 'OWNER_UNAVAILABLE' });
+    expect(Object.values(readPreferences(root).continuousRequested)).toEqual(['cli']);
+  } finally {
+    globalThis.fetch = originalFetch;
+    release.resolve(); attachmentController.abort(); oldController.abort(); cliController.abort();
+    await staleWork; await oldWork; await cliWork; http.stop(true);
+  }
+});
 test('private transport authenticates and rejects incompatible, malformed, misdirected and oversized input', async () => {
   const { root, files, replica } = fixture();
   await open(root, files, 'cli');

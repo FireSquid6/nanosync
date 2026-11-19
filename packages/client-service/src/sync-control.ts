@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import { setContinuousIntent } from './settings.ts';
 import { chmodSync, existsSync, lstatSync, rmSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -19,12 +20,12 @@ export type BoundSyncOptions = SyncOwner & CredentialOptions & { onEvent?: (even
 export interface BoundSyncSession {
   readonly owner: SyncOwner;
   syncOnce(): Promise<Head>;
-  watch(signal: AbortSignal, onSuccess: (head: Head) => void, onError: (error: unknown) => void): Promise<void>;
+  watch(signal: AbortSignal, onSuccess: (head: Head) => void, onError: (error: unknown) => void, onAccepted?: () => void): Promise<void>;
   close(): Promise<void>;
 }
 type Lock = NonNullable<ReturnType<typeof observeSyncLock>>;
 type Metadata = {
-  version: 1; root: string; rootDev: number; rootIno: number; binding: string;
+  version: 2; root: string; rootDev: number; rootIno: number; binding: string;
   origin: 'cli' | 'desktop'; instanceId: string; nonce: string;
   pid: number; starttime: string; lockDev: number; lockIno: number; socketDev: number; socketIno: number;
   runtime: 'session' | 'private-tmp'; runtimeDev: number; runtimeIno: number;
@@ -75,7 +76,7 @@ function readMetadata(replica: string, root: string, binding: string, lock: Lock
     'runtime', 'runtimeDev', 'runtimeIno', 'directoryDev', 'directoryIno',
   ]);
   const rootStat = lstatSync(root);
-  if (value.version !== 1 || value.root !== root || value.rootDev !== rootStat.dev || value.rootIno !== rootStat.ino ||
+  if (value.version !== 2 || value.root !== root || value.rootDev !== rootStat.dev || value.rootIno !== rootStat.ino ||
       value.binding !== binding || !['cli', 'desktop'].includes(value.origin as string) ||
       typeof value.instanceId !== 'string' || !UUID.test(value.instanceId) ||
       typeof value.nonce !== 'string' || !NONCE.test(value.nonce) ||
@@ -156,8 +157,14 @@ function attached(target: Target, options: BoundSyncOptions): BoundSyncSession {
       if (detached.signal.aborted) throw failure('OWNER_STOPPED');
       return result(outcome(await send(target, 'sync', detached.signal, options.onEvent)), options.onEvent);
     },
-    async watch(signal, onSuccess, onError) {
+    async watch(signal, onSuccess, onError, onAccepted) {
       const combined = AbortSignal.any([signal, detached.signal]);
+      const acceptance = await send(target, 'watch-accept', combined);
+      if (!acceptance || typeof acceptance !== 'object' || !('accepted' in acceptance))
+        result(outcome(acceptance));
+      if (object(acceptance, ['accepted']).accepted !== true) throw failure('OWNER_UNAVAILABLE');
+      // Only the host persists provenance; a delayed reply may describe a departed owner.
+      onAccepted?.();
       while (!combined.aborted) {
         try {
           const value = outcome(await send(target, 'watch', combined, options.onEvent));
@@ -215,7 +222,7 @@ export async function openBoundSync(
       let transportStopped: Promise<void> | undefined;
       let continuous = false;
       let active = 0;
-      type Replay = { operation: Operation; done: boolean; value: Promise<Outcome | { stopped: true }> };
+      type Replay = { operation: Operation; done: boolean; value: Promise<Outcome | { stopped: true } | { accepted: true }> };
       const replay = new Map<string, Replay>();
       const lifetime = new AbortController();
       let metadata: Metadata;
@@ -237,11 +244,12 @@ export async function openBoundSync(
           if (directory) rmSync(directory, { recursive: true, force: true });
         }
       })();
-      const dispatch = async (operation: Operation): Promise<Outcome | { stopped: true }> => {
+      const dispatch = async (operation: Operation): Promise<Outcome | { stopped: true } | { accepted: true }> => {
         if (closing) return { head: null, events: [], error: safeError(failure('OWNER_STOPPED')) };
         if (operation === 'stop-for-removal') { await close(); return { stopped: true }; }
-        if (operation === 'watch' && !continuous)
+        if ((operation === 'watch' || operation === 'watch-accept') && !continuous)
           return { head: null, events: [], error: safeError(failure('OWNER_TEMPORARY')) };
+        if (operation === 'watch-accept') return { accepted: true };
         try { return outcome({ head: await runner.syncOnce(), events: [], error: null }); }
         catch (error) { return { head: null, events: [], error: safeError(error) }; }
       };
@@ -269,7 +277,7 @@ export async function openBoundSync(
               if (!oldest) return new Response(null, { status: 429 });
               replay.delete(oldest[0]);
             }
-            const wantsStream = payload.operation !== 'stop-for-removal' &&
+            const wantsStream = payload.operation !== 'stop-for-removal' && payload.operation !== 'watch-accept' &&
               !(payload.operation === 'watch' && !continuous);
             if (wantsStream) {
               stream = progressResponse(() => { events.delete(stream!.publish); active--; });
@@ -298,7 +306,7 @@ export async function openBoundSync(
       });
       chmodSync(socket, 0o600);
       const socketStat = socketIdentity(socket), rootStat = lstatSync(root);
-      metadata = { version: 1, root, rootDev: rootStat.dev, rootIno: rootStat.ino, binding: binding.connectionId,
+      metadata = { version: 2, root, rootDev: rootStat.dev, rootIno: rootStat.ino, binding: binding.connectionId,
         origin: options.origin, instanceId: options.instanceId, nonce,
         pid: ownLock.owner.pid, starttime: ownLock.owner.starttime, lockDev: ownLock.inode.dev, lockIno: ownLock.inode.ino,
         socketDev: socketStat.dev, socketIno: socketStat.ino,
@@ -315,11 +323,15 @@ export async function openBoundSync(
           if (closing) return Promise.reject(failure('OWNER_STOPPED'));
           return runner.syncOnce();
         },
-        async watch(signal, onSuccess, onError) {
+        async watch(signal, onSuccess, onError, onAccepted) {
           if (closing) throw failure('OWNER_STOPPED');
           if (continuous) throw failure('OWNER_BUSY');
-          continuous = true;
-          try { await runner.watch(AbortSignal.any([signal, lifetime.signal]), onSuccess, onError); }
+          try {
+            setContinuousIntent(root, binding.connectionId, options.origin);
+            continuous = true;
+            onAccepted?.();
+            await runner.watch(AbortSignal.any([signal, lifetime.signal]), onSuccess, onError);
+          }
           finally { await session.close(); }
         },
         async close() { await close(); await transportStopped; },

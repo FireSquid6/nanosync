@@ -362,6 +362,16 @@ export function desktopCredentials(root: string) {
   const status = credentialStatus(root);
   return { ...status, decisionRequired: status.mode === 'protected-file' };
 }
+/** Renderer-safe decision state; never expose descriptor references or migration inventory. */
+export function credentialDecision(root: string) {
+  const status = credentialStatus(root);
+  const phase = status.migrationPending ? migration(root).phase : null;
+  return {
+    mode: status.mode, decisionRequired: status.mode === 'protected-file',
+    migrationPending: status.migrationPending, cleanupPending: status.cleanupPending,
+    phase, canRollback: phase !== null && phase !== 'cleanup',
+  };
+}
 function unavailable(): ClientError {
   return new ClientError(
     'CREDENTIALS_UNAVAILABLE',
