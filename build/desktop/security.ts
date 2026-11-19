@@ -9,11 +9,14 @@ export const sdk = join(cache, 'patched');
 const commit = 'c9e637c4e8acc8d53fc4a1703346196b004a00d8';
 const sourceHash = 'ed22102b55e4d6b04c3b48ab548f3d3b07b84fd824adc3c097f37986def265ce';
 const zigHash = '1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026';
-const patches = ['sdk-privacy.patch', 'core-auth-first.patch', 'sdk-fatal-shutdown.patch'];
+const patches = [
+  'sdk-privacy.patch', 'core-auth-first.patch', 'sdk-fatal-shutdown.patch', 'sdk-launcher-argv.patch',
+];
 const patchHashes = [
   '8b103f3debeafbff112090229f8dc9490f51d4c4b3dc6c477c70877eabc88b56',
   'eb7928afb50b23be1b24728a2f88710646c77a19d42928638a7694db9688114f',
   'f9625b649c9d1ee060957d07da7283df94180886beb3d804c1c5fb8e047b661d',
+  'a1d581bea0211811aec2c772b4e1daf84d6e507ddc1ec898272adf323f4fd5cb',
 ];
 const patchFiles: Record<string, Record<string, { before: string; after: string }>> =
   JSON.parse(readFileSync(join(import.meta.dir, 'patches/files.json'), 'utf8'));
@@ -119,6 +122,11 @@ export async function prepareSdk() {
     applyVerifiedPatch(join(work, 'source'), path,
       Object.fromEntries(Object.entries(files).map(([file, hashes]) => [file, hashes.after])));
   }
+  const launcher = await Bun.build({
+    entrypoints: [join(work, api, 'launcher/main.ts')], target: 'bun', format: 'esm', minify: false,
+  });
+  if (!launcher.success) throw Error('SDK_LAUNCHER_BUILD');
+  writeFileSync(join(work, 'launcher-main.js'), await launcher.outputs[0]!.text());
   for (const [name, entry] of [['full', 'index.ts'], ['sandboxed', 'index-sandboxed.ts']]) {
     const result = await Bun.build({ entrypoints: [join(work, api, 'preload', entry!)], target: 'browser', format: 'esm', minify: false });
     if (!result.success) throw Error('SDK_PRELOAD_BUILD');
@@ -139,7 +147,10 @@ export async function prepareSdk() {
   for (const directory of ['browser', 'preload', 'sdks', 'shared', 'config']) {
     Object.assign(files, collect(work, `${api}/${directory}`));
   }
-  for (const path of [coreFile, 'preload-full.js', 'preload-sandboxed.js', 'source/LICENSE', 'source/package/package.json']) {
+  for (const path of [
+    coreFile, 'launcher-main.js', `${api}/launcher/main.ts`, 'preload-full.js', 'preload-sandboxed.js',
+    'source/LICENSE', 'source/package/package.json',
+  ]) {
     files[path] = fileHash(join(work, path));
   }
   const manifest: Manifest = { schema: 1, commit, sourceHash, zigHash, patchHashes, files };
@@ -153,6 +164,7 @@ export function sdkDefines() {
   return {
     NANOSYNC_SDK_CORE_HASH: JSON.stringify(manifest.files[coreFile]),
     NANOSYNC_SDK_PRELOAD_HASH: JSON.stringify(manifest.files['preload-full.js']),
+    NANOSYNC_SDK_LAUNCHER_HASH: JSON.stringify(manifest.files['launcher-main.js']),
   };
 }
 
@@ -178,10 +190,11 @@ export function stageBundle() {
   const manifest = verifySdk();
   const bundle = bundleDirectory();
   cpSync(join(sdk, coreFile), join(bundle, 'bin/libElectrobunCore.so'));
+  cpSync(join(sdk, 'launcher-main.js'), join(bundle, 'Resources/main.js'));
   for (const name of ['full', 'sandboxed']) cpSync(join(sdk, `preload-${name}.js`), join(bundle, `Resources/preload-${name}.js`));
   cpSync(join(sdk, 'source/LICENSE'), join(bundle, 'Resources/ELECTROBUN-LICENSE'));
   const files: Record<string, string> = {};
-  for (const path of ['bin/libElectrobunCore.so', 'Resources/preload-full.js', 'Resources/preload-sandboxed.js',
+  for (const path of ['bin/libElectrobunCore.so', 'Resources/main.js', 'Resources/preload-full.js', 'Resources/preload-sandboxed.js',
     'Resources/app/bun/index.js', 'Resources/app/views/main/index.js', 'Resources/ELECTROBUN-LICENSE']) {
     files[path] = fileHash(join(bundle, path));
   }
@@ -198,6 +211,7 @@ export function verifyBundle(bundle: string) {
   const manifest: Manifest = JSON.parse(readFileSync(join(bundle, 'Resources/desktop-sdk-security.json'), 'utf8'));
   if (manifest.commit !== expected.commit || JSON.stringify(manifest.patchHashes) !== JSON.stringify(patchHashes) ||
       manifest.files['bin/libElectrobunCore.so'] !== expected.files[coreFile] ||
+      manifest.files['Resources/main.js'] !== expected.files['launcher-main.js'] ||
       manifest.files['Resources/preload-full.js'] !== expected.files['preload-full.js'] ||
       manifest.files['Resources/preload-sandboxed.js'] !== expected.files['preload-sandboxed.js']) throw Error('SDK_BUNDLE_PROVENANCE');
   verifyArtifacts(bundle, manifest.files);

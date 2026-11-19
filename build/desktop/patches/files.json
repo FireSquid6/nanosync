@@ -35,6 +35,12 @@
       "after": "79601fe68569db9646ae611c61e0a508fb202a043f16c9f58da3e586e8e95d2e"
     }
   },
+  "sdk-launcher-argv.patch": {
+    "package/src/launcher/main.ts": {
+      "before": "c809045ed7e74a7fb2d316bd9e1dc360bf156b934bb8fa20b1116d8a610932a2",
+      "after": "1f26c1c6277f8314336c2717ba5c991ae5fe847d50de5773461029d2322f8005"
+    }
+  },
   "sdk-fatal-shutdown.patch": {
     "package/src/sdks/main/proc/native.ts": {
       "before": "bcfeb448a76b826a840002a8e4a95705b888c489cc95fe8709a6b26f0cd3b5d5",

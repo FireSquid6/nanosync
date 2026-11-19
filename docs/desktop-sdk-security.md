@@ -186,6 +186,20 @@ Machine-local evidence:
 - `/tmp/nanosync-sdk-security-nJesXA/quit-inner-after.log`
 - `/tmp/nanosync-sdk-security-nJesXA/{full-tests-after,workspace-types-after,core-tests-after,flake-check-after,nix-build-after,cli-binary-after}.log`
 
+## Worker argument forwarding prerequisite (before step 10)
+
+The upstream native outer launcher constructs only `[bun, Resources/main.js]`, dropping ordinary application arguments. The upstream runtime then creates `new Worker(appEntrypointPath, {})`; a Bun 1.4.4 probe confirmed that workers do **not** inherit the parent's arguments. An inner-runtime wrapper alone therefore did not fix profile selection/login startup.
+
+`sdk-launcher-argv.patch` changes the maintained TypeScript launcher source to pass `argv: process.argv.slice(2)` explicitly. Preparation rebuilds `Resources/main.js` with the pinned Bun, validates patch/source hashes, and includes the rebuilt runtime in source, actual-payload and runtime integrity checks. Core, native wrapper, cryptography and preload behavior are unchanged. The outer native launcher's argument loss is **not** fixed: production packaging must use and test the official inner-runtime route with a trusted public wrapper, or separately repair the maintained outer launcher. Development/Setup launcher existence is not startup availability proof.
+
+| Added input/artifact | SHA-256 |
+| --- | --- |
+| `sdk-launcher-argv.patch` | `a1d581bea0211811aec2c772b4e1daf84d6e507ddc1ec898272adf323f4fd5cb` |
+| patched `launcher/main.ts` | `1f26c1c6277f8314336c2717ba5c991ae5fe847d50de5773461029d2322f8005` |
+| rebuilt `Resources/main.js` | `9cd2ae7a6c01a22483b35aaed292dc5fb360f0d493fe3809868ce0ef18bd6fbb` |
+
+Parent reran all four actual packaged SDK gates: native outer launcher fatal/normal and inner runtime fatal/normal, exits 1/0, privacy/authorization/navigation checks intact, zero fixture process groups remaining. The two inner runs assert exact `--startup --client-dir` forwarding into the actual app Worker, including a spaced disposable profile path. Core remains `0660514b…547`, full preload `de08a1f9…69e`. Logs: `/tmp/nanosync-sdk-worker-{native,inner-fatal,inner-quit}.log`; SDK preparation/verification and nested-patch regression also passed. Native/tools TypeScript checks also passed. Independent bounded review found no concrete issue in the source/artifact chain; its in-memory rebuild differed only in generated source-path comments, so the hash above identifies the cached build, not a path-independent reproducibility claim. Scoped hygiene review retained existing density/style conventions. These are isolated SDK fixture proofs, **not** the final installed Nix wrapper, its upgrade/login execution, or real desktop-session acceptance.
+
 ## Isolation and remaining limits
 
 Native runs use Nix-selected Xvfb `-displayfd` readiness with no TCP display listener, private HOME/XDG, a private DBus configuration with no activation service directories, and synthetic data only. No host keyboard injection, host-visible window or real keyring/default `~/.nanosync` access is used. Private synthetic transport keys stay in a 0600 scratch file, never logs; profiles and process groups are removed before PASS. All current tool invocations use project-scoped `HUTCH_HOME`.

@@ -1,0 +1,10 @@
+--- a/package/src/launcher/main.ts
++++ b/package/src/launcher/main.ts
+@@ -248,6 +248,5 @@
+ 
+ 	new Worker(appEntrypointPath, {
+-		// consider adding a preload with error handling
+-		// preload: [''];
++		argv: process.argv.slice(2),
+ 	});
+ 

@@ -56,7 +56,7 @@ const rpc = BrowserView.defineRPC<FixtureRPC>({ handlers: { requests: {
     assert.equal(report.href, 'views://main/index.html');
     assert.equal(report.socket, true);
     // The synthetic transport key is shared only over this private 0600 fixture file, never logs.
-    publish('ready.json', { port: params.port, id: transport.webview.id, key: Array.from(transport.webview.secretKey), pid: process.pid, runtime, snapshot: snapshot() });
+    publish('ready.json', { port: params.port, id: transport.webview.id, key: Array.from(transport.webview.secretKey), pid: process.pid, argv: process.argv.slice(2), runtime, snapshot: snapshot() });
     return { ok: true };
   },
 } } });

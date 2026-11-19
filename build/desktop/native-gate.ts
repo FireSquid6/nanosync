@@ -154,13 +154,15 @@ try {
     env.ICU_DATA = dirname(launcher);
   }
   console.log(directRuntime ? 'SECURITY_GATE_INNER_RUNTIME' : 'SECURITY_GATE_LAUNCHER');
+  const applicationArgs = ['--startup', '--client-dir', join(root, 'synthetic profile')];
   const application = directRuntime
-    ? start(join(extracted, 'bin/bun'), [join(extracted, 'Resources/main.js')], false, launcher)
+    ? start(join(extracted, 'bin/bun'), [join(extracted, 'Resources/main.js'), ...applicationArgs], false, launcher)
     : start(launcher, []);
   const ready = await Promise.race([
     waitFile(join(root, 'ready.json')),
     exits.get(application)!.then(() => { throw Error('FIXTURE_EXIT_BEFORE_READY'); }),
   ]) as any;
+  assert.deepEqual(ready.argv, directRuntime ? applicationArgs : [], 'PACKAGED_WORKER_ARGV');
   assertLoopbackListener(ready.pid, ready.port);
   const key = new Uint8Array(ready.key), wrongKey = randomBytes(32);
   assert.ok(ready.runtime.loadedCore.startsWith(root));
@@ -232,6 +234,7 @@ try {
   if (!normalQuit) assert.ok(output.includes('SDK_SDKS_MAIN_PROC_NATIVE_TS_2650'), 'NATIVE_FATAL_HANDLER_NOT_OBSERVED');
   result = { result: 'PASS', runtime: 'Bun 1.4.4 / Electrobun 2.0.6',
     process: directRuntime ? 'inner-runtime' : 'launcher', shutdown: normalQuit ? 'normal' : 'fatal',
+    workerArgvForwarded: directRuntime,
     loopbackListener: '127.0.0.1',
     coreHash: ready.runtime.coreHash, preloadHash: ready.runtime.preloadHash,
     loadedPackagedCore: true, unauthorizedCalls: 0, attackerResults: 0, channelDisplaced: false,
