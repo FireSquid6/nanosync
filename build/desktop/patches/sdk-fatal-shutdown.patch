@@ -1,0 +1,13 @@
+--- a/package/src/sdks/main/proc/native.ts
++++ b/package/src/sdks/main/proc/native.ts
+@@ -2635,9 +2635,7 @@
+ process.on("uncaughtException", (err) => {
+ 	console.error("SDK_SDKS_MAIN_PROC_NATIVE_TS_2650");
+ 	if (native) {
+-		native_.symbols.stopEventLoop();
+-		native_.symbols.waitForShutdownComplete(5000);
+-		native_.symbols.forceExit(1);
++		core_.symbols.quitGracefully(1, 5000);
+ 	} else {
+ 		process.exit(1);
+ 	}

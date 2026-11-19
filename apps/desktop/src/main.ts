@@ -4,11 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BrowserView, BrowserWindow, Tray, Utils } from "electrobun/main";
 import type { SpikeRPC } from "./rpc";
-import { checkCredentialStore, checkLocalDatabase } from "./selfcheck";
+import { checkLocalDatabase } from "./selfcheck";
+import { openCheckedFolder } from "./open-native";
 
 console.log("SQLite PASS", checkLocalDatabase(), "Bun", Bun.version);
-await checkCredentialStore();
-console.log("Secret Service roundtrip + deletion PASS (no secret logged)");
+console.log("Credential-store validation is explicit; no keyring accessed at startup");
 
 const directory = mkdtempSync(join(tmpdir(), "nanosync-desktop-open-"));
 process.on("exit", () => rmSync(directory, { recursive: true, force: true }));
@@ -31,8 +31,8 @@ const rpc = BrowserView.defineRPC<SpikeRPC>({
             return `Picker returned ${paths.length} selection(s)`;
           }
           case "open":
-            assert.ok(Utils.openPath(directory), "system file manager could not open disposable folder");
-            console.log("openPath accepted disposable directory");
+            assert.ok((await openCheckedFolder(directory)).ok, "system file manager could not open disposable folder");
+            console.log("Trusted argv opener accepted disposable directory");
             return "Opened disposable folder";
           case "quit":
             console.log("Explicit Quit");
@@ -49,10 +49,14 @@ const rpc = BrowserView.defineRPC<SpikeRPC>({
 });
 const window = new BrowserWindow({
   title: "Nanosync Linux validation spike",
-  url: "views://main/index.html",
+  url: "about:blank",
   frame: { width: 580, height: 400, x: 120, y: 120 },
   rpc,
+  allowedProtocols: { views: true, appData: false },
+  navigationRules: JSON.stringify(["^*", "views://main/index.html"]),
 });
+window.webview.setNavigationRules(["^*", "views://main/index.html"]);
+window.webview.loadURL("views://main/index.html");
 window.on("will-close", (event: unknown) => {
   (event as { response: { allow: boolean } }).response = { allow: false };
   window.hide();

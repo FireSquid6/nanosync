@@ -1,0 +1,524 @@
+--- a/package/src/sdks/main/proc/native.ts
++++ b/package/src/sdks/main/proc/native.ts
+@@ -1212,7 +1212,7 @@
+ 
+ 	emit(name: string, payload: unknown) {
+ 		this.eventHandlers.get(name)?.forEach((h) => {
+-			try { h(payload); } catch (e) { console.error(`[bridge] event handler failed: ${name}`, e); }
++			try { h(payload); } catch (e) { console.error("SDK_SDKS_MAIN_PROC_NATIVE_TS_1214"); }
+ 		});
+ 	}
+ 
+@@ -1371,10 +1371,7 @@
+ 			// Empty queues are the normal polling case. Only cross the FFI CString
+ 			// boundary for the explicit error sentinel returned by the core.
+ 			if (queuedHostMessageBatchLengthBuf[0] === HOST_MESSAGE_BATCH_ERROR_LENGTH) {
+-				console.error(
+-					"failed to pop queued host message batch:",
+-					getCoreLastError() ?? "unknown core error",
+-				);
++				console.error("SDK_SDKS_MAIN_PROC_NATIVE_TS_1373");
+ 				scheduleHostMessageDrain(16);
+ 			}
+ 			return;
+@@ -1395,25 +1392,13 @@
+ 						continue;
+ 					}
+ 
+-					webview.rpcHandler?.(JSON.parse(message));
++					void Promise.resolve().then(() => webview.rpcHandler?.(JSON.parse(message))).catch(() => console.error("SDK_RPC_DISPATCH_FAILED"));
+ 				} catch (err) {
+-					console.error("error draining queued host message:", {
+-						webviewId,
+-						messagePreview: message.slice(0, 500),
+-						error:
+-							err instanceof Error
+-								? { name: err.name, message: err.message, stack: err.stack }
+-								: err,
+-					});
++					console.error("SDK_SDKS_MAIN_PROC_NATIVE_TS_1399");
+ 				}
+ 			}
+ 		} catch (err) {
+-			console.error("error decoding queued host message batch:", {
+-				error:
+-					err instanceof Error
+-						? { name: err.name, message: err.message, stack: err.stack }
+-						: err,
+-			});
++			console.error("SDK_SDKS_MAIN_PROC_NATIVE_TS_1410");
+ 		} finally {
+ 			core_.symbols.freeCoreString(messagePtr);
+ 		}
+@@ -1435,7 +1420,7 @@
+ 			? String((error as { code?: unknown }).code)
+ 			: "";
+ 	if (error && code !== "EAGAIN") {
+-		console.error("host message wakeup stream failed, falling back to polling:", error);
++		console.error("SDK_SDKS_MAIN_PROC_NATIVE_TS_1437");
+ 	}
+ 	setInterval(drainQueuedHostMessages, 16);
+ 	drainQueuedHostMessages();
+@@ -2618,11 +2603,11 @@
+ 	runTest: (viewId: number) => {
+ 		const view = WGPUView.getById(viewId);
+ 		if (!view?.ptr) {
+-			console.error(`wgpuRunGPUTest: WGPUView not found for id ${viewId}`);
++			console.error("SDK_SDKS_MAIN_PROC_NATIVE_TS_2620");
+ 			return;
+ 		}
+ 		if (!native?.symbols?.wgpuRunGPUTest) {
+-			console.error("wgpuRunGPUTest not available");
++			console.error("SDK_SDKS_MAIN_PROC_NATIVE_TS_2624");
+ 			return;
+ 		}
+ 		native_.symbols.wgpuRunGPUTest(view.ptr);
+@@ -2648,7 +2633,7 @@
+ 
+ // Worker management. Move to a different file
+ process.on("uncaughtException", (err) => {
+-	console.error("Uncaught exception in worker:", err);
++	console.error("SDK_SDKS_MAIN_PROC_NATIVE_TS_2650");
+ 	if (native) {
+ 		native_.symbols.stopEventLoop();
+ 		native_.symbols.waitForShutdownComplete(5000);
+@@ -2659,17 +2644,17 @@
+ });
+ 
+ process.on("unhandledRejection", (reason, _promise) => {
+-	console.error("Unhandled rejection in worker:", reason);
++	console.error("SDK_SDKS_MAIN_PROC_NATIVE_TS_2661");
+ });
+ 
+ process.on("SIGINT", () => {
+-	console.log("[electrobun] Received SIGINT, running quit sequence...");
++	console.log("SDK_SDKS_MAIN_PROC_NATIVE_TS_2665");
+ 	const { quit } = require("../core/Utils");
+ 	quit();
+ });
+ 
+ process.on("SIGTERM", () => {
+-	console.log("[electrobun] Received SIGTERM, running quit sequence...");
++	console.log("SDK_SDKS_MAIN_PROC_NATIVE_TS_2671");
+ 	const { quit } = require("../core/Utils");
+ 	quit();
+ });
+@@ -3465,7 +3450,7 @@
+ 		try {
+ 			parsedDetail = JSON.parse(detail);
+ 		} catch (e) {
+-			console.error("[webviewEventHandler] Failed to parse JSON:", e);
++			console.error("SDK_SDKS_MAIN_PROC_NATIVE_TS_3467");
+ 			// Fallback to string if parsing fails (backward compatibility)
+ 			parsedDetail = detail;
+ 		}
+@@ -3491,11 +3476,8 @@
+ 			eventName = ffiCStringToString(_eventName);
+ 			detail = ffiCStringToString(_detail);
+ 		} catch (err) {
+-			console.error("[webviewEventJSCallback] Error converting strings:", err);
+-			console.error("[webviewEventJSCallback] Raw values:", {
+-				_eventName,
+-				_detail,
+-			});
++			console.error("SDK_SDKS_MAIN_PROC_NATIVE_TS_3493");
++			console.error("SDK_SDKS_MAIN_PROC_NATIVE_TS_3494");
+ 			return;
+ 		}
+ 
+@@ -3522,9 +3504,9 @@
+ 				return;
+ 			}
+ 
+-			webview.rpcHandler?.(msgJson);
++			void Promise.resolve().then(() => webview.rpcHandler?.(msgJson)).catch(() => console.error("SDK_RPC_DISPATCH_FAILED"));
+ 		} catch (err) {
+-			console.error("error sending message to host: ", err);
++			console.error("SDK_SDKS_MAIN_PROC_NATIVE_TS_3526");
+ 		}
+ 	},
+ 	{
+@@ -3551,7 +3533,7 @@
+ 				webviewEventHandler(event.id, event.eventName, event.detail);
+ 			}
+ 		} catch (err) {
+-			console.error("error in eventBridgeHandler: ", err);
++			console.error("SDK_SDKS_MAIN_PROC_NATIVE_TS_3553");
+ 		}
+ 	},
+ 	{
+@@ -3615,7 +3597,7 @@
+ 				}
+ 			});
+ 		} catch (err) {
+-			console.error("error in internalBridgeHandler: ", err);
++			console.error("SDK_SDKS_MAIN_PROC_NATIVE_TS_3617");
+ 			// console.log('msgStr: ', id, new CString(msg));
+ 		}
+ 	},
+@@ -3653,7 +3635,7 @@
+ 			electrobunEventEmitter.emitEvent(event, id);
+ 			electrobunEventEmitter.emitEvent(event);
+ 		} catch (err) {
+-			console.error("error in trayItemHandler: ", err);
++			console.error("SDK_SDKS_MAIN_PROC_NATIVE_TS_3655");
+ 		}
+ 	},
+ 	{
+@@ -3847,9 +3829,7 @@
+ 		}) => {
+ 			const view = WGPUView.getById(params.id);
+ 			if (!view?.ptr) {
+-				console.error(
+-					`wgpuTagResize: WGPUView not found or has no ptr for id ${params.id}`,
+-				);
++				console.error("SDK_SDKS_MAIN_PROC_NATIVE_TS_3849");
+ 				return;
+ 			}
+ 
+@@ -3884,7 +3864,7 @@
+ 		webviewTagUpdateHtml: (params: { id: number; html: string }) => {
+ 			const webview = BrowserView.ensureWrapped(params.id);
+ 			if (!webview) {
+-				console.error(`webviewTagUpdateHtml: BrowserView not found for id ${params.id}`);
++				console.error("SDK_SDKS_MAIN_PROC_NATIVE_TS_3886");
+ 				return;
+ 			}
+ 
+@@ -3915,7 +3895,7 @@
+ 		webviewTagRemove: (params: { id: number }) => {
+ 			const webview = BrowserView.ensureWrapped(params.id);
+ 			if (!webview) {
+-				console.error(`webviewTagRemove: BrowserView not found for id ${params.id}`);
++				console.error("SDK_SDKS_MAIN_PROC_NATIVE_TS_3917");
+ 				return;
+ 			}
+ 			webview.remove();
+@@ -3940,9 +3920,7 @@
+ 		}) => {
+ 			const view = WGPUView.getById(params.id);
+ 			if (!view?.ptr) {
+-				console.error(
+-					`wgpuTagSetTransparent: WGPUView not found or has no ptr for id ${params.id}`,
+-				);
++				console.error("SDK_SDKS_MAIN_PROC_NATIVE_TS_3942");
+ 				return;
+ 			}
+ 			native_.symbols.wgpuViewSetTransparent(view.ptr, params.transparent);
+@@ -3956,9 +3934,7 @@
+ 		wgpuTagSetPassthrough: (params: { id: number; passthrough: boolean }) => {
+ 			const view = WGPUView.getById(params.id);
+ 			if (!view?.ptr) {
+-				console.error(
+-					`wgpuTagSetPassthrough: WGPUView not found or has no ptr for id ${params.id}`,
+-				);
++				console.error("SDK_SDKS_MAIN_PROC_NATIVE_TS_3958");
+ 				return;
+ 			}
+ 			native_.symbols.wgpuViewSetPassthrough(view.ptr, params.passthrough);
+@@ -3969,9 +3945,7 @@
+ 		wgpuTagSetHidden: (params: { id: number; hidden: boolean }) => {
+ 			const view = WGPUView.getById(params.id);
+ 			if (!view?.ptr) {
+-				console.error(
+-					`wgpuTagSetHidden: WGPUView not found or has no ptr for id ${params.id}`,
+-				);
++				console.error("SDK_SDKS_MAIN_PROC_NATIVE_TS_3971");
+ 				return;
+ 			}
+ 			native_.symbols.wgpuViewSetHidden(view.ptr, params.hidden);
+@@ -3979,9 +3953,7 @@
+ 		wgpuTagRemove: (params: { id: number }) => {
+ 			const view = WGPUView.getById(params.id);
+ 			if (!view?.ptr) {
+-				console.error(
+-					`wgpuTagRemove: WGPUView not found or has no ptr for id ${params.id}`,
+-				);
++				console.error("SDK_SDKS_MAIN_PROC_NATIVE_TS_3981");
+ 				return;
+ 			}
+ 			view.remove();
+@@ -3989,13 +3961,11 @@
+ 		wgpuTagRunTest: (params: { id: number }) => {
+ 			const view = WGPUView.getById(params.id);
+ 			if (!view?.ptr) {
+-				console.error(
+-					`wgpuTagRunTest: WGPUView not found or has no ptr for id ${params.id}`,
+-				);
++				console.error("SDK_SDKS_MAIN_PROC_NATIVE_TS_3991");
+ 				return;
+ 			}
+ 			if (!native?.symbols?.wgpuRunGPUTest) {
+-				console.error("wgpuTagRunTest: wgpuRunGPUTest not available");
++				console.error("SDK_SDKS_MAIN_PROC_NATIVE_TS_3997");
+ 				return;
+ 			}
+ 			native_.symbols.wgpuRunGPUTest(view.ptr);
+@@ -4040,7 +4010,7 @@
+ 			);
+ 		},
+ 		webviewEvent: (params: unknown) => {
+-			console.log("-----------------+webviewEvent", params);
++			console.log("SDK_SDKS_MAIN_PROC_NATIVE_TS_4042");
+ 		},
+ 	},
+ };
+--- a/package/src/browser/index.ts
++++ b/package/src/browser/index.ts
+@@ -120,23 +120,23 @@
+ 							packet.iv,
+ 							packet.tag,
+ 						);
+-						this.rpcHandler?.(JSON.parse(decrypted));
++						void Promise.resolve().then(() => this.rpcHandler?.(JSON.parse(decrypted))).catch(() => console.error("SDK_RPC_DISPATCH_FAILED"));
+ 					} else {
+-						this.rpcHandler?.(packet);
++						void Promise.resolve().then(() => this.rpcHandler?.(packet)).catch(() => console.error("SDK_RPC_DISPATCH_FAILED"));
+ 					}
+ 				} catch (err) {
+-					console.error("Error parsing bun message:", err);
++					console.error("SDK_BROWSER_INDEX_TS_127");
+ 				}
+ 			} else if (message instanceof Blob) {
+ 				// Handle binary data (e.g., convert Blob to ArrayBuffer if needed)
+ 			} else {
+-				console.error("UNKNOWN DATA TYPE RECEIVED:", event.data);
++				console.error("SDK_BROWSER_INDEX_TS_132");
+ 			}
+ 		});
+ 
+ 		socket.addEventListener("error", (event) => {
+ 			this.hostSocketCanSend = false;
+-			console.error("Socket error:", event);
++			console.error("SDK_BROWSER_INDEX_TS_138");
+ 		});
+ 
+ 		socket.addEventListener("close", (_event) => {
+@@ -160,14 +160,14 @@
+ 			.then(async () => {
+ 				const result = await settledMessage;
+ 				if (result.status === "rejected") {
+-					console.error("Error parsing bun message:", result.reason);
++					console.error("SDK_BROWSER_INDEX_TS_162");
+ 					return;
+ 				}
+-				this.rpcHandler?.(result.value);
++				void Promise.resolve().then(() => this.rpcHandler?.(result.value)).catch(() => console.error("SDK_RPC_DISPATCH_FAILED"));
+ 			})
+ 			.catch((err) => {
+ 				// Keep a single bad frame or handler from poisoning the dispatch tail.
+-				console.error("Error parsing bun message:", err);
++				console.error("SDK_BROWSER_INDEX_TS_169");
+ 			});
+ 	}
+ 
+@@ -179,7 +179,7 @@
+ 					const messageString = JSON.stringify(message);
+ 					return that.sendMessageToHost(messageString);
+ 				} catch (error) {
+-					console.error("host: failed to serialize message to webview", error);
++					console.error("SDK_BROWSER_INDEX_TS_181");
+ 				}
+ 			},
+ 			registerHandler(handler: (msg: unknown) => void) {
+@@ -237,7 +237,7 @@
+ 			this.hostSocket!.send(encryptedPacketString);
+ 			return true;
+ 		} catch (error) {
+-			console.error("Error sending message to host via socket:", error);
++			console.error("SDK_BROWSER_INDEX_TS_239");
+ 			return false;
+ 		}
+ 	}
+@@ -246,7 +246,7 @@
+ 		try {
+ 			window.__electrobunHostBridge?.postMessage(queuedMessage.message);
+ 		} catch (error) {
+-			console.error("Error sending message to host via native bridge:", error);
++			console.error("SDK_BROWSER_INDEX_TS_248");
+ 		} finally {
+ 			queuedMessage.markSent();
+ 		}
+@@ -303,7 +303,7 @@
+ 		// NOTE: in the webview messages are passed by executing window.__electrobun.receiveMessageFromHost(object)
+ 		// so they're already parsed into an object here
+ 		if (this.rpcHandler) {
+-			this.rpcHandler(msg);
++			void Promise.resolve().then(() => this.rpcHandler?.(msg)).catch(() => console.error("SDK_RPC_DISPATCH_FAILED"));
+ 		}
+ 	}
+ 
+@@ -342,15 +342,15 @@
+ 										resolve(resolvedResult);
+ 									})
+ 									.catch((error) => {
+-										console.error("bun: async script execution failed", error);
+-										resolve(String(error));
++										console.error("SDK_BROWSER_INDEX_TS_344");
++										resolve("RPC_EVALUATION_FAILED");
+ 									});
+ 							} else {
+ 								resolve(result);
+ 							}
+ 						} catch (error) {
+-							console.error("bun: failed to eval script", error);
+-							resolve(String(error));
++							console.error("SDK_BROWSER_INDEX_TS_351");
++							resolve("RPC_EVALUATION_FAILED");
+ 						}
+ 					});
+ 				},
+--- a/package/src/preload/index.ts
++++ b/package/src/preload/index.ts
+@@ -32,7 +32,7 @@
+ 
+ // Initialize encryption first (async)
+ initEncryption().catch((err) =>
+-	console.error("Failed to initialize encryption:", err),
++	console.error("SDK_PRELOAD_INDEX_TS_34"),
+ );
+ 
+ // Set up global handlers for bun to call back
+--- a/package/src/preload/webviewTag.ts
++++ b/package/src/preload/webviewTag.ts
+@@ -98,7 +98,7 @@
+ 			}
+ 			return parsed;
+ 		} catch (error) {
+-			console.error("Invalid navigation-rules attribute:", error);
++			console.error("SDK_PRELOAD_WEBVIEWTAG_TS_100");
+ 			return [];
+ 		}
+ 	}
+@@ -186,7 +186,7 @@
+ 				});
+ 			});
+ 		} catch (err) {
+-			console.error("Failed to init webview:", err);
++			console.error("SDK_PRELOAD_WEBVIEWTAG_TS_188");
+ 		}
+ 	}
+ 
+--- a/package/src/preload/wgpuTag.ts
++++ b/package/src/preload/wgpuTag.ts
+@@ -111,7 +111,7 @@
+ 			this._ready = true;
+ 			this.emit("ready", { id: wgpuViewId });
+ 		} catch (err) {
+-			console.error("Failed to init WGPU view:", err);
++			console.error("SDK_PRELOAD_WGPUTAG_TS_113");
+ 		} finally {
+ 			this._initializing = false;
+ 		}
+--- a/package/src/shared/rpc.ts
++++ b/package/src/shared/rpc.ts
+@@ -455,12 +455,12 @@
+ 					payload: await requestHandler(method as any, params),
+ 				};
+ 			} catch (error) {
+-				if (!(error instanceof Error)) throw error;
++				// All thrown values become a fixed transport error.
+ 				response = {
+ 					type: "response",
+ 					id,
+ 					success: false,
+-					error: error.message,
++					error: "RPC_HANDLER_FAILED",
+ 				};
+ 			}
+ 			debugHooks.onSend?.(response);
+@@ -479,22 +479,22 @@
+ 			requestListeners.delete(message.id);
+ 			if (deadline !== undefined && performance.now() >= deadline)
+ 				reject?.(new Error("RPC request timed out."));
+-			else if (!message.success) reject?.(new Error(message.error));
++			else if (!message.success) reject?.(new Error("RPC_REMOTE_FAILED"));
+ 			else resolve?.(message.payload);
+ 			return;
+ 		}
+ 
+ 		if (message.type === "message") {
+ 			for (const listener of wildcardMessageListeners)
+-				(listener as any)(message.id, message.payload);
++				invokeMessageHandler(listener as any, message.id, message.payload);
+ 			const listeners = messageListeners.get(message.id);
+ 			if (!listeners) return;
+-			for (const listener of listeners) (listener as any)(message.payload);
++			for (const listener of listeners) invokeMessageHandler(listener as any, message.payload);
+ 			return;
+ 		}
+ 
+ 		throw new Error(
+-			`Unexpected RPC message type: ${(message as any).type}`,
++			"Unexpected RPC message type",
+ 		);
+ 	}
+ 
+@@ -513,6 +513,14 @@
+ 	};
+ }
+ 
++function invokeMessageHandler(handler: (...args: any[]) => unknown, ...args: any[]): void {
++	try {
++		void Promise.resolve(handler(...args)).catch(() => console.error("RPC_MESSAGE_HANDLER_FAILED"));
++	} catch {
++		console.error("RPC_MESSAGE_HANDLER_FAILED");
++	}
++}
++
+ // ---- Electrobun combined schema ----
+ 
+ export interface ElectrobunRPCSchema {
+@@ -589,12 +597,12 @@
+ 			((messageName: keyof Schema[Side]["messages"], payload: any) => {
+ 				const globalHandler = (messageHandlers as any)["*"];
+ 				if (globalHandler) {
+-					globalHandler(messageName, payload);
++					invokeMessageHandler(globalHandler, messageName, payload);
+ 				}
+ 
+ 				const messageHandler = (messageHandlers as any)[messageName];
+ 				if (messageHandler) {
+-					messageHandler(payload);
++					invokeMessageHandler(messageHandler, payload);
+ 				}
+ 			}) as any,
+ 		);
+--- a/package/src/sdks/main/core/BrowserView.ts
++++ b/package/src/sdks/main/core/BrowserView.ts
+@@ -407,7 +407,7 @@
+ 				serialized = JSON.stringify(message);
+ 				if (serialized === undefined) throw new TypeError("RPC packet is not JSON serializable");
+ 			} catch (error) {
+-				console.error("host: failed to serialize message to webview", error);
++				console.error("SDK_BROWSER_VIEW_ERROR");
+ 				markSent();
+ 				return;
+ 			}
+@@ -471,7 +471,7 @@
+ 						this.sendHostMessageToWebviewViaExecute(queuedMessage.message);
+ 					}
+ 				} catch (error) {
+-					console.error("host: failed to send message to webview", error);
++					console.error("SDK_BROWSER_VIEW_ERROR");
+ 				} finally {
+ 					queuedMessage.markSent();
+ 				}
+@@ -484,7 +484,7 @@
+ 				queuedMessages.map(({ message }) => message),
+ 			);
+ 		} catch (error) {
+-			console.error("host: failed to send messages to webview", error);
++			console.error("SDK_BROWSER_VIEW_ERROR");
+ 		} finally {
+ 			for (const { markSent } of queuedMessages) markSent();
+ 		}
+@@ -560,7 +560,7 @@
+ 		try {
+ 			ffi.request.webviewRemove({ id: this.id });
+ 		} catch (error) {
+-			console.error(`Error removing webview ${this.id}:`, error);
++			console.error("SDK_BROWSER_VIEW_ERROR");
+ 		}
+ 	}
+ 

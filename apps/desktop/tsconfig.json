@@ -4,9 +4,9 @@
     "lib": ["ESNext", "DOM"],
     "types": ["bun"],
     "paths": {
-      "electrobun": ["./.hutch/devkit/api/sdks/main/index.ts"],
-      "electrobun/main": ["./.hutch/devkit/api/sdks/main/index.ts"],
-      "electrobun/view": ["./.hutch/devkit/api/browser/index.ts"]
+      "electrobun": ["../../.cache/desktop-sdk/patched/source/package/src/sdks/main/index.ts"],
+      "electrobun/main": ["../../.cache/desktop-sdk/patched/source/package/src/sdks/main/index.ts"],
+      "electrobun/view": ["../../.cache/desktop-sdk/patched/source/package/src/browser/index.ts"]
     }
   },
   "include": ["src", "tests", "electrobun.config.ts", "hutch.config.ts"]

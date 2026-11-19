@@ -12,7 +12,7 @@ for (const action of ["hide", "picker", "open", "quit"] as const) {
     try {
       status.textContent = await rpc.request.action(action);
     } catch (error) {
-      status.textContent = String(error);
+      status.textContent = "Native action failed";
     }
   });
 }

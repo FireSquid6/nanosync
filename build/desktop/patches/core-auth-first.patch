@@ -1,0 +1,53 @@
+--- a/package/src/core/main.zig
++++ b/package/src/core/main.zig
+@@ -1422,13 +1422,20 @@
+     enqueuePendingHostMessage(webview_id, message_z.ptr);
+ }
+ 
+-fn dispatchHostTransportMessage(webview_id: u32, encrypted_packet: []const u8) void {
++fn enqueueHostTransportMessageForSocket(webview_id: u32, handle: std.posix.socket_t, plaintext: []const u8) void {
++    // Authenticate the frame before it can displace an existing socket.
++    if (!isCurrentWebviewSocketHandle(webview_id, handle) and !attachWebviewSocketHandle(webview_id, handle)) return;
++    const context = lookupWebviewTransportContext(webview_id) orelse return;
++    enqueueHostTransportPlaintext(webview_id, context, plaintext);
++}
++
++fn dispatchHostTransportMessage(webview_id: u32, handle: std.posix.socket_t, encrypted_packet: []const u8) void {
+     incrementHostTransportDebug("frames_dispatched");
+     const context = lookupWebviewTransportContext(webview_id) orelse return;
+ 
+     const plaintext = decryptHostTransportPacket(encrypted_packet, context.secret_key) catch {
+         if (context.plaintext_transport and isPlaintextHostTransportPacket(encrypted_packet)) {
+-            enqueueHostTransportPlaintext(webview_id, context, encrypted_packet);
++            enqueueHostTransportMessageForSocket(webview_id, handle, encrypted_packet);
+             return;
+         }
+         incrementHostTransportDebug("decrypt_errors");
+@@ -1436,7 +1443,7 @@
+     };
+     incrementHostTransportDebug("decrypt_ok");
+     defer allocator.free(plaintext);
+-    enqueueHostTransportPlaintext(webview_id, context, plaintext);
++    enqueueHostTransportMessageForSocket(webview_id, handle, plaintext);
+ }
+ 
+ fn handleHostTransportConnection(stream: std.Io.net.Stream) void {
+@@ -1469,9 +1476,6 @@
+ 
+     writeWebSocketHandshake(out, websocket_key) catch return;
+ 
+-    if (!attachWebviewSocketHandle(webview_id, stream.socket.handle)) {
+-        return;
+-    }
+ 
+     // Any bytes the client sent after the HTTP head remain buffered in `in`,
+     // so WebSocket frames are read from the same reader.
+@@ -1484,7 +1488,7 @@
+         defer allocator.free(frame.payload);
+ 
+         switch (frame.opcode) {
+-            0x1 => dispatchHostTransportMessage(webview_id, frame.payload),
++            0x1 => dispatchHostTransportMessage(webview_id, stream.socket.handle, frame.payload),
+             0x8 => {
+                 writeWebSocketFrameSerialized(stream, 0x8, "") catch {};
+                 break;

@@ -1,5 +1,5 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": { "lib": ["ESNext", "DOM"], "types": ["bun"] },
-  "include": ["src/selfcheck.ts", "src/rpc.ts", "tests"]
+  "include": ["src/selfcheck.ts", "src/open-native.ts", "src/rpc.ts", "tests/*.test.ts", "../../build/desktop/*.ts"]
 }

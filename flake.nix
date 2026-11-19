@@ -13,18 +13,29 @@
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
+      desktopBun = pkgs.bun.overrideAttrs (_: {
+        version = "1.4.4";
+        src = pkgs.fetchurl {
+          url = "https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-x64.zip";
+          sha256 = "bf8ccbfb2b0b80159e0f9a6d15c55317add8077534dbc6130a3edb52fccb395c";
+        };
+      });
       nanosync = pkgs.callPackage ./build/nix/package.nix {
         bun2nix = bun2nix.packages.${system}.default;
       };
     in {
       devShells.${system}.default = pkgs.mkShell {
         packages = with pkgs; [
-          bun nodejs curl gnutar gzip patchelf pkg-config
+          desktopBun nodejs curl gnutar gzip xz git util-linux binutils patchelf pkg-config
+          xorg-server
           gtk3 webkitgtk_4_1 libayatana-appindicator librsvg libsecret
           glib dbus xdg-utils
         ];
         shellHook = ''
           export HUTCH_HOME="$PWD/.cache/hutch"
+          export NANOSYNC_XVFB="${pkgs.xorg-server}/bin/Xvfb"
+          export NANOSYNC_DBUS="${pkgs.dbus}/bin/dbus-daemon"
+          export NANOSYNC_XDG_OPEN="${pkgs.xdg-utils}/bin/xdg-open"
           export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath (with pkgs; [
             gtk3 webkitgtk_4_1 libayatana-appindicator librsvg libsecret
           ])}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -32,6 +43,7 @@
       };
       packages.${system} = {
         inherit nanosync;
+        desktop-bun = desktopBun;
         default = nanosync;
       };
     };

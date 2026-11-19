@@ -1,0 +1,44 @@
+{
+  "sdk-privacy.patch": {
+    "package/src/sdks/main/proc/native.ts": {
+      "before": "02c9520420c7ed55fef7481a89f3ce60ebbb022232f01961f92fecab75c8780a",
+      "after": "bcfeb448a76b826a840002a8e4a95705b888c489cc95fe8709a6b26f0cd3b5d5"
+    },
+    "package/src/browser/index.ts": {
+      "before": "ed0dd2772917e00d6d8bad0204c2a6dcb12475fa3dbd3df6acd78cf2cddb4982",
+      "after": "aee5fe428b6d978fd0008bd77e0da4024d005e8c73cc82165d81a78363ee0727"
+    },
+    "package/src/preload/index.ts": {
+      "before": "4b9e1e1c7f8fd1ef388b1bbee2e19fa26191c9c098f1166dad4b42a539e0e7d1",
+      "after": "d3f041c7930e5fa99147e23f371861285f89b7f4eaaacf9c9e3a4cbe2e8a58dd"
+    },
+    "package/src/preload/webviewTag.ts": {
+      "before": "5c89a4c7bc44f4405e8fa7de335aaa40199fc242672cbe6644562fb2bf93594f",
+      "after": "edc0923b7fd21f3d6b71052a8b65cfa10e22bb5bd1265aabfcf9799bbc2534bc"
+    },
+    "package/src/preload/wgpuTag.ts": {
+      "before": "d382d496f984fbc73cd7e4e2cdaf61536d1b8915b7b6312a2dc6b9d876584c9f",
+      "after": "edafc2ceacb6e46c8c72e506ce7fc77af2a25f159b86c87515e0430adbc5c2d8"
+    },
+    "package/src/shared/rpc.ts": {
+      "before": "9468eaeddfa988a530af81bfb0970a5d63de81d937758584fc5f667728b49594",
+      "after": "ed3730309e2718a0f7a2ba26f883ed0aa9c30e5c19a86ec6437beab9e9c13eac"
+    },
+    "package/src/sdks/main/core/BrowserView.ts": {
+      "before": "24469578dec985e0a785557317597720f8812f0ea702297a5c0f4f4ceb4a2d6b",
+      "after": "fde0ed72f08833e049ab54942b07f041f1d4e769a43da04ceb2abdcdfec1715b"
+    }
+  },
+  "core-auth-first.patch": {
+    "package/src/core/main.zig": {
+      "before": "85aaa611fc18649052bfe55e33dbf4d3c4a46321dcbc060e675a40346e4d4e39",
+      "after": "79601fe68569db9646ae611c61e0a508fb202a043f16c9f58da3e586e8e95d2e"
+    }
+  },
+  "sdk-fatal-shutdown.patch": {
+    "package/src/sdks/main/proc/native.ts": {
+      "before": "bcfeb448a76b826a840002a8e4a95705b888c489cc95fe8709a6b26f0cd3b5d5",
+      "after": "d1852dfa299fb074ed9f4cfe5a206a85ced86667cdbac316db1d3ab4af203393"
+    }
+  }
+}

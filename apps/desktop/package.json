@@ -5,6 +5,7 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.check.json --noEmit",
     "typecheck:native": "tsc -p tsconfig.json --noEmit",
+    "security:gate": "bun ../../build/desktop/native-gate.ts && bun ../../build/desktop/native-gate.ts --quit",
     "prepare:native": "bash tooling.sh prepare",
     "build": "bash tooling.sh build --env=stable",
     "dev": "bash tooling.sh dev"

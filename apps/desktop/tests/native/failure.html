@@ -1,0 +1,5 @@
+<!doctype html><html lang="en"><head><meta charset="UTF-8"><title>Synthetic preload failure</title></head><body><script>
+window.addEventListener('load', () => {
+  window.__electrobunHostBridge.postMessage(JSON.stringify({type:'request',id:900,method:'preloadObserved',params:{logs:window.__fixtureLogs}}));
+});
+</script></body></html>
