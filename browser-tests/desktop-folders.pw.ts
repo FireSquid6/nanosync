@@ -1,5 +1,9 @@
 import { expect, test } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { createDesktopBackend } from '../apps/desktop/src/backend';
+import { createConnection, readPreferences, setPaused } from '../packages/client-service/src/index.ts';
 import type { DesktopCommand, DesktopReply, DesktopSnapshot } from '../apps/desktop/src/rpc';
 let http: ReturnType<typeof Bun.serve>, url: string;
 test.beforeAll(async () => {
@@ -74,6 +78,7 @@ function state(): DesktopSnapshot {
     upToDate: true,
     lastRemoteCheck: 100000,
     lastSuccessfulSync: 90000,
+    failureEpisode: null,
     observationTime: 100000,
     attentionRequired: false,
     statusIssues: [],
@@ -91,7 +96,8 @@ function state(): DesktopSnapshot {
       canRollback: false,
     },
     settings: {
-      version: 2,
+      version: 3,
+      notifications: { enabled: true, conflicts: true, revokedAccess: true, persistentFailures: true, includeNamesAndPaths: false },
       revision: 0,
       globalPaused: false,
       bindingPaused: { [secondId]: true },
@@ -848,4 +854,54 @@ test('General observes native loss without rebasing drafts, rejects pre-save pol
   } finally {
     release.resolve();
   }
+});
+
+test('real backend notification settings and native-picked diagnostics preserve privacy and keyboard access', async ({ page }) => {
+  const base = mkdtempSync('/tmp/ns-browser-settings-'), root = join(base, 'state'), files = join(base, 'files'), documents = join(base, 'Documents');
+  mkdirSync(root, { mode: 0o700 }); mkdirSync(files); mkdirSync(documents, { mode: 0o755 });
+  createConnection(root, files, serverId, vaultId, deviceId);
+  let pick: string[] = [];
+  const backend = createDesktopBackend(root, {
+    pickFolder: async () => pick, openAdministration: async () => ({ ok: false }), quit() {},
+    notificationStatus: () => ({ available: false, actions: false, code: 'NOTIFICATIONS_UNAVAILABLE' }),
+  });
+  try {
+    await page.clock.install({ time: 0 });
+    await page.exposeBinding('desktopPresentation', (_source, command: DesktopCommand) => backend.execute(command));
+    await page.goto(url);
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await page.getByRole('button', { name: 'Notifications', exact: true }).focus();
+    await page.keyboard.press('Enter');
+    await expect(page.getByLabel('Include local names and paths in notifications')).not.toBeChecked();
+    await page.getByLabel('Conflicts', { exact: true }).uncheck();
+    await page.getByLabel('Enable notifications', { exact: true }).uncheck();
+    await page.getByRole('button', { name: 'Save notification preferences' }).click();
+    expect(readPreferences(root).notifications).toMatchObject({ enabled: false, conflicts: false, revokedAccess: true });
+    await page.getByLabel('Enable notifications', { exact: true }).check();
+    setPaused(root, { all: true }, true);
+    await page.clock.runFor(1500);
+    await expect(page.getByLabel('Enable notifications', { exact: true })).toBeChecked();
+    await page.getByRole('button', { name: 'Save notification preferences' }).click();
+    await expect(page.getByRole('alert')).toContainText('Saved state changed');
+    await page.getByRole('button', { name: 'Refresh notification settings' }).click();
+    await expect(page.getByLabel('Enable notifications', { exact: true })).not.toBeChecked();
+    await page.getByRole('button', { name: 'Diagnostics', exact: true }).click();
+    await page.getByRole('button', { name: 'Choose directory and export diagnostics' }).click();
+    await expect(page.getByRole('status')).toContainText('Export cancelled');
+    pick = [documents];
+    await page.getByRole('button', { name: 'Choose directory and export diagnostics' }).click();
+    await expect(page.getByRole('status')).toContainText('Diagnostics exported locally');
+    const exported = readdirSync(documents);
+    expect(exported).toHaveLength(1);
+    const report = JSON.parse(readFileSync(join(documents, exported[0]!), 'utf8'));
+    expect(report.identifiers).toBeUndefined(); expect(JSON.stringify(report)).not.toContain(files);
+    await page.getByLabel('Include identifying binding IDs and local folder paths for this export only').check();
+    await expect(page.getByRole('status').filter({ hasText: 'Privacy warning' })).toBeVisible();
+    await page.getByRole('button', { name: 'Choose directory and export diagnostics' }).click();
+    await expect(page.getByLabel('Include identifying binding IDs and local folder paths for this export only')).not.toBeChecked();
+    const reports = readdirSync(documents).map(file => JSON.parse(readFileSync(join(documents, file), 'utf8')));
+    expect(reports.some(report => report.identifiers?.bindings[0]?.root === files)).toBe(true);
+    const accessibility = await new AxeBuilder({ page }).disableRules(['color-contrast']).analyze();
+    expect(accessibility.violations).toEqual([]);
+  } finally { await backend.shutdown(); rmSync(base, { recursive: true, force: true }); }
 });

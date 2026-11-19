@@ -47,7 +47,8 @@ function initial(): DesktopSnapshot {
       canRollback: false,
     },
     settings: {
-      version: 2,
+      version: 3,
+      notifications: { enabled: true, conflicts: true, revokedAccess: true, persistentFailures: true, includeNamesAndPaths: false },
       revision: 0,
       globalPaused: false,
       bindingPaused: {},

@@ -28,7 +28,7 @@ test('lifecycle settings migrate only on explicit save and preserve independent 
   const root = mkdtempSync(join(tmpdir(), 'ns-preferences-'));
   try {
     expect(readPreferences(root)).toMatchObject({
-      version: 2,
+      version: 3,
       revision: 0,
       lifecycle: { startAtLogin: false, trayEnabled: null, keepSyncingAfterClose: true },
       continuousRequested: {},
@@ -41,7 +41,7 @@ test('lifecycle settings migrate only on explicit save and preserve independent 
     expect(readFileSync(join(root, 'settings.json'), 'utf8')).toBe(original);
     const saved = setLifecycle(root, choices, 1);
     expect(saved).toMatchObject({
-      version: 2,
+      version: 3,
       revision: 2,
       lifecycle: choices,
       bindingPaused: { [binding]: true },
@@ -61,7 +61,7 @@ test('lifecycle settings migrate only on explicit save and preserve independent 
     rmSync(root, { recursive: true, force: true });
   }
 });
-test('v2 upgrade refuses an older or unadvertised live owner before modifying shared settings', () => {
+test('v3 upgrade refuses an older or unadvertised live owner before modifying shared settings', () => {
   const root = mkdtempSync(join(tmpdir(), 'ns-settings-owner-'));
   let release: (() => void) | undefined;
   try {
@@ -74,7 +74,7 @@ test('v2 upgrade refuses an older or unadvertised live owner before modifying sh
     expect(readFileSync(join(root, 'settings.json'), 'utf8')).toBe(before);
     release();
     release = undefined;
-    expect(setLifecycle(root, choices, 1).version).toBe(2);
+    expect(setLifecycle(root, choices, 1).version).toBe(3);
   } finally {
     release?.();
     rmSync(root, { recursive: true, force: true });

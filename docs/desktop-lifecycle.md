@@ -1,10 +1,10 @@
 # Desktop lifecycle — issue 18, step 10
 
-This is implementation scope, not installed-session certification. The native gate uses only disposable Xvfb, HOME/XDG directories and activation-free private D-Bus. No host panel, keyring, user startup configuration or compositor/login service is changed. Notifications/diagnostics and release packaging remain steps 11/12.
+This is implementation scope, not installed-session certification. The native gate uses only disposable Xvfb, HOME/XDG directories and activation-free private D-Bus. No host panel, keyring, user startup configuration or compositor/login service is changed. Step 11 adds [notifications](desktop-notifications.md) and [diagnostics](desktop-diagnostics.md); release packaging remains step 12.
 
 ## Trusted main and saved intent
 
-`apps/desktop/src/main.ts` applies shared settings v2 without rewriting them. Native reconciliation rereads preferences after capability probes. Periodic ticks skip a pending probe; explicit settings changes await a fresh follow-up. Close reads current preferences synchronously, including CLI edits. There is no cached preference writeback and no new daemon, encryption implementation or SQLite path.
+`apps/desktop/src/main.ts` applies shared preferences without writing cached native/UI values back to settings. Native reconciliation rereads preferences after capability probes. Periodic ticks skip a pending probe; explicit settings changes await a fresh follow-up. Close reads current preferences synchronously, including CLI edits. There is no cached preference writeback and no new daemon, encryption implementation or SQLite path.
 
 Snapshots expose `lifecycle.{startup,tray,session}` with independent `available` (true/false/null = unprobed), `applied` and fixed actionable `message`, plus closing/shutdown-error state. General settings consumes fresh parent observations while preserving the draft's original CAS revision. Its requests share the Folders mutation epoch; a pre-save poll cannot overwrite a mutation response. Failed reads demote native observations to unknown/historical. Neither a saved checkbox nor a successful file write certifies a working native integration.
 
@@ -46,7 +46,7 @@ False/null choice constructs no Tray. Availability requires the standard watcher
 
 Read-only tool calls use build-pinned Nix gdbus/systemctl paths, a streaming 16 KiB output bound and a kill/reap watchdog. At most eight matching tray-ID registry candidates are probed; pathological hosts exceeding that bound remain honestly unproven rather than applied. This pinned Linux backend is menu-only: exactly **Open Nanosync**, no Pause/Quit and no assumed raw primary-icon activation. Host loss removes the integration; recreation reinstalls the menu. Tray failure never prevents hiding, syncing or authenticated launcher reopening.
 
-Aggregate shared attention, not synchronization completion, selects the icon/title: normal work, deliberate pause and brief offline periods are green/no-intervention; actionable failures/conflicts are red with a distinct diamond/exclamation shape and status text. Titles omit paths/filenames. There is no notification delivery. Actual host-panel presentation and accessibility still require release smoke testing.
+Aggregate shared attention, not synchronization completion, selects the icon/title: normal work, deliberate pause and brief offline periods are green/no-intervention; actionable failures/conflicts are red with a distinct diamond/exclamation shape and status text. Titles omit paths/filenames. Notification delivery is the separate step-11 integration. Actual host-panel presentation and accessibility still require release smoke testing.
 
 ## Startup registration and installed-launcher prerequisite
 

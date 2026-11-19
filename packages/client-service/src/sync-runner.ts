@@ -6,7 +6,7 @@ import { decryptManifest, HttpRemote, IntegrityError, RemoteError, mergeManifest
 import { parseDeviceId, parseVaultId, type RevisionEnvelope, type VisibleObjectReference } from "@nanosync/protocol";
 import { acquireSyncLock } from "./sync-lock.ts";
 import { privateDirectory } from "./security.ts";
-import { readObservation, writeObservation, statusError, type SyncObservation, type SyncPhase } from "./status.ts";
+import { confirmFailure, readObservation, writeObservation, statusError, type SyncObservation, type SyncPhase } from "./status.ts";
 import { observeSyncLock } from "./sync-lock.ts";
 import { ClientError } from "./errors.ts";
 import { setImmediate as yieldWork } from "node:timers/promises";
@@ -83,7 +83,7 @@ export class SyncRunner {
       options.validateRoot?.();
       this.scanner = new LinuxScanner(options.syncDirectory, this.local, { ...options.scan, beforeWork: () => this.beforeWork() });
       const previous = readObservation(options.clientDirectory);
-      this.observation = { version: 1, observedAt: this.now(), phase: "idle", owner: options.owner ?? null,
+      this.observation = { version: 2, failureEpisode: previous?.failureEpisode ?? null, observedAt: this.now(), phase: "idle", owner: options.owner ?? null,
         lock: observeSyncLock(options.clientDirectory), progress: structuredClone(this.transfers), facts: this.local.statusFacts(),
         verified: false, enginePhase: null, statusIssues: [], attentionError: previous?.attentionError ?? null, lastRemoteCheck: previous?.lastRemoteCheck ?? null, lastSuccess: previous?.lastSuccess ?? null, error: null };
       this.record("idle");
@@ -208,6 +208,7 @@ export class SyncRunner {
           this.watcher?.refresh();
           this.observation.lastSuccess = this.now();
           this.observation.attentionError = null;
+          this.observation.failureEpisode = null;
           const facts = this.local.statusFacts();
           this.observation.verified = facts.conflicts === 0 && Object.values(facts.pending).every(count => count === 0);
           this.record("idle");
@@ -235,6 +236,7 @@ export class SyncRunner {
       }
       return;
     }
+    this.observation.failureEpisode = confirmFailure(this.observation.failureEpisode, code, this.now());
     let phase: SyncPhase = "failed";
     if (code === "FOLDER_UNAVAILABLE") phase = "folder-unavailable";
     else if (error instanceof TypeError || error instanceof RemoteError &&

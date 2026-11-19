@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 import { lstatSync, existsSync } from 'node:fs';
 import {
   ClientError,
@@ -18,6 +19,10 @@ import {
   inspectDestination,
   connectRegisteredVault,
   setLifecycle,
+  setPreferences,
+  validateNotifications,
+  exportDiagnostics,
+  type DiagnosticsRuntime,
   setPaused,
   checkedBindingRoot,
   listConflicts,
@@ -58,6 +63,8 @@ const fields: Record<DesktopCommand['type'], string[]> = {
   unlock: ['serverId', 'vaultId', 'recovery', 'retryCredentialWrite'],
   connect: ['serverId', 'vaultId', 'selection', 'confirmNonempty'],
   settings: ['lifecycle', 'expectedRevision'],
+  'notifications-settings': ['notifications', 'expectedRevision'],
+  'diagnostics-export': ['includeIdentifiers'],
   start: ['binding'],
   'sync-now': ['binding'],
   'open-folder': ['binding'],
@@ -93,7 +100,7 @@ export function validateCommand(value: unknown): DesktopCommand {
     ) {
       if (typeof item !== 'string' || !UUID.test(item)) return invalid();
     } else if (
-      ['fresh', 'retryCredentialWrite', 'confirmNonempty', 'paused', 'force', 'stopOwner'].includes(
+      ['fresh', 'retryCredentialWrite', 'confirmNonempty', 'paused', 'force', 'stopOwner', 'includeIdentifiers'].includes(
         name,
       )
     ) {
@@ -102,6 +109,8 @@ export function validateCommand(value: unknown): DesktopCommand {
       if (item !== true) return invalid();
     } else if (name === 'expectedRevision') {
       if (!Number.isSafeInteger(item) || (item as number) < 0) return invalid();
+    } else if (name === 'notifications') {
+      validateNotifications(item);
     } else if (name === 'lifecycle') {
       if (
         !item ||
@@ -121,6 +130,12 @@ export function validateCommand(value: unknown): DesktopCommand {
   return value as DesktopCommand;
 }
 const messages: Record<string, string> = {
+  DIAGNOSTICS_INVALID_INPUT: 'Invalid diagnostic export request.',
+  DIAGNOSTICS_COLLECTION_FAILED: 'Diagnostics could not safely observe saved state. Preserve state and retry after inspection.',
+  DIAGNOSTICS_DESTINATION_UNSAFE: 'Choose an existing owned real directory outside private and synced state.',
+  DIAGNOSTICS_DESTINATION_EXISTS: 'The diagnostic destination already exists. Choose a fresh destination.',
+  DIAGNOSTICS_WRITE_FAILED: 'Diagnostic export failed. No existing file was overwritten; inspect the selected directory.',
+  NOTIFICATIONS_STATE_INVALID: 'Notification delivery state needs inspection; existing attention remains visible.',
   REMOVAL_PENDING:
     'Removal is incomplete. Inspect its preserved original identities and explicitly resume; normal work is blocked.',
   REMOVAL_INVALID:
@@ -202,6 +217,7 @@ export interface DesktopNative {
   openFolder?(checkedRoot: string): Promise<{ ok: boolean }>;
   quit(): void;
   lifecycleStatus?(): import('./lifecycle').LifecycleStatus;
+  notificationStatus?(): import('./notify-native').NotificationAvailability;
   canSync?(): boolean;
   preferencesChanged?(): Promise<void>;
   requestQuit?(): void;
@@ -250,6 +266,7 @@ export function createDesktopBackend(
       clientRoot: root,
       administration: [...administration.keys()],
       runtimeErrors: { ...runtimeErrors },
+      notifications: native.notificationStatus?.(),
       ...(lifecycle ? {
         lifecycle,
         nativeEffects: {
@@ -471,6 +488,21 @@ export function createDesktopBackend(
           setPaused(root, { binding: command.binding }, command.paused, command.expectedRevision);
           break;
         }
+        case 'notifications-settings':
+          setPreferences(root, { notifications: command.notifications }, command.expectedRevision);
+          await native.preferencesChanged?.();
+          break;
+        case 'diagnostics-export': {
+          const paths = await native.pickFolder();
+          if (!paths.length) { data.cancelled = true; break; }
+          if (paths.length !== 1) throw new ClientError('DIAGNOSTICS_DESTINATION_UNSAFE', 'Invalid directory selection');
+          native.authorize?.();
+          if (closing) throw new ClientError('OWNER_STOPPED', 'Closing');
+          data.diagnostics = exportDiagnostics(root, join(paths[0]!, `nanosync-diagnostics-${randomUUID()}.json`), diagnosticsRuntime(), {
+            includeIdentifiers: command.includeIdentifiers,
+          });
+          break;
+        }
         case 'settings':
           setLifecycle(root, command.lifecycle, command.expectedRevision);
           await native.preferencesChanged?.();
@@ -682,6 +714,15 @@ export function createDesktopBackend(
       if (command?.type === 'enroll') command.password = '';
       if (command?.type === 'unlock') command.recovery = '';
     }
+  }
+  function diagnosticsRuntime(): DiagnosticsRuntime {
+    const lifecycle = native.lifecycleStatus?.(), notifications = native.notificationStatus?.();
+    const availability = (value: boolean | null | undefined) => value === true ? 'available' as const : value === false ? 'unavailable' as const : 'not-probed' as const;
+    return { applicationVersion: '0.0.0', toolkitVersion: '2.0.6', native: {
+      startup: availability(lifecycle?.startup.available), tray: availability(lifecycle?.tray.available),
+      session: availability(lifecycle?.session.available), notifications: availability(notifications?.available),
+      notificationActions: availability(notifications?.actions),
+    } };
   }
   async function resumeDesktopWork() {
     const state = snapshot();

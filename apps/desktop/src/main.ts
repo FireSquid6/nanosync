@@ -1,7 +1,8 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import Electrobun, { BrowserView, BrowserWindow, Tray, Utils } from 'electrobun/main';
-import { ClientError, readPreferences } from '@nanosync/client-service';
+import { createNativeNotifications } from './notify-native';
+import { ClientError, createNotificationSelection, deliverNotifications, recordNotificationDelivery, readPreferences } from '@nanosync/client-service';
 import type { DesktopRPC, DesktopSnapshot } from './rpc';
 import { createDesktopBackend } from './backend';
 import { openAdministration, openCheckedFolder } from './open-native';
@@ -77,6 +78,14 @@ if (
   const root = primary.root;
   let timer: ReturnType<typeof setInterval> | undefined;
   let reconciling: Promise<void> | undefined;
+  let notificationStateInvalid = false;
+  const selectNotifications = createNotificationSelection(root);
+  const notifications = createNativeNotifications(() => {
+    if (!lifecycle?.closing && !sessionLost) lifecycle?.reopen();
+  }, { delivery(batch, id, dismissed) {
+    try { assertInstance(); recordNotificationDelivery(root, batch, id, dismissed); }
+    catch { notificationStateInvalid = true; }
+  } });
   const status: LifecycleStatus = {
     startup: unavailable('Startup has not yet been reconciled.'),
     tray: unavailable('Tray has not yet been reconciled.'),
@@ -107,6 +116,8 @@ if (
     requestQuit() {
       lifecycle!.quit();
     },
+    notificationStatus: () => notificationStateInvalid
+      ? { ...notifications.status, code: 'NOTIFICATIONS_STATE_INVALID' } : notifications.status,
     lifecycleStatus: () => ({
       ...status,
       session: session.status,
@@ -161,6 +172,7 @@ if (
       clearInterval(timer);
       await stopped;
       await reconciling;
+      await notifications.close();
       tray.close();
       session.close();
       await singleton.close();
@@ -200,6 +212,19 @@ if (
         launcher: installedLauncher(),
         consumer,
       });
+      if (readPreferences(root).notifications.enabled && !notificationStateInvalid && await notifications.probe()) {
+        if (lifecycle?.closing || sessionLost) return;
+        assertInstance();
+        try {
+          await deliverNotifications(root, selectNotifications, {
+            admit() {
+              assertInstance();
+              return !lifecycle?.closing && !sessionLost && notifications.status.available === true;
+            },
+            submit: batch => notifications.submit(batch),
+          });
+        } catch { notificationStateInvalid = true; }
+      }
       const reply = await backend.execute({ type: 'snapshot' });
       const snapshot: DesktopSnapshot | undefined = reply.ok ? reply.snapshot : undefined;
       const registered =

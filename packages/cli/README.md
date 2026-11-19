@@ -29,6 +29,10 @@ nanosync client sync --watch --path "$HOME/Sync"
 - `server admin storage|retention-dry-run|gc-dry-run|scan|diagnostics`: local aggregate reports/maintenance, requiring the runtime to be stopped because report setup initializes/recovers object storage. GC remains dry-run; scan processes a bounded batch.
 - `client connections add|remove|view`: add uses `--credential-mode protected-file|os-store` for a genuinely new root, `--retry-credential-write` for an interrupted unsubmitted OS credential write, `--url`, `--alias`, `--device-name`, `--wait-ms`, `--fresh`, `--password-file`. Alias is unique local selection vocabulary, independent of the owner-visible device name (hostname offered by default). Remove uses `--server ALIAS_OR_ID` and optional `--force`; it never remotely revokes. View omits credentials.
 - `client vaults connect|disconnect|view`: connect uses `--server ALIAS_OR_ID`, `--vault NAME_OR_UUID`, `--path DIRECTORY`, `--confirm-nonempty`, `--recovery-file`. Interactive server/vault choices use maintained selection prompts. Path defaults to CWD. Recovery is requested only when the key is absent. Binding transfers no files. Multiple independent nonoverlapping directory replicas are allowed. Disconnect uses `--path` (CWD default) and optional `--force`, preserving files and remote data.
+- `client settings view|set`: shared lifecycle and notification intent with revision-checked updates; native availability is separate. See below for exact flags and result shapes.
+- `client status`, `pause|resume`, `open`, `conflicts view`, `ignores view|validate|set`, `removals view|resume`: shared observed status and checked local operations, detailed below.
+- `client credentials view|migrate|resume|rollback`: explicit credential-mode decisions/recovery, detailed below.
+- `client diagnostics export --output FILE [--include-identifiers]`: explicit allowlisted local report; never logs/credentials/full state. See [diagnostics contract](../../docs/desktop-diagnostics.md).
 - `client sync`: nearest binding at CWD or an ancestor; explicit `--path` and foreground `--watch`. Deleted vaults return `VAULT_DELETED`, stop syncing, and preserve files and cached keys. Disconnect the obsolete binding; reconnect to a separately provisioned vault deliberately.
 
 All server commands require `--server-dir DIRECTORY` or prompt for it; **no implicit server directory**. Every command accepts `--json --non-interactive --yes`. Non-terminal execution, `TERM=dumb`, and `--non-interactive` never prompt. Interactive server/vault/device selections require an explicit choice even when only one item is available. Server-local rename/delete also offer vault selectors when `--vault` is omitted. All selections have non-secret flags. `--yes` is only an ordinary confirmation, never permission to abandon unsynced work or bypass locks. Client state defaults to `~/.nanosync` (`--client-dir DIRECTORY`). Private state directories must be owned real directories with mode 0700.
@@ -217,29 +221,27 @@ nanosync client settings set --start-at-login false --tray-enabled false \
 nanosync client sync --path /absolute/folder --watch
 ```
 
-`settings set` requires all three boolean flags as exactly `true` or `false`.
+`settings set` requires at least one change. Supplying any lifecycle flag requires all three lifecycle booleans, exactly `true` or `false`. Notification-only patches do not require unrelated lifecycle choices.
 `--expected-revision` is optional (defaults to the revision just read); stale edits
 fail with `CONFLICT`, local exit 2. View/set use the existing JSON envelope with
 `data: {settings, nativeEffects:"not-applied"}`. Saving intent does **not** install
-startup/tray integration or enforce window-close/background behavior. These native
-effects remain desktop lifecycle step 10. Until then the desktop closes by safely
-quitting; no tray is installed, including when a tray preference is requested.
+startup/tray integration or enforce window-close/background behavior in the CLI. The desktop reconciles real available native effects separately; see [lifecycle implementation and limits](../../docs/desktop-lifecycle.md).
 
-Settings v2 adds `lifecycle:{startAtLogin,trayEnabled,keepSyncingAfterClose}` and
+The supported older settings v2 schema added `lifecycle:{startAtLogin,trayEnabled,keepSyncingAfterClose}` and
 `continuousRequested:{[bindingId]:"desktop"|"cli"}` to the existing revision and
 pause fields. Missing continuous entries mean not requested; the value is the
 **accepting owner's origin**, not the latest requesting interface. Defaults are
 startup false, tray null (not yet chosen), background-after-close true. Desktop
-setup requires an explicit yes/no tray choice. Reads normalize v1 in memory only;
-explicit lifecycle save or accepted watch durably upgrades the record. Pause-only
+setup requires an explicit yes/no tray choice. Reads normalize v1/v2 to current v3 preferences in memory only;
+explicit preference save, accepted watch, or a new shared runner durably upgrades the record. Runner admission publishes the settings-v3 compatibility barrier under the registry before observation-v2 incident writes, so older executables cannot start another writer after that upgrade. Pause-only
 v1 roots stay v1 until that upgrade; the existing pause/resume JSON result remains
-`{version:1,revision,globalPaused,bindingPaused}` even when stored settings are v2.
+`{version:1,revision,globalPaused,bindingPaused}` even when stored settings are v2/v3.
 
 Stop older clients before upgrading. Upgrade serializes registry then settings
 and refuses live older/unadvertised owners (`OWNER_INCOMPATIBLE`, local exit 2)
-before changing the record. New owner discovery metadata is version 2; the private
+before changing the record. New owner discovery metadata is version 3 (including explicit compatibility with settings v3 and observation v2); the private
 control request protocol remains version 1. Old discovery is not silently accepted
-or stolen. Older binaries reject v2 settings instead of discarding new preferences.
+or stolen. Older binaries reject unsupported settings versions instead of discarding new preferences.
 
 Connecting and one-shot sync do not request continuous work. Explicit desktop
 Start and CLI `sync --watch` persist accepted intent through the same shared watch
@@ -258,6 +260,24 @@ genuinely absent key (or explicitly retried interrupted key write), never for a
 locked store. Existing nonempty folders require acknowledgment. Finish connects
 without transfer. Start uses the actual shared continuous runner. Completion now returns
 to the connected-folders list/inspector, also shown directly when saved bindings exist.
+
+## Notifications and explicit client diagnostics
+
+```sh
+nanosync client settings set --notify-conflicts false --notifications-enabled true --expected-revision 2 --json
+nanosync client settings set --notification-names-and-paths false --notify-revoked-access true --notify-persistent-failures true --json
+nanosync client diagnostics export --output /absolute/owned/Documents/nanosync-report.json --json --non-interactive
+# Optional for this report only: binding IDs and local root paths, never credentials.
+nanosync client diagnostics export --output /absolute/owned/Documents/identifying-report.json --include-identifiers --json
+```
+
+Settings v3 adds exact `notifications:{enabled,conflicts,revokedAccess,persistentFailures,includeNamesAndPaths}` booleans. Global/category defaults are true; names/paths default false. CLI flags are `--notifications-enabled`, `--notify-conflicts`, `--notify-revoked-access`, `--notify-persistent-failures`, and `--notification-names-and-paths`, each accepting exactly `true|false`. A partial notification patch merges atomically with current preferences; a combined lifecycle+notification patch uses one revision. Empty changes, duplicate/invalid flags and partial lifecycle triples fail locally without modifying state. Global disable preserves independent choices and visible attention. Existing settings view/set envelope remains `{settings,nativeEffects:"not-applied"}`: CLI does not install native effects or promise headless notification delivery. See [native incident/dedup/availability policy](../../docs/desktop-notifications.md).
+
+Default native bodies contain no names/paths/URLs/aliases/device names/remote text. Successes and brief outages do not alert. Confirmed unresolved failures must span five minutes, with a fresh failure after evaluator restart. Actual authorization refusal is not falsely labeled proven device revocation. Durable claim-before-native-submission prevents restart/reply-loss spam, but can lose an alert after a crash; in-app attention remains. A native accepted ID is not proof of display; only explicit native dismissal reason 2 is recorded as dismissed.
+
+Diagnostics requires an explicit absolute `--output` filename in an existing owned directory (ordinary 0755 Documents works). It writes a fresh mode-0600 file with exclusive/no-follow creation, never overwrites any existing file/link, and rejects private/sync-root overlap and unsafe ancestry. No directories are created/chmodded. Success data is exactly `{version:1,exported:true,includeIdentifiers:boolean}`; report bytes are not dumped to stdout. Collection/unsafe destination/existing target/write failures are fixed `DIAGNOSTICS_*` local exit-2 errors, with no success result. A failed protected artifact may remain for inspection.
+
+Reports allowlist real runtime/schema versions, counts, phases, head sequences, safe codes, mode/recovery state and native availability. Missing facts stay null, partial reports explicitly `complete:false`. No native store probing/unlock, sync, recovery, network upload, credentials/hashes/references, file contents/inventories, raw logs/HTTP or environment collection. Default excludes identifying paths/names/URLs. `--include-identifiers` adds only binding IDs and local root paths for that export, never credentials; it is not saved. Nonsecret export remains available during pending migration/removal when the actual registry lease is free. A live registry owner is refused, never bypassed. GUI uses the same collector/writer with a trusted native directory picker and generated filename; renderer paths are not authority.
 
 ## Checked local folder opening
 
@@ -291,7 +311,7 @@ After a failed refresh, cached rows/owner counters are explicitly historical, ne
 shown as currently observed/up to date. Names not cached locally are not guessed:
 server aliases, vault UUIDs and independent copy IDs are shown without secret network
 lookups. Conflict/error attention stays visible alongside pause and progress; conflict,
-ignore and removal tools are later work.
+ignore and durable removal tools now use the shared operations described below.
 
 ## Shared status and durable pauses
 
@@ -332,7 +352,7 @@ Status data is `{settingsRevision,globalPaused,observedAt,bindings}`. Each bindi
 its existing identity/path, `owner` (origin/instance), `ownerPresent`, independent
 `pause` causes/effective flag, `phase`, `enginePhase`, `freshness`, `progressUnit`,
 `progress`, `facts`, `upToDate`, `attentionRequired`, safe `error` code, `statusIssues`,
-`observationTime`, `lastRemoteCheck`, and `lastSuccessfulSync`. Progress is completed
+`observationTime`, `lastRemoteCheck`, `lastSuccessfulSync`, and `failureEpisode` (null or the sanitized durable episode ID/onset/last confirmation/code used by notification policy). Progress is completed
 ciphertext-frame counts/bytes **reported by the observed owner**, not plaintext,
 partial stream bytes, a percentage or a known total. The UI labels current-owner
 counters separately from historical owner counters. Cache reads do not count as network transfers. Totals are

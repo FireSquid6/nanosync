@@ -48,7 +48,7 @@ test('headless CLI lifecycle settings share revision-checked intent without clai
     expect(await main(args)).toBe(0);
     expect(JSON.parse(stdout.pop()!).data).toMatchObject({
       settings: {
-        version: 2,
+        version: 3,
         revision: 2,
         globalPaused: true,
         lifecycle: { startAtLogin: true, trayEnabled: false, keepSyncingAfterClose: true },

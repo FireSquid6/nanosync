@@ -10,7 +10,7 @@ export { openBoundSync, stopOwnedSync, stopBoundSyncForRemoval, type BoundSyncSe
 export type { EnrollmentEvent, SyncEvent } from './events.ts';
 export { credentialStatus, initializeCredentials, desktopCredentials, migrateCredentials, resumeCredentialMigration, resumeCredentialCleanup, rollbackCredentialMigration, withCredentialRegistry, type CredentialMode, type CredentialStore, type CredentialOptions } from './credentials.ts';
 
-export { readSettings, readPreferences, setLifecycle, setPaused, pauseCauses, type ClientSettings, type ClientPreferences, type LifecyclePreferences } from './settings.ts';
+export { readSettings, readPreferences, setLifecycle, setPreferences, validateNotifications, setPaused, pauseCauses, type ClientSettings, type ClientPreferences, type LifecyclePreferences, type NotificationPreferences } from './settings.ts';
 export { credentialDecision } from './credentials.ts';
 export { inspectDestination, checkedBindingRoot, inspectRemoval, resumeRemoval } from './connections.ts';
 export { removalStatus, type RemovalIntent } from './removal-state.ts';
@@ -18,3 +18,6 @@ export { listConflicts, checkedConflictFolder, viewIgnores, validateIgnoreText, 
 export { setIgnores } from './sync-control.ts';
 export { onboardingSnapshot, requireDesktopCredentials, vaultKeyStatus, type OnboardingSnapshot } from './onboarding.ts';
 export { clientStatus, selectSavedBinding, type SyncPhase, type TransferProgress, type ClientStatusSnapshot, type StatusIssueCode } from './status.ts';
+export { collectDiagnostics, exportDiagnostics, type DiagnosticsRuntime, type DiagnosticsOptions } from './diagnostics.ts';
+export { createNotificationSelection, deliverNotifications, claimNotifications, recordNotificationDelivery, notificationText,
+  type NotificationBatch, type NotificationCategory } from './notifications.ts';

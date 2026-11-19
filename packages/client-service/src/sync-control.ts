@@ -31,7 +31,7 @@ export interface BoundSyncSession {
 }
 type Lock = NonNullable<ReturnType<typeof observeSyncLock>>;
 type Metadata = {
-  version: 2; root: string; rootDev: number; rootIno: number; binding: string;
+  version: 3; root: string; rootDev: number; rootIno: number; binding: string;
   origin: 'cli' | 'desktop'; instanceId: string; nonce: string;
   pid: number; starttime: string; lockDev: number; lockIno: number; socketDev: number; socketIno: number;
   runtime: 'session' | 'private-tmp'; runtimeDev: number; runtimeIno: number;
@@ -82,7 +82,7 @@ function readMetadata(replica: string, root: string, binding: string, lock: Lock
     'runtime', 'runtimeDev', 'runtimeIno', 'directoryDev', 'directoryIno',
   ]);
   const rootStat = lstatSync(root);
-  if (value.version !== 2 || value.root !== root || value.rootDev !== rootStat.dev || value.rootIno !== rootStat.ino ||
+  if (value.version !== 3 || value.root !== root || value.rootDev !== rootStat.dev || value.rootIno !== rootStat.ino ||
       value.binding !== binding || !['cli', 'desktop'].includes(value.origin as string) ||
       typeof value.instanceId !== 'string' || !UUID.test(value.instanceId) ||
       typeof value.nonce !== 'string' || !NONCE.test(value.nonce) ||
@@ -319,7 +319,7 @@ export async function openBoundSync(
       });
       chmodSync(socket, 0o600);
       const socketStat = socketIdentity(socket), rootStat = lstatSync(root);
-      metadata = { version: 2, root, rootDev: rootStat.dev, rootIno: rootStat.ino, binding: binding.connectionId,
+      metadata = { version: 3, root, rootDev: rootStat.dev, rootIno: rootStat.ino, binding: binding.connectionId,
         origin: options.origin, instanceId: options.instanceId, nonce,
         pid: ownLock.owner.pid, starttime: ownLock.owner.starttime, lockDev: ownLock.inode.dev, lockIno: ownLock.inode.ino,
         socketDev: socketStat.dev, socketIno: socketStat.ino,

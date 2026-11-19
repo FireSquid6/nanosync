@@ -228,10 +228,14 @@ export function credentialStatus(directory: string) {
       'replicas',
       'registry-lock',
       'credential-operation',
-      SETTINGS, SETTINGS_LOCK, REMOVAL,
+      SETTINGS, SETTINGS_LOCK, REMOVAL, 'notification-delivery.json', 'notification-delivery-lock',
     ];
     for (const name of readdirSync(root).filter(name => settingsStage.test(name))) validateSettingsStage(join(root, name));
-    if (readdirSync(root).some((name) => !allowed.includes(name) && !settingsStage.test(name) && !removalStage.test(name) && !cleanupStage.test(name)))
+    const notificationStage = /^notification-delivery\.json\.[0-9a-f]{32}\.stage$/;
+    for (const name of readdirSync(root).filter(name => notificationStage.test(name))) validateSettingsStage(join(root, name));
+    if (existsSync(join(root, 'notification-delivery.json'))) secureRead(join(root, 'notification-delivery.json'), 1_000_000);
+    if (existsSync(join(root, 'notification-delivery-lock'))) privateDirectory(join(root, 'notification-delivery-lock'));
+    if (readdirSync(root).some((name) => !allowed.includes(name) && !settingsStage.test(name) && !notificationStage.test(name) && !removalStage.test(name) && !cleanupStage.test(name)))
       stateInvalid('Unrecognized or incomplete client state; do not initialize as empty');
     readSettings(root);
     if (existsSync(join(root, SETTINGS_LOCK))) privateDirectory(join(root, SETTINGS_LOCK));

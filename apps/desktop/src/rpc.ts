@@ -2,6 +2,7 @@ import type {
   OnboardingSnapshot,
   RemoteVault,
   LifecyclePreferences,
+  NotificationPreferences,
   EnrollmentResult,
   listConflicts,
   viewIgnores,
@@ -46,6 +47,8 @@ export type DesktopCommand =
       lifecycle: LifecyclePreferences;
       expectedRevision: number;
     }
+  | { type: 'notifications-settings'; notifications: NotificationPreferences; expectedRevision: number }
+  | { type: 'diagnostics-export'; includeIdentifiers: boolean }
   | { type: 'start' | 'sync-now' | 'open-folder'; binding: string }
   | { type: 'pause-all'; paused: boolean; expectedRevision: number }
   | {
@@ -85,6 +88,7 @@ export type DesktopSnapshot = Omit<OnboardingSnapshot, 'nativeEffects'> & {
   administration: string[];
   runtimeErrors: Record<string, string>;
   lifecycle?: import('./lifecycle').LifecycleStatus;
+  notifications?: import('./notify-native').NotificationAvailability;
 };
 export type DesktopReply =
   | {
@@ -95,6 +99,7 @@ export type DesktopReply =
       key?: { keyRequired: boolean; credentialWritePending: boolean };
       folder?: { selection: string; path: string; nonempty: boolean };
       cancelled?: boolean;
+      diagnostics?: { version: 1; exported: true; includeIdentifiers: boolean };
       binding?: string;
       started?: boolean;
       conflicts?: ReturnType<typeof listConflicts>;

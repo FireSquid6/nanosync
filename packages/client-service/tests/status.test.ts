@@ -232,11 +232,11 @@ test('a snapshot race is visible as retryable unknown, not corruption or a failu
 test('recording unavailable credentials preserves the primary error when the journal also needs recovery', async () => {
   const { ClientError } = await import('../src/errors.ts');
   const { secureCreate } = await import('../src/security.ts');
-  const { recordCredentialUnavailable, clientStatus } = await import('../src/status.ts');
+  const { recordStartFailure, clientStatus } = await import('../src/status.ts');
   const { state, first } = await twoBindings();
   const replica = join(state, 'replicas', first.connectionId);
   secureCreate(join(replica, 'local.sqlite-wal'), 'interrupted WAL fixture');
-  expect(() => recordCredentialUnavailable(state, first, new ClientError('CREDENTIALS_UNAVAILABLE', 'Unlock the user session.'))).not.toThrow();
+  expect(() => recordStartFailure(state, first, new ClientError('CREDENTIALS_UNAVAILABLE', 'Unlock the user session.'))).not.toThrow();
   const status = clientStatus(state, first.root).bindings[0]!;
   expect(status).toMatchObject({ phase: 'credentials-locked', error: 'CREDENTIALS_UNAVAILABLE', facts: null, upToDate: false });
   expect(status.statusIssues.some(issue => issue.code === 'JOURNAL_RECOVERY_REQUIRED')).toBe(true);
@@ -261,12 +261,12 @@ test('a secondary status write failure cannot replace the primary credential err
   const { chmodSync } = await import('node:fs');
   const { ClientError } = await import('../src/errors.ts');
   const { secureCreate } = await import('../src/security.ts');
-  const { recordCredentialUnavailable } = await import('../src/status.ts');
+  const { recordStartFailure } = await import('../src/status.ts');
   const { state, first } = await twoBindings();
   const path = join(state, 'replicas', first.connectionId, 'status.json');
   secureCreate(path, 'secret-malformed-sentinel'); chmodSync(path, 0o644);
   const primary = new ClientError('CREDENTIALS_UNAVAILABLE', 'Unlock the user session and retry.');
-  expect(() => recordCredentialUnavailable(state, first, primary)).not.toThrow();
+  expect(() => recordStartFailure(state, first, primary)).not.toThrow();
   expect(primary).toMatchObject({ code: 'CREDENTIALS_UNAVAILABLE', exitCode: 2 });
   expect(primary.message).toContain('Unlock the user session');
   expect(primary.message).toContain('status could not be recorded');

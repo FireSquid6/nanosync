@@ -965,3 +965,75 @@ native GTK Wayland and steps 11/12 remain unclaimed. No staging, commit or push 
 performed by the step-10 implementation agent.
 
 Parent acceptance reran the final Git-visible scope independently: **560 tests / 6484 assertions** on each Bun, **28 browser tests**, workspace/tools/native types, binary/default Nix builds, stable product build and actual compressed-payload notice/CSP/SDK verification. Actual lifecycle and SDK fatal/normal gates passed again with **zero fixture process groups**. Independent reviewer verified the stale inherited-Wayland association finding closed (13 focused tests / 118 assertions); no remaining concrete safety issue in that bounded review. Scoped hygiene retained intentional fail-closed catches and repeated descriptor/security checks. Initial concurrent parent Bun-suite runs collided on existing fixed server ports 7570/7571; both passed when rerun sequentially, so the two full suites must not be run together. Evidence: `/tmp/nanosync-step10-parent-*.log`. Installed-session claims remain reserved for step 12.
+
+## Step 11 — notifications, diagnostics and client parity
+
+The exact [notification incident/privacy/dedup/native contract](desktop-notifications.md)
+and [allowlisted diagnostics/export contract](desktop-diagnostics.md) describe the
+implemented shared-service and presentation boundaries. Settings v3 adds independent
+notification intent; observation v2 adds durable confirmed failure episodes; discovery
+metadata v3 proves new-schema owner compatibility (request protocol remains v1).
+Older/unadvertised owners are refused before new shared writes, never stopped/stolen.
+The existing global/folder pause, credential decision/recovery, local operation,
+continuous owner-origin, CSP and own-only lifecycle contracts remain unchanged.
+
+Trusted main delivers bounded category batches even with the window hidden, through
+project-Nix libnotify/PyGObject, never the SDK Linux `system()` notification fallback.
+Attempt claims are fsynced before native submission; authoritative resolution/removal
+prunes only known ended incidents, preserving unknown/disabled/suppressed observations.
+Service owner epochs invalidate native IDs/callbacks; unique-owner close cannot target
+a restarted service's reused ID. Only actual reason-2 native close is dismissal.
+Every queued batch rereads current global/category/privacy choices before admission.
+Accepted ID is not compositor-display proof, and claim-before-send can lose one alert
+after a crash without hiding its persistent in-app attention.
+
+CLI adds notification patch flags to `client settings set` and explicit
+`client diagnostics export --output [--include-identifiers]`, keeping established
+JSON envelopes/streams/exits, lifecycle-trio validation and headless protected-file
+operation. Existing step-9 conflicts/ignores/removals/open and credential recovery
+commands are the actual parity counterparts, not reimplemented or invented commands.
+Removal inspection now rejects simultaneous path/server selectors. No server admin,
+provision/delete, history/restore, remote browser, merge or updater was added.
+
+Settings General retains parent observations and unsaved-draft/CAS epochs; Notifications
+and Diagnostics use the same mutation gate. GUI export accepts no renderer path:
+trusted native directory selection plus a fresh generated name uses the same shared
+allowlisted collector and O_EXCL/no-follow 0600 writer as CLI, including ordinary owned
+0755 Documents. Per-export identifiers are unchecked by default and never credentials.
+Pending recovery can be diagnosed under the real physical registry lease without
+running recovery or probing a native credential provider. Missing facts stay null;
+partial reports are explicitly incomplete. Nothing is uploaded.
+
+Verification results are recorded below only after actual runs. Private native
+notification fixtures are not installed-session/panel/keyring/Wayland/release proof;
+step 12 retains those validation responsibilities. Paper provenance warning remains
+unchanged, not a license grant. Implementation agent performs no staging/commit/push.
+
+Implementation-agent verification after the safety review fixes:
+
+- Full suites run **sequentially**: **608 passed / 6862 assertions / 0 failed** on
+  project Bun **1.4.4** and locked-nixpkgs Bun **1.4.2**.
+- Workspace/tools typecheck and desktop native typecheck passed. Browser suite:
+  **29 passed**, including real-service notification settings/diagnostics export,
+  keyboard access, privacy defaults, stale draft/CAS and the existing General
+  native-loss/pre-save-poll protections.
+- Binary build, `nix build path:. --no-link`, SDK fatal/normal security gate,
+  lifecycle Quit/Close gate, private real-libnotify notification gate and final
+  stable product build passed, serialized so fixture builds do not overwrite one
+  another. Native fixture process-group cleanup assertions passed.
+- Notification fixture proves accepted ID, actual action callback, explicit
+  reason-2 dismissal versus reason-1 expiry, service absence, separate missing
+  actions and service restart/reused numeric-ID isolation. Unit tests prove
+  fresh confirmed five-minute policy (including unavailable-folder starts without
+  recreating a missing root/journal), restart claims, 1000-member batching,
+  over-cap fail-closed behavior, authoritative resolution/removal pruning,
+  late-popup attempt isolation and per-batch withdrawal of privacy/category/global
+  intent after a deferred native call.
+- Extracted actual compressed stable payload passed SDK/runtime manifest checks;
+  bundled notification/helper integration is present, no lifecycle fixture entry,
+  and packaged CSP HTML/Paper notice match their source bytes.
+- Scoped new notification/helper/UI codehygiene passed after readability fixes;
+  optional tool update 0.6.1 was not installed. `git diff --check` passed. Logs:
+  `/tmp/nanosync-step11-{tests-1.4.4,tests-1.4.2,typecheck,native-types,browser,binary,nix,sdk-gate,lifecycle-gate,native-notifications,stable,payload,codehygiene}.log`.
+
+These implementation-agent results were independently rerun by the parent before acceptance: **608 tests / 6862 assertions on each Bun**, **29 browser tests**, workspace/tools/native types, CLI binary/Git-visible default Nix/stable desktop builds, actual SDK fatal/normal, lifecycle and maintained-libnotify private gates, and extracted compressed-payload checks all passed. Native fixture cleanup assertions passed and no fixture groups remained. Independent bounded native recheck closed both service-owner/ID-reuse and queued privacy-withdrawal findings (4 focused tests); parent reviewed durable incidents/pruning/attempt isolation and diagnostics' exact BigInt identity, physical registry lease, overlap/missing-root guards and recovery export behavior. Scoped hygiene retained only diagnostics' fixed-message/regex density advisories; whitespace passed. Evidence: `/tmp/nanosync-step11-parent-*.log`. This is not installed release certification, hardware-scale testing or host keyring/session/panel validation.

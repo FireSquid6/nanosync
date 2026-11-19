@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import {
-  clientStatus, setPaused, selectSavedBinding, readPreferences, setLifecycle, checkedBindingRoot,
+  clientStatus, setPaused, selectSavedBinding, readPreferences, setPreferences, exportDiagnostics, type NotificationPreferences, checkedBindingRoot,
   listConflicts, checkedConflictFolder, viewIgnores, validateIgnoreText, readIgnoreFile, setIgnores, inspectRemoval, removalStatus, resumeRemoval, stopBoundSyncForRemoval,
   baseUrl, privateDirectory, secureCreate, secureRead, openBoundSync, listRemoteVaults,
   resolveRemoteVault, connectRegisteredVault, discoverConnection, records,
@@ -204,18 +204,39 @@ async function execute(args: string[], presentation: CliOutput): Promise<number>
     flags(settings.command('view'), ...clientFlags, ...common).action(async (_o, command) => {
       result = { settings: readPreferences(root(command)), nativeEffects: 'not-applied' };
     });
-    flags(settings.command('set'), ...clientFlags, ...common, '--start-at-login <boolean>', '--tray-enabled <boolean>', '--keep-syncing-after-close <boolean>', '--expected-revision <revision>')
+    flags(settings.command('set'), ...clientFlags, ...common, '--start-at-login <boolean>', '--tray-enabled <boolean>', '--keep-syncing-after-close <boolean>', '--expected-revision <revision>',
+      '--notifications-enabled <boolean>', '--notify-conflicts <boolean>', '--notify-revoked-access <boolean>',
+      '--notify-persistent-failures <boolean>', '--notification-names-and-paths <boolean>')
       .action(async (_o, command) => {
         const o = opts(command), directory = root(command);
         const boolean = (name: string): boolean => {
-          if (o[name] !== 'true' && o[name] !== 'false') throw new CliError('INVALID_INPUT', 'Supply all three lifecycle flags as true or false.');
+          if (o[name] !== 'true' && o[name] !== 'false') throw new CliError('INVALID_INPUT', 'Supply boolean choices as true or false; lifecycle changes require all three flags.');
           return o[name] === 'true';
         };
         const revision = o.expectedRevision === undefined ? readPreferences(directory).revision : Number(o.expectedRevision);
         if (!Number.isSafeInteger(revision) || revision < 0) throw new CliError('INVALID_INPUT', 'Expected revision must be a nonnegative integer.');
-        result = { settings: setLifecycle(directory, {
-          startAtLogin: boolean('startAtLogin'), trayEnabled: boolean('trayEnabled'), keepSyncingAfterClose: boolean('keepSyncingAfterClose'),
+        const lifecycle = ['startAtLogin', 'trayEnabled', 'keepSyncingAfterClose'].some(name => o[name] !== undefined)
+          ? { startAtLogin: boolean('startAtLogin'), trayEnabled: boolean('trayEnabled'), keepSyncingAfterClose: boolean('keepSyncingAfterClose') } : undefined;
+        const flags: Record<string, keyof NotificationPreferences> = {
+          notificationsEnabled: 'enabled', notifyConflicts: 'conflicts', notifyRevokedAccess: 'revokedAccess',
+          notifyPersistentFailures: 'persistentFailures', notificationNamesAndPaths: 'includeNamesAndPaths',
+        };
+        const notifications: Partial<NotificationPreferences> = {};
+        for (const [flag, key] of Object.entries(flags)) if (o[flag] !== undefined) notifications[key] = boolean(flag);
+        result = { settings: setPreferences(directory, {
+          ...(lifecycle ? { lifecycle } : {}), ...(Object.keys(notifications).length ? { notifications } : {}),
         }, revision), nativeEffects: 'not-applied' };
+      });
+    const diagnostics = flags(client.command('diagnostics').description('Explicit allowlisted local diagnostics; never raw logs or credentials'), ...clientFlags, ...common);
+    flags(diagnostics.command('export'), ...clientFlags, ...common, '--output <file>', '--include-identifiers')
+      .action(async (_o, command) => {
+        const o = opts(command);
+        if (!o.output) throw new CliError('INPUT_REQUIRED', 'Choose an explicit --output file in an owned directory. Existing files are never overwritten.');
+        if (o.includeIdentifiers) output().warning('This export includes identifying local binding paths and IDs. Credentials and file contents are never included.');
+        result = exportDiagnostics(root(command), o.output, {
+          applicationVersion: '0.0.0', toolkitVersion: null,
+          native: { startup: 'not-probed', tray: 'not-probed', session: 'not-probed', notifications: 'not-probed', notificationActions: 'not-probed' },
+        }, { includeIdentifiers: !!o.includeIdentifiers });
       });
     const connections = flags(client.command('connections'), ...clientFlags, ...common);
     flags(connections.command('view'), ...clientFlags, ...common).action(async (_o, command) => {
@@ -302,6 +323,7 @@ async function execute(args: string[], presentation: CliOutput): Promise<number>
     });
     const removals = flags(client.command('removals'), ...clientFlags, ...common);
     flags(removals.command('view'), ...clientFlags, ...common, '--path <directory>', '--server <alias-or-id>').action(async (_o, command) => {
+      if (opts(command).path && opts(command).server) throw new CliError('INVALID_INPUT', 'Choose at most one of --path or --server.');
       const pending = removalStatus(root(command));
       result = { version: 1, pending, inspection: pending ? null : opts(command).server ? await inspectRemoval(root(command), { serverId: (await selectServer(command)).serverId }) : opts(command).path ? await inspectRemoval(root(command), { binding: selectSavedBinding(root(command), opts(command).path).connectionId }) : null };
     });

@@ -1,8 +1,9 @@
 import { assertNoRemoval } from './removal-state.ts';
-import { recordCredentialUnavailable } from './status.ts';
-import { pauseCauses, readSettings } from './settings.ts';
+import { recordStartFailure } from './status.ts';
+import { assertUpgradeOwners, upgradePreferencesUnderRegistry, pauseCauses, readSettings } from './settings.ts';
 import { join } from 'node:path';
 import { discoverConnection, assertBindingRoot } from './connections.ts';
+import { observeSyncLock, acquireSyncLock } from './sync-lock.ts';
 import { ClientError } from './errors.ts';
 import { privateDirectory } from './security.ts';
 import { SyncRunner, type SyncOptions } from './sync-runner.ts';
@@ -15,6 +16,10 @@ export async function startBoundSync(
   return withCredentialRegistry(directory, async () => {
     assertNoRemoval(directory);
     const binding = discoverConnection(directory, from, true);
+    const replica = join(directory, 'replicas', binding.connectionId);
+    if (observeSyncLock(replica)?.live) acquireSyncLock(replica)();
+    assertUpgradeOwners(directory);
+    upgradePreferencesUnderRegistry(directory);
     try {
       const info = await authenticatedServer(directory, binding.serverId, options);
       if (binding.deviceId !== info.deviceId) {
@@ -39,7 +44,7 @@ export async function startBoundSync(
         });
       } finally { master.fill(0); }
     } catch (error) {
-      recordCredentialUnavailable(directory, binding, error, options.now);
+      recordStartFailure(directory, binding, error, options.now);
       throw error;
     }
   });

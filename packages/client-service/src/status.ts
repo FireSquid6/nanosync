@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { ClientLocal, parseStatusFacts, StatusReadError, type StatusFacts } from '@nanosync/client-local';
 import { parseDeviceId, PROTOCOL_ERROR_CODES } from '@nanosync/protocol';
@@ -13,8 +14,21 @@ export type SyncPhase =
   | 'not-started' | 'idle' | 'syncing' | 'pausing' | 'paused'
   | 'offline' | 'credentials-locked' | 'folder-unavailable' | 'failed';
 export type TransferProgress = Record<'upload' | 'download', { count: number; bytes: number }>;
+export const PERSISTENT_FAILURE_MS = 300_000;
+export interface FailureEpisode {
+  id: string;
+  firstFailureAt: number;
+  lastFailureAt: number;
+  confirmation: string;
+  code: string;
+}
+export function confirmFailure(previous: FailureEpisode | null | undefined, code: string, now: number): FailureEpisode {
+  return { id: previous?.id ?? randomUUID(), firstFailureAt: previous?.firstFailureAt ?? now,
+    lastFailureAt: now, confirmation: randomUUID(), code };
+}
 export interface SyncObservation {
-  version: 1;
+  version: 1 | 2;
+  failureEpisode?: FailureEpisode | null;
   observedAt: number;
   phase: SyncPhase;
   owner: { origin: 'cli' | 'desktop'; instanceId: string } | null;
@@ -100,8 +114,9 @@ function parseObservation(replica: string): SyncObservation | null {
   const path = join(replica, 'status.json');
   if (!present(path)) return null;
   const value = JSON.parse(secureRead(path, 16384).toString('utf8')) as SyncObservation;
-  if (!value || Object.keys(value).sort().join(',') !== observationKeys.join(',') ||
-      value.version !== 1 || !phases.includes(value.phase) || typeof value.verified !== 'boolean' ||
+  if (!value || Object.keys(value).sort().join(',') !==
+        (value.version === 2 ? [...observationKeys, 'failureEpisode'].sort() : observationKeys).join(',') ||
+      ![1, 2].includes(value.version) || !phases.includes(value.phase) || typeof value.verified !== 'boolean' ||
       ![null, 'checking', 'scanning', 'transferring'].includes(value.enginePhase) ||
       !nonnegative(value.observedAt) ||
       [value.lastRemoteCheck, value.lastSuccess].some(time => time !== null && !nonnegative(time)) ||
@@ -110,6 +125,13 @@ function parseObservation(replica: string): SyncObservation | null {
       value.statusIssues.some(code => typeof code !== 'string' || !Object.hasOwn(issueDetails, code)))
     throw new Error('Invalid sync observation');
 
+  if (value.version === 2 && value.failureEpisode !== null) {
+    const episode = recordObject(value.failureEpisode,
+      ['id', 'firstFailureAt', 'lastFailureAt', 'confirmation', 'code']);
+    parseDeviceId(episode.id as string); parseDeviceId(episode.confirmation as string);
+    if (!nonnegative(episode.firstFailureAt as number) || !nonnegative(episode.lastFailureAt as number) ||
+        typeof episode.code !== 'string' || !knownError(episode.code)) throw new Error('Invalid failure episode');
+  }
   for (const direction of ['upload', 'download'] as const) {
     const counter = value.progress?.[direction];
     if (!counter || Object.keys(counter).sort().join(',') !== 'bytes,count' ||
@@ -206,6 +228,8 @@ export function clientStatus(root: string, from?: string, now: () => number = Da
         upload: { count: observation.progress.upload.count, bytes: observation.progress.upload.bytes },
         download: { count: observation.progress.download.count, bytes: observation.progress.download.bytes },
       } : null;
+      const episode = observation?.failureEpisode;
+      const persistentFailure = !!episode && Math.max(0, episode.lastFailureAt - episode.firstFailureAt) >= PERSISTENT_FAILURE_MS;
       const savedError = observation?.attentionError ?? observation?.error;
       const error = removing ? 'REMOVAL_PENDING' : unavailable ? 'FOLDER_UNAVAILABLE' : savedError ?? issues[0] ?? null;
       return {
@@ -213,10 +237,11 @@ export function clientStatus(root: string, from?: string, now: () => number = Da
         freshness: fresh ? 'observed' as const : 'stale-or-unknown' as const,
         enginePhase: fresh ? observation?.enginePhase ?? null : null,
         progressUnit: 'completed-ciphertext-frames' as const, progress, facts, upToDate,
+        failureEpisode: observation?.failureEpisode ?? null,
         lastRemoteCheck: observation?.lastRemoteCheck ?? null,
         lastSuccessfulSync: observation?.lastSuccess ?? null,
         observationTime: observation?.observedAt ?? null,
-        attentionRequired: removing || (facts?.conflicts ?? 0) > 0 || unavailable || !!observation?.attentionError ||
+        attentionRequired: removing || (facts?.conflicts ?? 0) > 0 || unavailable || persistentFailure || !!observation?.attentionError ||
           statusNeedsAttention,
         statusIssues: issues.map(code => ({ code, ...issueDetails[code] })),
         error,
@@ -225,11 +250,11 @@ export function clientStatus(root: string, from?: string, now: () => number = Da
   };
 }
 
-/** Persist a known credential failure without opening a writable journal or probing a store. */
-export function recordCredentialUnavailable(
+/** Persist a confirmed blocked start without opening a writable journal or probing a store. */
+export function recordStartFailure(
   root: string, binding: Connection, error: unknown, now: () => number = Date.now,
 ): void {
-  if (!(error instanceof ClientError) || !['CREDENTIALS_UNAVAILABLE', 'CREDENTIALS_LOCKED'].includes(error.code))
+  if (!(error instanceof ClientError) || !['CREDENTIALS_UNAVAILABLE', 'CREDENTIALS_LOCKED', 'FOLDER_UNAVAILABLE'].includes(error.code))
     return;
   try {
     const replica = join(root, 'replicas', binding.connectionId);
@@ -239,14 +264,16 @@ export function recordCredentialUnavailable(
     const facts = observe(
       () => ClientLocal.readStatus(replica, binding.vaultId, binding.deviceId), issues, 'JOURNAL_INVALID');
     writeObservation(replica, {
-      version: 1, observedAt: now(), phase: 'credentials-locked', enginePhase: null, owner: null, lock: null,
+      version: 2, failureEpisode: confirmFailure(previous?.failureEpisode, error.code, now()),
+      observedAt: now(), phase: error.code === 'FOLDER_UNAVAILABLE' ? 'folder-unavailable' : 'credentials-locked',
+      enginePhase: null, owner: null, lock: null,
       progress: previous?.progress ?? { upload: { count: 0, bytes: 0 }, download: { count: 0, bytes: 0 } },
       facts, verified: false, statusIssues: issues,
       lastRemoteCheck: previous?.lastRemoteCheck ?? null, lastSuccess: previous?.lastSuccess ?? null,
       error: error.code, attentionError: error.code,
     });
   } catch {
-    // Keep the primary unlock/session guidance even if status cannot be persisted at all.
+    // Keep the primary recovery guidance even if status cannot be persisted at all.
     error.message += ' Sync status could not be recorded; inspect private state before retrying.';
   }
 }
