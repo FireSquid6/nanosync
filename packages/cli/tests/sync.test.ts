@@ -1,5 +1,5 @@
 import {
-  createConnection, privateDirectory, secureCreate, initializeCredentials, SyncRunner, type SyncOptions,
+  createConnection, privateDirectory, secureCreate, initializeCredentials, SyncRunner, openBoundSync, stopOwnedSync, stopBoundSyncForRemoval, type SyncOptions,
   type SyncEvent,
 } from '@nanosync/client-service';
 import { afterEach, expect, test, spyOn } from "bun:test";
@@ -9,6 +9,8 @@ import { chmodSync, statSync, existsSync, linkSync, mkdirSync, mkdtempSync, read
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ClientLocal } from "@nanosync/client-local";
+import { LinuxWatcher } from '@nanosync/linux-client';
+import { controlProcess } from '../../client-service/tests/control-process.ts';
 import { HttpRemote } from "@nanosync/sync-core";
 import { CHUNK_SIZE } from "@nanosync/protocol";
 import { bootstrapWorkflow, credentials, joinVault } from "./support/legacy-fixture.ts";
@@ -472,7 +474,7 @@ test("continuous CLI command runs in the foreground and releases the lock on SIG
   try {
     await started.promise;
     expect(existsSync(lock)).toBe(true);
-    expect(await main(["client", "sync", "--client-dir", e.firstDir, "--path", e.firstFiles])).toBe(2);
+    expect(await main(["client", "sync", "--client-dir", e.firstDir, "--path", e.firstFiles])).toBe(0);
     expect(await main(["client", "vaults", "disconnect", "--client-dir", e.firstDir, "--path", e.firstFiles, "--force", "--yes"])).toBe(2);
     expect(await main(["client", "connections", "remove", "--client-dir", e.firstDir, "--server", "test", "--force", "--yes"])).toBe(2);
     expect(existsSync(join(e.firstFiles, ".nanosync"))).toBe(true);
@@ -720,4 +722,100 @@ test('synchronized executable metadata permits clean disconnect for publisher an
     expect(statSync(join(root!, 'script')).mode & 0o100).toBe(0o100);
     expect(readFileSync(join(root!, 'script'), 'utf8')).toBe('#!/bin/sh\n');
   }
+});
+
+test('completed forwarding survives normal temporary host close before client returns', async () => {
+  const e = await fixture(), closed = Promise.withResolvers<void>();
+  let closing: Promise<void> | undefined;
+  const host = await openBoundSync(e.firstDir, e.firstFiles, { origin: 'cli', instanceId: randomUUID(),
+    onEvent(event) { if (event.type === 'complete') closing = host.close().then(() => closed.resolve()); } });
+  const attached = await openBoundSync(e.firstDir, e.firstFiles, { origin: 'desktop', instanceId: randomUUID() });
+  try {
+    const syncing = attached.syncOnce();
+    await closed.promise;
+    expect(existsSync(join(e.a.clientDirectory, '.sync-owner'))).toBe(false);
+    expect(await syncing).toMatchObject({ revisionId: expect.any(String), sequence: 1 });
+  } finally { await closing; await attached.close(); await host.close(); }
+});
+
+test('attached CLI SIGINT detaches and desktop-instance stop leaves independent CLI process running', async () => {
+  const e = await fixture(), instanceId = randomUUID();
+  const owner = controlProcess(e.firstDir, e.firstFiles, { origin: 'cli', instanceId });
+  let cli: ReturnType<typeof Bun.spawn> | undefined;
+  try {
+    await owner.next(); owner.command('watch');
+    expect(await owner.next()).toEqual({ watching: true });
+    expect(await owner.next()).toMatchObject({ head: { sequence: 1 } });
+    cli = Bun.spawn([process.execPath, join(import.meta.dir, '../src/main.ts'), 'client', 'sync', '--watch', '--json',
+      '--client-dir', e.firstDir, '--path', e.firstFiles], { stdout: 'pipe', stderr: 'pipe' });
+    const stderr = cli.stderr as ReadableStream<Uint8Array>;
+    const reader = stderr.getReader();
+    let progress = '';
+    while (!progress.includes('"event":"synced"')) {
+      const chunk = await reader.read();
+      if (chunk.done) throw new Error(`attached CLI ended before ready: ${progress}`);
+      progress += new TextDecoder().decode(chunk.value);
+    }
+    cli.kill('SIGINT');
+    expect(await cli.exited).toBe(0);
+    reader.releaseLock();
+    expect(existsSync(join(e.a.clientDirectory, '.sync-owner'))).toBe(true);
+    await stopOwnedSync(instanceId);
+    owner.command('sync');
+    expect(await owner.next()).toMatchObject({ head: { sequence: 1 } });
+    expect(owner.child.exitCode).toBeNull();
+  } finally {
+    if (cli && cli.exitCode === null) { cli.kill('SIGINT'); await cli.exited; }
+    await owner.close();
+  }
+});
+
+test('intentional owner stop never promotes attached watch', async () => {
+  const e = await fixture();
+  const owner = controlProcess(e.firstDir, e.firstFiles, { origin: 'desktop', instanceId: randomUUID() });
+  await owner.next(); owner.command('watch');
+  expect(await owner.next()).toEqual({ watching: true });
+  expect(await owner.next()).toMatchObject({ head: { sequence: 1 } });
+  const attachedProcess = controlProcess(e.firstDir, e.firstFiles, { origin: 'cli', instanceId: randomUUID() });
+  try {
+    await attachedProcess.next(); attachedProcess.command('watch');
+    expect(await attachedProcess.next()).toEqual({ watching: true });
+    expect(await attachedProcess.next()).toMatchObject({ head: { sequence: 1 } });
+    await stopBoundSyncForRemoval(e.firstDir, e.firstFiles);
+    attachedProcess.command('sync');
+    expect(await attachedProcess.next()).toEqual({ code: 'OWNER_UNAVAILABLE' });
+    expect(existsSync(join(e.a.clientDirectory, '.sync-owner'))).toBe(false);
+  } finally { await attachedProcess.close(); await owner.close(); }
+});
+
+test('watcher shutdown failure still awaits active pass and retains ownership', async () => {
+  const e = await fixture(), ready = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let block = false;
+  const runner = start({ ...e.a, fetch: async (input, init) => {
+    if (block) { entered.resolve(); await release.promise; }
+    return fetch(input, init);
+  } });
+  const controller = new AbortController();
+  const watching = runner.watch(controller.signal, () => ready.resolve(), () => {});
+  await ready.promise;
+  block = true;
+  const active = runner.syncOnce().catch(error => error);
+  await entered.promise;
+  const originalClose = LinuxWatcher.prototype.close;
+  const close = spyOn(LinuxWatcher.prototype, 'close').mockImplementation(function(this: LinuxWatcher) {
+    originalClose.call(this);
+    throw Error('controlled watcher failure');
+  });
+  const stopping = runner.stop().catch(error => error);
+  try {
+    expect(existsSync(join(e.a.clientDirectory, '.sync-owner'))).toBe(true);
+    release.resolve();
+    await active;
+    expect(await stopping).toMatchObject({ message: 'controlled watcher failure' });
+    expect(existsSync(join(e.a.clientDirectory, '.sync-owner'))).toBe(true);
+    await watching;
+    // An uncertain stop deliberately retains this process's lock; isolate cleanup to the fixture.
+    runners.splice(runners.indexOf(runner), 1);
+  } finally { close.mockRestore(); release.resolve(); }
 });

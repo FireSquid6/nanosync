@@ -35,6 +35,19 @@ All server commands require `--server-dir DIRECTORY` or prompt for it; **no impl
 
 Removal refuses attached bindings unless `--force` is explicit. Disconnect checks pending journals and a full, no-follow filesystem inventory/content hash against the last applied state, including edits not yet scanned by sync. Unsynced work requires explicit `--force`; synchronized plaintext can be disconnected without force. Forced operations discard pending sync state and preserve local files. All affected replica locks are acquired in UUID order before mutation. A contended lock leaves every binding intact. A process-identity registry gate serializes bind/repair/disconnect/server removal and sync lock handoff, preventing new bindings from racing credential removal. Force/yes never bypass either gate or a live replica lock. If a bound directory is absent, `client vaults disconnect --path ORIGINAL_PATH --force` or forced server removal can discard its saved binding. Existing replacement directories or symlinks still require a matching valid marker and are not silently accepted.
 
+Client sync attaches to an existing compatible local owner instead of opening a
+second writer. Attached `--watch` stays foreground; Ctrl-C detaches only that CLI,
+leaving the external owner running. Owner origin remains the process that acquired
+the replica lock. Any temporary one-shot owner (CLI or desktop Sync Now) refuses
+an incoming watch with `OWNER_TEMPORARY` (local exit 2); retry after it finishes or
+explicitly start continuous sync in its owner. `OWNER_UNAVAILABLE` means
+a live owner has missing/incompatible/unreachable control: stop it normally and
+retry, never remove its lock or use force to bypass it. Desktop Quit stops only its
+own desktop-instance runners, not independently CLI-owned work. Local control uses
+private authenticated Unix sockets and needs no desktop/keyring for protected-file
+mode. Its fixed runtime discovery works across headless/session environments;
+see [the implementation boundary](../../docs/desktop-implementation.md#step-5--single-owner-sessions-and-private-control).
+
 Sync requests have a 30-second deadline covering the response body. Stopping the runner or interrupting watch mode cancels in-flight requests before releasing the replica lock. Offline reconciliation uses the same 16,384-node bound as history traversal and durably records the original local branch before changing inventory; interrupted merges resume without scanning intermediate merge content as local edits.
 
 ## Human output (default)

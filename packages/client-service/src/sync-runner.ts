@@ -93,13 +93,14 @@ export class SyncRunner {
     return this.stopping ??= (async () => {
       this.stopped = true;
       this.cancellation.abort();
-      try {
-        this.watcher?.close();
-        await this.active?.catch(() => {});
-      } finally {
-        try { this.local.close(); }
-        finally { this.key.fill(0); this.unlock(); }
-      }
+      let watcherFailure: unknown;
+      try { this.watcher?.close(); }
+      catch (error) { watcherFailure = error; }
+      await this.active?.catch(() => {});
+      try { this.local.close(); }
+      finally { this.key.fill(0); }
+      if (watcherFailure) throw watcherFailure;
+      this.unlock();
     })();
   }
 

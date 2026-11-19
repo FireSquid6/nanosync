@@ -69,6 +69,19 @@ function unlinkMatching(path: string, inode: FileIdentity): void {
   }
 }
 
+export function observeSyncLock(root: string): { owner: Identity; inode: FileIdentity; live: boolean } | null {
+  const path = join(root, ".sync-owner");
+  let initial: FileIdentity;
+  try { initial = lstatSync(path); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  const lock = gateIdentity(path);
+  if (!same(initial, lock.inode)) throw new Error("sync ownership lock changed during observation");
+  return { owner: lock.owner, inode: lock.inode, live: processStarttime(lock.owner.pid) === lock.owner.starttime };
+}
+
 /** An atomic hardlink publishes the complete fsynced owner record: there is
  * no mkdir-to-owner-write interval in which a crash creates an ownerless gate.
  */

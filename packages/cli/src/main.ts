@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import {
-  baseUrl, privateDirectory, secureCreate, secureRead, startBoundSync, listRemoteVaults,
+  baseUrl, privateDirectory, secureCreate, secureRead, openBoundSync, listRemoteVaults,
   resolveRemoteVault, connectRegisteredVault, discoverConnection, records,
   disconnectConnections, removeServerConnection, enrollServer, key, keyWritePending, server as storedServer,
   servers, unlockVault, pendingEnrollments, connectionSummary, credentialStatus, initializeCredentials, migrateCredentials, resumeCredentialMigration, resumeCredentialCleanup, rollbackCredentialMigration, type CredentialMode,
@@ -264,7 +264,8 @@ async function execute(args: string[], presentation: CliOutput): Promise<number>
       disconnectConnections(dir, [binding], !!opts(command).force); result = {connectionId:binding.connectionId, disconnected:true, filesPreserved:true};
     });
     flags(client.command('sync'), ...clientFlags, ...common, '--path <directory>', '--watch').action(async (_o, command) => {
-      const runner = await startBoundSync(root(command), opts(command).path ?? process.cwd(), {
+      const runner = await openBoundSync(root(command), opts(command).path ?? process.cwd(), {
+        origin: 'cli', instanceId: crypto.randomUUID(),
         onEvent: event => syncEvent(presentation, event, !!opts(command).watch),
       });
       try {
@@ -279,7 +280,7 @@ async function execute(args: string[], presentation: CliOutput): Promise<number>
           finally { process.off('SIGINT', stop); process.off('SIGTERM', stop); }
           result = {stopped:true};
         }
-      } finally { await runner.stop(); }
+      } finally { await runner.close(); }
     });
     function configureHelp(command: Command) {
       if (command.commands.length) {

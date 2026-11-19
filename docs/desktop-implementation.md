@@ -263,3 +263,110 @@ running sync owners retain loaded credentials until stop. Native calls have no e
 cancellation; JS-memory erasure, immediate lock revocation and forensic erasure are
 not claimed. Network polling does not retain the registry gate: a separate process-
 identity credential-operation lease prevents migration/removal racing enrollment.
+
+## Step 5 — single-owner sessions and private control
+
+`openBoundSync(root, from, {origin, instanceId, onEvent, ...credentialOptions})`
+returns `{owner, syncOnce, watch, close}`. CLI sync now uses this API. Acquisition
+and credential loading stay under the credential registry; attachment reads no
+credentials, opens no journal, and releases the registry before IPC. The existing
+replica `.sync-owner` PID/starttime lock remains the sole authority. Its checked
+read-only `observeSyncLock` uses the same Linux identity/parser checks as acquisition,
+not a timeout or a second stale-owner algorithm. Direct engine/legacy
+`startBoundSync` callers remain exclusive, non-advertising owners; attachment to
+these live owners fails closed rather than opening another writer.
+
+Owner origin/instance are fixed at acquisition. `stopOwnedSync(instanceId)` stops
+only this process's matching **desktop** hosts. Session close/CLI SIGINT detaches
+an attached client, never its external owner. A hosted close cancels work, awaits
+the active pass and database/key cleanup, then releases the lock and awaits graceful control shutdown (incomplete request readers are cancelled). A watcher-close
+failure still waits for active work and deliberately retains ownership; uncertain
+shutdown is not reported as a safe stop. Discovery missing/replaced during normal
+cleanup does not prevent stopping the host transport or delete another owner's
+record. Completed authenticated forwarding remains valid if the temporary host
+releases before the client consumes its reply.
+
+Any owner not already in a hosted continuous watch refuses incoming watches with
+an actionable `OWNER_TEMPORARY`, including a desktop-origin Sync Now session.
+Retry explicitly after release, or have the owner explicitly call hosted
+`session.watch` (desktop Start/CLI watch). An incoming request never creates a
+detached watch or changes origin/lifetime. Attached watches never auto-promote
+on intentional stop, crash, lost reply, or unavailable control. The explicit
+`stopBoundSyncForRemoval` consent hook stops an authorized owner at its safe
+boundary and checks release. It is **not** called by Quit/list/force commands;
+removal must still acquire locks and revalidate inventory and identities normally.
+
+### Linux transport boundary
+
+Bun 1.4.4 `Bun.serve({unix})` / `fetch({unix})` was runtime-probed with a real
+Unix socket and is exercised across real child processes. There is no TCP control
+listener, desktop dependency, FFI or peer-UID API requirement. The runtime root is
+strictly owned/real 0700: `/run/user/UID/nanosync` for the standard validated XDG
+session, otherwise `/tmp/nanosync-UID` (a supplied nonstandard XDG directory is
+validated before using the private fallback). Discovery selects only these two
+fixed locations, never an arbitrary socket path, and records the selected base's
+filesystem identity. Owner and reader may have different XDG environments.
+Each owner gets a random private instance directory, a 0600 socket, and a separate
+checked 0600 single-link random 256-bit capability. Secret-free replica discovery
+ties canonical client root/root filesystem identity, binding, acquiring
+origin/instance, PID/starttime, lock inode, runtime/instance-directory inodes, and socket inode together.
+Readers check private ancestry, UID/types/modes/no symlinks and authoritative lock;
+the host revalidates discovery/lock/endpoint before dispatch. Connected clients recheck endpoint identity without requiring continued owner liveness after a completed reply. Bad or missing live
+endpoints are not evidence of death. Definitively dead owners are recovered by
+the existing lock acquisition routine. Crash-orphaned private runtime directories
+are retained rather than deleting paths whose ownership cannot be re-proven;
+they contain control material only, not device/vault credentials.
+
+Control protocol version 1 accepts only sync, watch, and explicit stop-for-removal,
+with exact request keys and UUID/root/binding/owner-instance checks. Authentication
+is constant-time for well-formed capabilities and precedes body parsing/dispatch.
+Content types/routes/redirects are constrained. Requests are streamed/bounded to
+16 KiB; at most 16 requests/subscribers and 128 replay entries exist. Completed
+oldest entries may be evicted; retries beyond that bounded window safely recheck
+identity and coalesce/re-evaluate synchronization, not arbitrary mutations.
+Responses contain only checked head IDs/sequences, allowlisted progress events,
+and fixed-message local/allowlisted remote error codes (local exit 2, remote exit 5).
+No raw exception or remote message crosses control. Sync/watch replies stream live
+NDJSON progress before completion with no stream-lifetime event/byte limit. Each
+frame is at most 2 KiB. Standard ReadableStream backpressure retains at most one
+queued frame, one coalesced latest-progress frame, and one terminal frame per
+subscriber (at most 6 KiB of encoded application state); slow readers skip stale
+progress, never the final result. The decoder bounds each unfinished frame rather
+than total legitimate stream/chunk size, and validates events even without a
+callback. Detaching
+cancels the subscription, not the owner's pass. Compromised same-UID processes able
+to read private state, root, and credential-memory erasure remain out of scope.
+
+### Step 5 verification
+
+- 20 focused service tests, 7 private streaming-codec boundary tests, and 4 added
+  CLI/engine lifecycle tests: real-process
+  forwarding/coalescing, bounded subscribers/replay saturation, authentication and
+  malformed/version/root/binding/instance/oversize rejection, unsafe permissions,
+  symlink/hardlink capability and substituted socket refusal, unavailable live
+  endpoint, pre/post-advertise process crash/recovery, cross-XDG forwarding,
+  credential-free attachment, safe error redaction, live pre-completion progress,
+  discovery cleanup races, completed-reply/host-close race, attached CLI SIGINT,
+  independent CLI survival, explicit stop/no promotion, and controlled watcher
+  failure with active work. Synchronization uses pipes/readiness/promises and
+  awaited process exits, not sleep-based assertions. Streaming regressions cover
+  1,000 delivered events beyond 16 KiB, a 10,000-update slow-reader burst coalesced
+  to first/latest progress plus terminal result, large coalesced transport chunks,
+  bounded unterminated frames, cancellation cleanup, and no-callback malformed
+  events. Both CLI- and desktop-origin temporary owners refuse attached watches.
+- Full suite: **407 passed, 0 failed** across 42 files.
+- Workspace/tools typecheck and desktop native typecheck: passed.
+- Existing browser suite: **7 passed**. Binary and `nix build path:. --no-link`:
+  passed; no new workspace dependency or Nix dependency-expression change needed.
+- Parent verification: **27 control/codec tests passed** under project Nix Bun
+  **1.4.2 / 744846f84**, and the normal staged Git-visible `nix build --no-link`
+  passed. The full 407-test suite and workspace/native typechecks also passed again.
+- Scoped codehygiene run with Nix-provided NumPy; long-line readability fixes
+  applied. Remaining findings include deliberate stream-cancel cleanup rejection
+  suppression, TypeScript stream-controller naming, and existing compact-style
+  declarations/validation expressions. This is an advisory readability check,
+  not transport/security verification.
+
+No product UI, pause/settings state, native lifecycle integration, user-keyring
+locking, real-user credentials, or global keyboard injection was used for this
+slice. The browser suite is not a native desktop smoke claim.
