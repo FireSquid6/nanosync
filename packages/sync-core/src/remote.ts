@@ -2,7 +2,7 @@ import {
   CHUNK_SIZE, MAX_JSON_METADATA_BYTES, parseAdvanceHeadRequest, parseAdvanceHeadResult,
   parseCapabilityResponse, parseCiphertextChecksum, parseIdempotencyKey, parseObjectFrameHeader,
   parseObjectId, parsePersistedRevisionEnvelope, parseProtocolErrorEnvelope, parseRevisionId,
-  parseVaultId, type AdvanceHeadRequest, type AdvanceHeadResult, type CapabilityResponse,
+  parseVaultId, ProtocolValidationError, type AdvanceHeadRequest, type AdvanceHeadResult, type CapabilityResponse,
   type ObjectType, type RevisionEnvelope, type VisibleObjectReference,
 } from "@nanosync/protocol";
 import {
@@ -27,6 +27,23 @@ export class RemoteError extends Error {
   constructor(readonly status: number, readonly code: string, message: string, readonly retryAfterSeconds?: number) {
     super(message);
     this.name = "RemoteError";
+  }
+
+  static async fromResponse(response: Response, signal?: AbortSignal): Promise<RemoteError> {
+    let envelope;
+    try {
+      envelope = parseProtocolErrorEnvelope(await json(response, 2048));
+    } catch (error) {
+      void response.body?.cancel().catch(() => {});
+      signal?.throwIfAborted();
+      // Only this fixed local diagnostic is retained; validation paths and bodies are untrusted.
+      const message = error instanceof Error && error.message === "duplicate JSON key"
+        ? "duplicate JSON key" : `server ${response.status}: ERROR`;
+      return new RemoteError(response.status, "ERROR", message);
+    }
+    return new RemoteError(response.status, envelope.code, envelope.code === "VAULT_DELETED"
+      ? `server ${response.status}: VAULT_DELETED. Vault permanently deleted on server. Local files and keys are preserved. Disconnect this binding or connect to a different vault.`
+      : `server ${response.status}: ${envelope.code}`, envelope.retryAfterSeconds);
   }
 }
 
@@ -87,8 +104,13 @@ async function json(response: Response, limit = MAX_RESPONSE_JSON): Promise<unkn
     offset += part.length;
   }
   const source = new TextDecoder("utf-8", { fatal: true }).decode(data);
-  rejectDuplicateKeys(source);
-  return JSON.parse(source);
+  try {
+    rejectDuplicateKeys(source);
+    return JSON.parse(source);
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new Error("invalid remote JSON response");
+    throw error;
+  }
 }
 
 function rejectDuplicateKeys(source: string): void {
@@ -138,6 +160,14 @@ function rejectDuplicateKeys(source: string): void {
   if (cursor !== source.length) throw new Error("invalid JSON response");
 }
 
+function remoteValue<T>(parse: (value: unknown) => T, value: unknown): T {
+  try { return parse(value); }
+  catch (error) {
+    if (error instanceof ProtocolValidationError) throw new Error("invalid remote response");
+    throw error;
+  }
+}
+
 function sameReference(a: VisibleObjectReference, b: VisibleObjectReference): boolean {
   return a.objectId === b.objectId && a.objectType === b.objectType && a.ciphertextChecksum === b.ciphertextChecksum &&
     a.ciphertextLength === b.ciphertextLength && a.objectFormatVersion === b.objectFormatVersion;
@@ -179,6 +209,7 @@ export class HttpRemote {
   private readonly base: string;
   private readonly retries: number;
   private capabilitiesCache?: CapabilityResponse;
+  private readonly responseSignals = new WeakMap<Response, AbortSignal>();
   constructor(private readonly options: RemoteOptions) {
     const url = new URL(options.baseUrl);
     if (!/^https?:$/.test(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error("invalid remote URL");
@@ -199,21 +230,20 @@ export class HttpRemote {
       ...(init.signal ? [init.signal] : []),
     ]);
     signal.throwIfAborted();
-    return this.options.fetch(new Request(`${this.base}${path}`, { ...init, headers, signal }));
+    const response = await this.options.fetch(new Request(`${this.base}${path}`, { ...init, headers, signal }));
+    this.responseSignals.set(response, signal);
+    return response;
   }
 
   private async body(response: Response, statuses: number[] = [200]): Promise<unknown> {
     if (!statuses.includes(response.status)) {
-      const envelope = parseProtocolErrorEnvelope(await json(response, 2048));
-      throw new RemoteError(response.status, envelope.code, envelope.code === "VAULT_DELETED"
-        ? "Vault permanently deleted on server. Local files and keys are preserved. Disconnect this binding or connect to a different vault."
-        : envelope.message, envelope.retryAfterSeconds);
+      throw await RemoteError.fromResponse(response, this.responseSignals.get(response));
     }
     return json(response);
   }
 
   async capabilities(): Promise<CapabilityResponse> {
-    const caps = parseCapabilityResponse(await this.body(await this.request("/v1/capabilities", {}, false)));
+    const caps = remoteValue(parseCapabilityResponse, await this.body(await this.request("/v1/capabilities", {}, false)));
     if (!caps.objectTypes.includes("chunk") || !caps.objectTypes.includes("manifest") ||
         caps.limits.maximumObjectCiphertextBytes < CHUNK_SIZE + 108 || caps.limits.maximumReferencesPerRevision < 1 ||
         caps.limits.maximumPresenceQuery < 1 || caps.limits.maximumIdempotencyKeyLength < 32)
@@ -378,7 +408,7 @@ export class HttpRemote {
 
   async revision(id: string, master: Uint8Array): Promise<{ revision: RevisionEnvelope; sequence: number | null }> {
     const result = exact(await this.body(await this.request(`/v1/revisions/${parseRevisionId(id)}`)), ["protocolVersion", "revision", "sequence"]);
-    const revision = parsePersistedRevisionEnvelope(result.revision);
+    const revision = remoteValue(parsePersistedRevisionEnvelope, result.revision);
     if (result.protocolVersion !== 1 || revision.revisionId !== id ||
         !(result.sequence === null || Number.isSafeInteger(result.sequence) && (result.sequence as number) > 0) ||
         !await verifyReferenceSetMac(revision, master)) throw new IntegrityError("invalid or unauthenticated revision");
@@ -393,7 +423,7 @@ export class HttpRemote {
         parsed.proposedRevision.references.some(r => !caps.objectTypes.includes(r.objectType) || r.ciphertextLength > caps.limits.maximumObjectCiphertextBytes)) throw new Error("revision exceeds negotiated limits");
     const body = JSON.stringify(parsed);
     if (encoder.encode(body).length > caps.limits.maximumJsonMetadataBytes) throw new Error("revision metadata exceeds negotiated limit");
-    return this.retry(async () => parseAdvanceHeadResult(await this.body(await this.request("/v1/head/advance", {
+    return this.retry(async () => remoteValue(parseAdvanceHeadResult, await this.body(await this.request("/v1/head/advance", {
       method: "POST", headers: { "content-type": "application/json" }, body,
     }))));
   }

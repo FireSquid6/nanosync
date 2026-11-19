@@ -27,18 +27,14 @@ export async function api(url: string, path: string, init: RequestInit = {}, tok
   }
   const response = await fetch(`${baseUrl(url)}${path}`, { ...init, headers });
   if (!response.ok) {
-    // Reverse proxies need not return protocol JSON. Preserve HTTP classification
-    // even for HTML/empty error bodies, without exposing their contents.
-    let code = "ERROR";
-    try {
-      const result = await response.json();
-      if (result && typeof result.code === "string") code = result.code;
-    } catch (error) {
-      if (init.signal?.aborted) throw error;
-    }
-    throw new RemoteError(response.status, code, `server ${response.status}: ${code}`);
+    throw await RemoteError.fromResponse(response, init.signal ?? undefined);
   }
-  return await response.json();
+  try { return await response.json(); }
+  catch (error) {
+    if (init.signal?.aborted) throw error;
+    if (error instanceof SyntaxError) throw new Error("invalid remote JSON response");
+    throw error;
+  }
 }
 export async function login(url: string, password: string, signal?: AbortSignal): Promise<string> {
   const result = await api(url, "/v1/auth/password", { method: "POST", body: JSON.stringify({ protocolVersion: 1, password }), signal });
