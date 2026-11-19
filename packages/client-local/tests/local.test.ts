@@ -1,3 +1,4 @@
+import type { PathLike, StatOptions } from 'node:fs';
 import { afterEach, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdtempSync, chmodSync, lstatSync, readdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
@@ -171,4 +172,55 @@ test("rejects unsafe cache files rather than following or deleting them", async 
   const dir = directory(); let db = new ClientLocal(dir, vault, device); db.close();
   symlinkSync(join(dir, "local.sqlite"), join(dir, "chunks", ".stage-bad"));
   expect(() => new ClientLocal(dir, vault, device)).toThrow(/unsafe/);
+});
+
+test('read-only status facts see live WAL and never create missing database state', () => {
+  const dir = directory();
+  expect(ClientLocal.readStatus(dir, vault, device)).toBeNull();
+  expect(readdirSync(dir)).toEqual([]);
+  const local = new ClientLocal(dir, vault, device);
+  local.recordHead('observed', { revisionId: rev, sequence: 1 });
+  local.enqueueOperation(other, 'publish');
+  const before = readdirSync(dir).sort();
+  const facts = ClientLocal.readStatus(dir, vault, device)!;
+  expect(facts.heads.observed).toEqual({ revisionId: rev, sequence: 1 });
+  expect(facts.pending.operations).toBe(1);
+  expect(facts.conflicts).toBe(0);
+  expect(readdirSync(dir).sort()).toEqual(before);
+  expect(local.statusFacts()).toEqual(facts);
+  local.close();
+  expect(ClientLocal.readStatus(dir, vault, device)).toEqual(facts);
+});
+
+test('status refuses future schema without migrating or resetting it', () => {
+  const dir = directory(), local = new ClientLocal(dir, vault, device);
+  local.close();
+  const database = new Database(join(dir, 'local.sqlite'));
+  database.exec('PRAGMA user_version=999'); database.close();
+  const before = readdirSync(dir).sort();
+  expect(() => ClientLocal.readStatus(dir, vault, device)).toThrow(/schema/);
+  expect(readdirSync(dir).sort()).toEqual(before);
+  const check = new Database(join(dir, 'local.sqlite'), { readonly: true });
+  expect(check.query('PRAGMA user_version').get()).toEqual({ user_version: 999 });
+  check.close();
+});
+
+test('status reports a racing checkpoint as retryable unknown instead of invalid state', async () => {
+  const fs = await import('node:fs');
+  const { spyOn } = await import('bun:test');
+  const dir = directory(), local = new ClientLocal(dir, vault, device);
+  local.recordHead('observed', { revisionId: rev, sequence: 1 });
+  const filename = join(dir, 'local.sqlite'), native = fs.lstatSync;
+  let closed = false;
+  const boundary = spyOn(fs, 'lstatSync').mockImplementation(((path: PathLike, options?: StatOptions) => {
+    // Close the real WAL writer after sidecar validation, before the readonly connection opens.
+    if (path === filename && options?.bigint && !closed) { closed = true; local.close(); }
+    return native(path, options as never);
+  }) as typeof fs.lstatSync);
+  try {
+    let failure: unknown;
+    try { ClientLocal.readStatus(dir, vault, device); } catch (error) { failure = error; }
+    expect(failure).toMatchObject({ code: "STATUS_RACE" });
+    expect(closed).toBe(true);
+  } finally { boundary.mockRestore(); local.close(); }
 });

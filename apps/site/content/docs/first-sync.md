@@ -94,3 +94,23 @@ Stop watch mode with Ctrl-C. Only one sync process may own a particular replica 
 Stop watch mode and the server in terminal A with Ctrl-C. The demo directory remains available for inspection; this guide deliberately does not delete state or secrets automatically. Keep the private directory until you have finished testing, then remove only this disposable demo using your usual file-management tools.
 
 For real folders, create [ignore rules](ignore-rules.md) before first import, take an independent backup, and understand that existing local files participate in synchronization. See [Server](server.md) before enabling remote access.
+
+## Inspect or pause synchronization
+
+Use `nanosync client status [--path /your/folder]` to inspect observed heads,
+conflicts, pending recovery, ownership and the last successful pass. Status does
+not transfer files or unlock credentials. A completed pass with conflicts is not
+“up to date”; observations become stale when their owner stops.
+
+`nanosync client pause --all` pauses every binding in this client root.
+`nanosync client pause --path /your/folder` pauses only that binding. Resume with
+the corresponding `client resume` command. Global resume never clears a folder's
+individual pause. Each command requires exactly one target. Intent survives a
+restart; a current filesystem operation or bounded transfer can finish before the
+owner reports paused. A watch remains available for resume; one-shot sync returns
+an actionable local error while paused.
+
+If a folder disappears, restore its original path and marker before retrying with
+`client sync`. Do not create an empty replacement or delete the private journal:
+Nanosync preserves pending recovery and will not recreate the root or interpret
+its absence as mass deletion. A deliberate move/copy requires explicit repair.

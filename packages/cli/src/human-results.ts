@@ -22,6 +22,9 @@ const headings: Record<string, string> = {
   'client vaults view': 'Local vault bindings',
   'client vaults connect': 'Vault connected; no files transferred.',
   'client vaults disconnect': 'Vault disconnected.',
+  'client status': 'Synchronization status (observed facts, not a live guarantee)',
+  'client pause': 'Pause saved; active operations stop at their next safe boundary.',
+  'client resume': 'Resume saved; folder pauses remain independent.',
   'client sync': 'Sync complete.',
 };
 

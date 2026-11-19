@@ -23,7 +23,7 @@ type Content = { size: number; sha256: string; chunks: { objectId: string; lengt
 type CachedContent = { stamp: string; context: string; content: Content };
 type Identity = { entryId: string; device: string; inode: string };
 type Found = { path: string; kind: "file" | "directory"; stat: Stats; identity: string };
-export interface ScanOptions { debounceMs?: number; stabilityMs?: number; maxBatch?: number; maxConcurrent?: number }
+export interface ScanOptions { beforeWork?: () => void | Promise<void>; debounceMs?: number; stabilityMs?: number; maxBatch?: number; maxConcurrent?: number }
 export interface ScanPlan {
   manifest: ManifestV1;
   /** A factory, not a one-shot iterator. Open and verify files again in manifest order for Step 9. */
@@ -60,11 +60,11 @@ function openChecked(path: string, kind: "file" | "directory", expected?: Stats)
 }
 
 /** Directory-relative /proc/self/fd paths anchor traversal to open, no-follow descriptors. Linux only. */
-function inventory(root: string, ignore: IgnoreRules): Found[] {
-  const result: Found[] = [], active = new Set<string>();
-  function descend(fd: number, path: string, stat: Stats) {
+function* inventory(root: string, ignore: IgnoreRules): Generator<Found> {
+  const active = new Set<string>();
+  function* descend(fd: number, path: string, stat: Stats): Generator<Found> {
     const key = identity(stat); if (active.has(key)) throw new Error("directory cycle"); active.add(key);
-    result.push({ path, kind: "directory", stat, identity: key });
+    yield { path, kind: "directory", stat, identity: key };
     const names = readdirSync(`/proc/self/fd/${fd}`).sort();
     const folded = new Set<string>();
     for (const name of names) {
@@ -82,21 +82,20 @@ function inventory(root: string, ignore: IgnoreRules): Found[] {
       if (st.isDirectory()) {
         const child = openChecked(target, "directory", st);
         try {
-          descend(child, relative, fstat(child));
+          yield* descend(child, relative, fstat(child));
         } finally {
           closeSync(child);
         }
       } else {
         safeStat(st, "file");
-        result.push({ path: relative, kind: "file", stat: st, identity: identity(st) });
+        yield { path: relative, kind: "file", stat: st, identity: identity(st) };
       }
     }
     active.delete(key);
   }
   const fd = openChecked(root, "directory");
-  try { descend(fd, "", fstat(fd)); if (!same(fstat(fd), lstat(root))) throw new Error("root replaced during scan"); }
+  try { yield* descend(fd, "", fstat(fd)); if (!same(fstat(fd), lstat(root))) throw new Error("root replaced during scan"); }
   finally { closeSync(fd); }
-  return result;
 }
 
 /** Walk each parent through open descriptors again; a rename outside the root fails the final root check. */
@@ -114,11 +113,12 @@ function openPath(root: string, path: string, expected: Stats): number {
   } finally { if (fd !== anchor) closeSync(fd); closeSync(anchor); }
 }
 
-async function* readChunks(root: string, file: Found): AsyncGenerator<Uint8Array> {
+async function* readChunks(root: string, file: Found, beforeWork?: () => void | Promise<void>): AsyncGenerator<Uint8Array> {
   const fd = openPath(root, file.path, file.stat), hashSize = Number(file.stat.size);
   try {
     let position = 0;
     while (position < hashSize) {
+      await beforeWork?.();
       const chunk = Buffer.allocUnsafe(Math.min(CHUNK_SIZE, hashSize - position)); let used = 0;
       while (used < chunk.length) {
         const n = readSync(fd, chunk, used, chunk.length - used, position + used);
@@ -133,19 +133,30 @@ async function* readChunks(root: string, file: Found): AsyncGenerator<Uint8Array
 
 export class LinuxScanner {
   readonly root: string;
-  private readonly options: Required<ScanOptions>;
+  private readonly options: Required<Omit<ScanOptions, "beforeWork">>;
+  private readonly beforeWork?: () => void | Promise<void>;
+  private readonly rootIdentity: string;
   // shortcut: trust filesystem change stamps; use forced content verification for filesystems without reliable timestamps.
   private contentCache = new Map<string, CachedContent>();
   constructor(root: string, private readonly local: ClientLocal, options: ScanOptions = {}) {
     if (process.platform !== "linux") throw new Error("Linux scanner requires Linux");
     this.root = checkedRoot(root);
+    this.rootIdentity = identity(lstat(this.root));
+    const entry = local.entries().find(entry => entry.path === "" && entry.kind === "directory");
+    const recorded = entry && local.identities().find(item => item.entryId === entry.id);
+    if (recorded && `${recorded.device}:${recorded.inode}` !== this.rootIdentity) throw new Error("root identity changed");
+    this.beforeWork = options.beforeWork;
     this.options = { debounceMs: options.debounceMs ?? 250, stabilityMs: options.stabilityMs ?? 500,
       maxBatch: options.maxBatch ?? 256, maxConcurrent: options.maxConcurrent ?? 2 };
     if (Object.values(this.options).some(v => !Number.isSafeInteger(v) || v < 0) || !this.options.maxBatch ||
         this.options.maxConcurrent < 1 || this.options.maxConcurrent > 8) throw new Error("invalid scanner options");
   }
-  rules() { checkedRoot(this.root); return new IgnoreRules(this.root); }
-  snapshot() { const rules = this.rules(); return inventory(this.root, rules); }
+  assertRoot() {
+    checkedRoot(this.root);
+    if (identity(lstat(this.root)) !== this.rootIdentity) throw new Error("root identity changed");
+  }
+  rules() { this.assertRoot(); return new IgnoreRules(this.root); }
+  snapshot() { const rules = this.rules(); return [...inventory(this.root, rules)]; }
   /** Read-only full-content check against the last applied inventory, including unscanned edits. */
   hasUnsyncedChanges(): boolean {
     const rules = this.rules(), found = this.snapshot();
@@ -175,6 +186,7 @@ export class LinuxScanner {
     return entries.some(e => e.path && e.hydration !== 'evicted' && !paths.has(e.path));
   }
   async plan(priorInput: ManifestV1, revisionId: string, deviceId: string, master: Uint8Array, identityHints?: ManifestV1): Promise<ScanPlan> {
+    await this.beforeWork?.(); this.assertRoot();
     const prior = parseManifest(priorInput), revision = parseRevisionId(revisionId), device = parseDeviceId(deviceId);
     parseVaultId(prior.vaultId);
     if (revision === prior.revisionId || !(master instanceof Uint8Array) || master.length !== 32) throw new Error("invalid scan context");
@@ -183,7 +195,11 @@ export class LinuxScanner {
     const rules = this.rules();
     const localEntries = this.local.entries();
     this.local.markIgnored(localEntries.filter(e => e.path && rules.ignores(e.path, e.kind === "directory")).map(e => e.id));
-    const files = this.snapshot();
+    const files: Found[] = this.beforeWork ? [] : this.snapshot();
+    if (this.beforeWork) for (const file of inventory(this.root, rules)) {
+      await this.beforeWork?.(); this.assertRoot();
+      files.push(file);
+    }
     const old = new Map(prior.entries.map(e => [e.id, e]));
     const priorPath = new Map<string, ManifestEntry>();
     function index(e: ManifestEntry): string {
@@ -201,6 +217,7 @@ export class LinuxScanner {
           priorPath.get(recorded.path)?.kind === "tombstone"))
       throw new Error(`previously ignored local path requires manual reconciliation: ${recorded.path}`);
     for (const file of files) {
+      await this.beforeWork?.(); this.assertRoot();
       const previous = priorPath.get(file.path), recorded = localPath.get(file.path);
       if (recorded && this.local.wasIgnored(recorded.id) && (!previous || previous.kind === "tombstone" || previous.id !== recorded.id) ||
           recorded && !old.has(recorded.id) || file.path && previous && previous.kind !== "tombstone" && (!recorded || recorded.id !== previous.id ||
@@ -218,6 +235,7 @@ export class LinuxScanner {
     for (const file of files) occurrence.set(file.identity, (occurrence.get(file.identity) ?? 0) + 1);
     const used = new Set<string>(), assigned = new Map<string, string>();
     for (const file of files) {
+      await this.beforeWork?.(); this.assertRoot();
       if (localPath.get(file.path)?.hydration === "evicted")
         throw new Error("evicted name collision; reconcile before scanning");
       const atPath = priorPath.get(file.path) ??
@@ -254,7 +272,8 @@ export class LinuxScanner {
         }
         const hash = createHash("sha256");
         const chunks = [];
-        for await (const bytes of readChunks(this.root, file)) {
+        for await (const bytes of readChunks(this.root, file, async () => { await this.beforeWork?.(); this.assertRoot(); })) {
+          await this.beforeWork?.(); this.assertRoot();
           hash.update(bytes);
           const encrypted = await encryptChunk(bytes, key, prior.vaultId);
           chunks.push({ objectId: encrypted.reference.objectId, length: bytes.length });
@@ -273,6 +292,7 @@ export class LinuxScanner {
         !priorPath.has(file.path)))
       throw new Error(`previously ignored local path requires manual reconciliation: ${file.path}`);
     for (const file of files) {
+      await this.beforeWork?.(); this.assertRoot();
       const id = assigned.get(file.path)!;
       const parentPath = file.path.includes("/")
         ? file.path.slice(0, file.path.lastIndexOf("/"))
@@ -380,6 +400,7 @@ export class LinuxScanner {
       async *chunks(knownObjectIds: ReadonlySet<string> = new Set()) {
         const yielded = new Set<string>();
         for (const entry of manifest.entries) {
+          await scanner.beforeWork?.(); scanner.assertRoot();
           if (entry.kind !== "file") continue;
           const file = planned.get(entry.id);
           if (!file) continue;
@@ -390,7 +411,8 @@ export class LinuxScanner {
             continue;
           }
           const digest = createHash("sha256"); let index = 0;
-          for await (const bytes of readChunks(scanner.root, file)) {
+          for await (const bytes of readChunks(scanner.root, file, async () => { await scanner.beforeWork?.(); scanner.assertRoot(); })) {
+            await scanner.beforeWork?.(); scanner.assertRoot();
             digest.update(bytes);
             const expected = entry.chunks![index++];
             if (expected && (knownObjectIds.has(expected.objectId) || yielded.has(expected.objectId))) continue;
@@ -415,8 +437,9 @@ export class LinuxWatcher {
   private baseline?: string;
   private stableSince = 0;
   private overflow = false;
-  constructor(readonly scanner: LinuxScanner, readonly options: ScanOptions = {}) { this.notify(0); }
-  notify(now = Date.now()) {
+  constructor(readonly scanner: LinuxScanner, readonly options: ScanOptions = {}, private readonly onChange?: () => void) { this.notify(0, false); }
+  notify(now = Date.now(), changed = true) {
+    if (changed) this.onChange?.();
     this.pending++;
     if (this.pending >= (this.options.maxBatch ?? 256)) this.overflow = true;
     this.last = now;
@@ -428,7 +451,7 @@ export class LinuxWatcher {
       const watcher = watch(resolve(this.scanner.root, path), () => this.notify());
       watcher.on("error", () => this.notify()); this.watchers.push(watcher);
     }
-    this.notify();
+    this.notify(Date.now(), false);
   }
   refresh() {
     const paths = this.scanner.snapshot().filter(f => f.kind === "directory").map(f => f.path);

@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -430,4 +430,43 @@ test.each(["before", "after"] as const)("resumes directory staging when interrup
     expect(readFileSync(join(root, "created/note")).length).toBe(0);
     expect(reopened.pendingApplies()).toEqual([]);
   } finally { reopened.close(); }
+});
+
+test('pause between filesystem units preserves apply intent for restart', async () => {
+  const { root, local, manifest, remote } = setup();
+  const paused = new Error('paused');
+  await expect(applyNewFiles(root, local, remote, manifest, 1, new Uint8Array(32), {
+    beforeWork() { if (existsSync(join(root, "note"))) throw paused; },
+  })).rejects.toBe(paused);
+  expect(local.pendingApplies()).toHaveLength(1);
+  expect(local.head('applied').sequence).toBe(0);
+  local.close();
+  const reopened = new ClientLocal(join(root, '..', 'private'), vault, device);
+  await applyNewFiles(root, reopened, remote, manifest, 1, new Uint8Array(32));
+  expect(reopened.pendingApplies()).toEqual([]);
+  expect(readFileSync(join(root, 'note')).length).toBe(0);
+  reopened.close();
+});
+
+test('root loss after an installed file preserves intent and never recreates or adopts a replacement', async () => {
+  const { root, local, manifest, remote } = setup();
+  let moved = false;
+  await expect(applyNewFiles(root, local, remote, manifest, 1, new Uint8Array(32), {
+    beforeWork() {
+      if (!moved && existsSync(join(root, 'note'))) { moved = true; renameSync(root, root + '-saved'); }
+    },
+  })).rejects.toThrow();
+  expect(existsSync(root)).toBe(false);
+  expect(local.pendingApplies()).toHaveLength(1);
+  local.close();
+  const reopened = new ClientLocal(join(root, '..', 'private'), vault, device);
+  await expect(applyNewFiles(root, reopened, remote, manifest, 1, new Uint8Array(32))).rejects.toThrow();
+  expect(existsSync(root)).toBe(false);
+  mkdirSync(root, { mode: 0o700 });
+  await expect(applyNewFiles(root, reopened, remote, manifest, 1, new Uint8Array(32))).rejects.toThrow(/root identity/);
+  expect(reopened.pendingApplies()).toHaveLength(1);
+  rmSync(root, { recursive: true }); renameSync(root + '-saved', root);
+  await applyNewFiles(root, reopened, remote, manifest, 1, new Uint8Array(32));
+  expect(readFileSync(join(root, 'note')).length).toBe(0);
+  reopened.close();
 });

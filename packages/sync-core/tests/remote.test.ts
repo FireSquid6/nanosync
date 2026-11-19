@@ -384,3 +384,75 @@ test("permanently deleted vault is terminal, not a retried outage", async () => 
   expect(env.calls.filter(call => call === 'POST /v1/objects/presence')).toHaveLength(1);
   env.database.close();
 });
+
+test("work guard stops retry fetch and cached chunk consumption without wrapping its error", async () => {
+  const env = await setup();
+  const paused = new Error("paused"), object = await encryptChunk(new Uint8Array([1]), master, vaultId);
+  let blocked = false, attempts = 0;
+  const client = new HttpRemote({ baseUrl: 'http://local', token,
+    beforeWork() { if (blocked) throw paused; },
+    fetch: async input => {
+      if ((input as Request).method === 'PUT') { attempts++; blocked = true; throw new TypeError('retry'); }
+      return env.transport(input);
+    } });
+  await expect(client.upload(object, vaultId, 'a'.repeat(32))).rejects.toBe(paused);
+  expect(attempts).toBe(1);
+  let reads = 0;
+  const cached = new HttpRemote({ baseUrl: 'http://local', token, fetch: env.transport,
+    beforeWork() { if (blocked) throw paused; },
+    journal: { async get() { reads++; return new Uint8Array([1]); }, async put() {} } });
+  blocked = false;
+  const iterator = cached.downloadChunks([object.reference, object.reference], master, vaultId);
+  expect((await iterator.next()).value).toEqual(new Uint8Array([1]));
+  blocked = true;
+  await expect(iterator.next()).rejects.toBe(paused);
+  expect(reads).toBe(1);
+  env.database.close();
+});
+
+test('publication checks before producer next and closes its iterator on pause', async () => {
+  const env = await setup();
+  const chunk = await encryptChunk(new Uint8Array([1]), master, vaultId);
+  let blocked = false, consumed = 0, closed = false;
+  const paused = new Error('paused');
+  async function* chunks() {
+    try { consumed++; blocked = true; yield chunk; consumed++; yield chunk; }
+    finally { closed = true; }
+  }
+  const client = new HttpRemote({ baseUrl: 'http://local', token, fetch: env.transport,
+    beforeWork() { if (blocked) throw paused; } });
+  const manifest = { ...env.manifest(), entries: [...env.manifest().entries, {
+    id: thirdId, parentId: rootId, name: 'file', kind: 'file' as const, size: 1,
+    sha256: '0'.repeat(64), executable: false, chunks: [{ objectId: chunk.reference.objectId, length: 1 }],
+  }] };
+  await expect(client.publish(manifest, [], chunks(), master, genesisId, '2026-01-01T00:00:00.000Z')).rejects.toBe(paused);
+  expect(consumed).toBe(1);
+  expect(closed).toBe(true);
+  expect(env.calls.some(call => call.startsWith('PUT'))).toBe(false);
+  env.database.close();
+});
+
+test('a started bounded download finishes but pause stops the next object', async () => {
+  const env = await setup(), writer = env.remote();
+  const chunk = await encryptChunk(new Uint8Array([4]), master, vaultId);
+  await writer.upload(chunk, vaultId, 'd'.repeat(32));
+  const started = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  let blocked = false, gets = 0;
+  const paused = new Error('paused');
+  const client = new HttpRemote({ baseUrl: 'http://local', token,
+    beforeWork() { if (blocked) throw paused; },
+    fetch: async input => {
+      const response = await env.transport(input);
+      if (new URL((input as Request).url).pathname.includes('/objects/chunk/')) {
+        gets++; started.resolve(); await release.promise;
+      }
+      return response;
+    } });
+  const chunks = client.downloadChunks([chunk.reference, chunk.reference], master, vaultId);
+  const first = chunks.next();
+  await started.promise; blocked = true; release.resolve();
+  expect((await first).value).toEqual(new Uint8Array([4]));
+  await expect(chunks.next()).rejects.toBe(paused);
+  expect(gets).toBe(1);
+  env.database.close();
+});

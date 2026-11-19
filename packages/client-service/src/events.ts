@@ -9,5 +9,5 @@ export type EnrollmentEvent =
   | { type: 'terminal'; status: 'denied' | 'expired' };
 
 export type SyncEvent =
-  | { type: 'checking' | 'scanning' | 'complete' }
+  | { type: 'checking' | 'scanning' | 'complete' | 'paused' }
   | { type: 'transfer'; direction: 'upload' | 'download'; count: number; bytes: number };

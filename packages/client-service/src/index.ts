@@ -9,3 +9,6 @@ export { startBoundSync } from './bound-sync.ts';
 export { openBoundSync, stopOwnedSync, stopBoundSyncForRemoval, type BoundSyncSession, type BoundSyncOptions, type SyncOwner } from './sync-control.ts';
 export type { EnrollmentEvent, SyncEvent } from './events.ts';
 export { credentialStatus, initializeCredentials, desktopCredentials, migrateCredentials, resumeCredentialMigration, resumeCredentialCleanup, rollbackCredentialMigration, withCredentialRegistry, type CredentialMode, type CredentialStore, type CredentialOptions } from './credentials.ts';
+
+export { readSettings, setPaused, pauseCauses, type ClientSettings } from './settings.ts';
+export { clientStatus, selectSavedBinding, type SyncPhase, type TransferProgress, type ClientStatusSnapshot, type StatusIssueCode } from './status.ts';

@@ -1,5 +1,5 @@
 import { credentialBarrier, credentialMetadata, adoptLegacyCredentials, cleanupCredentialRecords, withCredentialRegistry, withCredentialOperation, type CredentialOptions } from "./credentials.ts";
-import { ClientLocal } from '@nanosync/client-local';
+import { ClientLocal, StatusReadError } from '@nanosync/client-local';
 import { LinuxScanner } from '@nanosync/linux-client';
 import { ClientError } from './errors.ts';
 import { acquireSyncLock } from "./sync-lock.ts";
@@ -7,7 +7,9 @@ import { randomUUID } from "node:crypto";
 import { constants, closeSync, existsSync, lstatSync, openSync, realpathSync, readdirSync, renameSync, writeFileSync, fsyncSync, unlinkSync, rmSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { parseDeviceId, parseVaultId } from "@nanosync/protocol";
-import { privateDirectory, secureCreate, secureRead } from "./security.ts";
+import { privateDirectory, secureCreate, secureRead, secureReplace } from "./security.ts";
+
+import { present } from './settings.ts';
 
 const MARKER = ".nanosync";
 type Marker = { version: 1; connectionId: string };
@@ -104,6 +106,47 @@ export function discoverConnection(globalDirectory: string, from: string, allowM
   }
 }
 
+const ROOT_IDENTITY = 'root-identity.json';
+function saveRootIdentity(global: string, connection: Connection, replace = false): void {
+  const replicas = privateDirectory(join(global, 'replicas'));
+  const replica = privateDirectory(join(replicas, connection.connectionId));
+  const stat = lstatSync(rootPath(connection.root), { bigint: true });
+  const path = join(replica, ROOT_IDENTITY);
+  const value = JSON.stringify({ version: 1, device: String(stat.dev), inode: String(stat.ino) });
+  if (replace && present(path)) secureReplace(path, value); else secureCreate(path, value);
+  // The identity file is not durable if any newly created ancestor entry can disappear.
+  syncDirectory(replicas); syncDirectory(global); syncDirectory(dirname(global));
+}
+function savedRootIdentity(replica: string): { device: string; inode: string } | null {
+  const path = join(replica, ROOT_IDENTITY);
+  if (!present(path)) return null;
+  try {
+    privateDirectory(replica);
+    const value = JSON.parse(secureRead(path, 512).toString('utf8'));
+    if (!value || Object.keys(value).sort().join(',') !== 'device,inode,version' || value.version !== 1 ||
+        typeof value.device !== 'string' || !/^\d+$/.test(value.device) ||
+        typeof value.inode !== 'string' || !/^\d+$/.test(value.inode)) throw new Error('invalid root identity');
+    return { device: value.device, inode: value.inode };
+  } catch {
+    throw new ClientError('FOLDER_UNAVAILABLE', 'Saved root identity is unsafe or invalid; inspect or restore private state before retrying.');
+  }
+}
+/** Only an explicit validated start may establish identity for a never-scanned legacy binding. */
+export function assertBindingRoot(global: string, connection: Connection, establish = false): void {
+  try {
+    if (discoverConnection(global, connection.root).connectionId !== connection.connectionId) throw new Error('binding marker changed');
+    const replica = join(global, 'replicas', connection.connectionId), path = join(replica, ROOT_IDENTITY);
+    const stat = lstatSync(connection.root, { bigint: true });
+    const expected = savedRootIdentity(replica) ??
+      ClientLocal.readStatus(replica, connection.vaultId, connection.deviceId)?.rootIdentity ?? null;
+    if (expected && (expected.device !== String(stat.dev) || expected.inode !== String(stat.ino))) throw new Error('root identity changed');
+    if (!present(path) && establish) saveRootIdentity(global, connection);
+  } catch (error) {
+    if (error instanceof StatusReadError) throw error;
+    throw new ClientError('FOLDER_UNAVAILABLE', 'Folder unavailable or root identity changed; restore its original path and marker, then retry. Local state is preserved.', 2);
+  }
+}
+
 /** Setup has no file transfer side effects. Existing files are deliberately left alone. */
 export function createConnection(globalDirectory: string, destination: string, serverId: string, vaultId: string, deviceId: string,
   confirmNonempty = false): Connection {
@@ -128,14 +171,14 @@ function createLocked(globalDirectory: string, destination: string, serverId: st
   if (!serverId || serverId.includes("\0")) throw new Error("invalid server registration");
   const connection: Connection = { version: 1, connectionId: randomUUID(), root, serverId, vaultId: parseVaultId(vaultId), deviceId: parseDeviceId(deviceId) };
   const directory = privateDirectory(join(global, "connections"));
-  // The record is published first: a crash can leave an orphan, but cannot
-  // leave a marker that points to a missing journal. Orphans require repair.
+  // Publish identity ancestry before the record, and the record before the marker.
+  saveRootIdentity(global, connection);
   secureCreate(join(directory, `${connection.connectionId}.json`), JSON.stringify(connection));
   createFile(join(root, MARKER), JSON.stringify({ version: 1, connectionId: connection.connectionId }));
   return connection;
 }
 
-/** A move retains the journal; a copy always gets a distinct identity and journal. */
+/** A scanned move preserves filesystem identity and journal; a copy gets an independent replica. */
 export function repairConnection(globalDirectory: string, destination: string, mode: "move" | "copy", confirmNonempty = false): Connection {
   return withConnectionRegistry(globalDirectory, () => repairLocked(globalDirectory, destination, mode, confirmNonempty));
 }
@@ -151,15 +194,38 @@ function repairLocked(globalDirectory: string, destination: string, mode: "move"
     if (!confirmNonempty) throw new Error("copied files will participate in synchronization; confirmation required");
     const connection: Connection = { ...old, connectionId: randomUUID(), root };
     const path = join(global, "connections", `${connection.connectionId}.json`);
+    saveRootIdentity(global, connection);
     secureCreate(path, JSON.stringify(connection));
     replaceFile(join(root, MARKER), JSON.stringify({ version: 1, connectionId: connection.connectionId }));
     return connection;
   }
   if (existsSync(old.root)) throw new Error("old root still exists; moving a connection requires its old root to be absent");
-  const path = join(global, "connections", `${old.connectionId}.json`);
-  const updated = { ...old, root };
-  replaceFile(path, JSON.stringify(updated));
-  return updated;
+  const replica = privateDirectory(join(privateDirectory(join(global, 'replicas')), old.connectionId));
+  const release = acquireSyncLock(replica);
+  let local: ClientLocal | null = null;
+  try {
+    if (present(join(replica, 'local.sqlite'))) local = new ClientLocal(replica, old.vaultId, old.deviceId);
+    const facts = local?.statusFacts();
+    const expected = facts?.rootIdentity ?? savedRootIdentity(replica);
+    const stat = lstatSync(root, { bigint: true });
+    const sameRoot = expected?.device === String(stat.dev) && expected.inode === String(stat.ino);
+    const tracked = !!facts?.rootIdentity || !!local?.entries().length;
+    const needsRecovery = !!facts && (Object.values(facts.pending).some(count => count !== 0) ||
+      JSON.stringify(facts.heads.accepted) !== JSON.stringify(facts.heads.applied));
+    if (!sameRoot && (tracked || needsRecovery)) {
+      if (needsRecovery) throw new ClientError('MOVE_RECOVERY_REQUIRED',
+        'Pending recovery cannot be rebound to a copied root. Restore the original directory at its saved path and finish recovery, or inspect preserved state before explicitly abandoning that replica. Binding and journal are unchanged.');
+      throw new ClientError('MOVE_REQUIRES_COPY',
+        'A scanned move must preserve filesystem identity. Restore the original directory, or use explicit copy repair for an independent binding. The old journal is preserved.');
+    }
+    const path = join(global, 'connections', `${old.connectionId}.json`);
+    const updated = { ...old, root };
+    saveRootIdentity(global, updated, true);
+    replaceFile(path, JSON.stringify(updated));
+    return updated;
+  } finally {
+    try { local?.close(); } finally { release(); }
+  }
 }
 
 function replaceFile(path: string, text: string): void {
@@ -256,7 +322,8 @@ function disconnectLocked(globalDirectory: string, connections: Connection[], fo
     // recursively remove the lock directory after release: a new owner may
     // already have acquired it. Empty private replica directories may remain.
     for (const replica of replicaPaths) {
-      for (const name of ["chunks", "local.sqlite", "local.sqlite-wal", "local.sqlite-shm", "local.sqlite-journal"]) {
+      for (const name of ["chunks", "local.sqlite", "local.sqlite-wal", "local.sqlite-shm", "local.sqlite-journal", ROOT_IDENTITY, "status.json",
+        ...readdirSync(replica).filter(name => /^(?:root-identity|status)\.json\.[0-9a-f]{32}\.stage$/.test(name))]) {
         const path = join(replica, name);
         if (existsSync(path)) rmSync(path, {recursive:true});
       }

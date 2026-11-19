@@ -605,7 +605,8 @@ test('enrollment waits release the registry gate but retain a migration-blocking
       await request.text();
       received.resolve();
       await respond.promise;
-      return Response.json({ sessionToken: 'A'.repeat(43) });
+      // Bun 1.4.2 misparses the next keepalive request after this deferred handler.
+      return Response.json({ sessionToken: 'A'.repeat(43) }, { headers: { connection: 'close' } });
     },
   });
   initializeCredentials(root, 'protected-file');
@@ -847,4 +848,26 @@ test('abort during an uncancellable native write prevents subsequent HTTP after 
     http.stop(true);
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('bound start retains unlock guidance when recording credential failure encounters an unrecovered journal', async () => {
+  const { createConnection, startBoundSync, clientStatus } = await import('../src/index.ts');
+  const { ClientLocal } = await import('@nanosync/client-local');
+  const root = mkdtempSync(join(tmpdir(), 'nanosync-credentials-'));
+  const files = mkdtempSync(join(tmpdir(), 'nanosync-credential-files-'));
+  const store = new MemoryStore();
+  try {
+    const ids = legacy(root);
+    const binding = createConnection(root, files, ids.serverId, ids.vaultId, ids.deviceId);
+    const replica = join(root, 'replicas', binding.connectionId);
+    new ClientLocal(replica, ids.vaultId, ids.deviceId).close();
+    await migrateCredentials(root, true, { store });
+    secureCreate(join(replica, 'local.sqlite-wal'), 'interrupted WAL fixture');
+    store.locked = true;
+    await expect(startBoundSync(root, files, { store })).rejects.toMatchObject({ code: 'CREDENTIALS_UNAVAILABLE', exitCode: 2 });
+    const status = clientStatus(root).bindings[0]!;
+    expect(status).toMatchObject({ phase: 'credentials-locked', error: 'CREDENTIALS_UNAVAILABLE', facts: null, upToDate: false });
+    expect(status.statusIssues.some(issue => issue.code === 'JOURNAL_RECOVERY_REQUIRED')).toBe(true);
+    expect(JSON.stringify(status)).not.toContain('native secret sentinel');
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(files, { recursive: true, force: true }); }
 });

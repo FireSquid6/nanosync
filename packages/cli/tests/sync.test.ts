@@ -328,6 +328,12 @@ test("one-shot stale-head sync retains both concurrent edits and retries frozen 
   const values = (dir: string) => readdirSync(dir).filter(name => name !== ".nanosync").map(name => readFileSync(join(dir, name), "utf8")).sort();
   expect(values(e.firstFiles)).toEqual(["offline", "online"]);
   expect(values(e.secondFiles)).toEqual(values(e.firstFiles));
+  const { clientStatus } = await import('@nanosync/client-service');
+  const status = clientStatus(e.secondDir).bindings[0]!;
+  expect(status.facts?.conflicts).toBeGreaterThan(0);
+  expect(status.upToDate).toBe(false);
+  expect(status.attentionRequired).toBe(true);
+  expect(status.lastSuccessfulSync).not.toBeNull();
   await stop(a); await stop(b);
 
   writeFileSync(join(e.firstFiles, "new"), "published", { mode: 0o600 });
@@ -818,4 +824,283 @@ test('watcher shutdown failure still awaits active pass and retains ownership', 
     // An uncertain stop deliberately retains this process's lock; isolate cleanup to the fixture.
     runners.splice(runners.indexOf(runner), 1);
   } finally { close.mockRestore(); release.resolve(); }
+});
+
+test('verified status uses injected success time, becomes stale on close and preserves history through pause and missing roots', async () => {
+  const { startBoundSync, clientStatus, setPaused } = await import('@nanosync/client-service');
+  const e = await fixture();
+  let clock = 1000;
+  const owner = { origin: 'desktop' as const, instanceId: randomUUID() };
+  const runner = await startBoundSync(e.firstDir, e.firstFiles, { now: () => clock, owner });
+  runners.push(runner);
+  await runner.syncOnce();
+  let status = clientStatus(e.firstDir, e.firstFiles, () => clock).bindings[0]!;
+  expect(status).toMatchObject({ upToDate: true, lastSuccessfulSync: 1000, lastRemoteCheck: 1000, owner });
+  const binding = status.connectionId;
+  clock = 2000;
+  setPaused(e.firstDir, { all: true }, true);
+  await expect(runner.syncOnce()).rejects.toMatchObject({ code: 'SYNC_PAUSED' });
+  status = clientStatus(e.firstDir, e.firstFiles).bindings[0]!;
+  expect(status).toMatchObject({ phase: 'paused', error: null, upToDate: false, lastSuccessfulSync: 1000 });
+  const errors: unknown[] = [];
+  const watch = controlledWatch(runner, () => {}, error => errors.push(error));
+  await watch.ready();
+  expect(errors).toEqual([]);
+  setPaused(e.firstDir, { binding }, true);
+  setPaused(e.firstDir, { all: true }, false);
+  await watch.advance();
+  expect(clientStatus(e.firstDir).bindings[0]!.pause.effective).toBe(true);
+  setPaused(e.firstDir, { binding }, false);
+  await watch.advance();
+  expect(clientStatus(e.firstDir).bindings[0]!.lastSuccessfulSync).toBe(2000);
+  const readiness = spyOn(LinuxWatcher.prototype, 'ready');
+  try {
+    setPaused(e.firstDir, { binding }, true);
+    await watch.advance();
+    expect(readiness).not.toHaveBeenCalled();
+    expect(errors).toEqual([]);
+  } finally { readiness.mockRestore(); }
+  await watch.stop(); runners.splice(runners.indexOf(runner), 1);
+  status = clientStatus(e.firstDir).bindings[0]!;
+  expect(status).toMatchObject({ upToDate: false, freshness: 'stale-or-unknown', lastSuccessfulSync: 2000 });
+  renameSync(e.firstFiles, e.firstFiles + '-gone');
+  try {
+    expect(clientStatus(e.firstDir, e.firstFiles).bindings[0]).toMatchObject({ phase: 'folder-unavailable', lastSuccessfulSync: 2000 });
+    await expect(startBoundSync(e.firstDir, e.firstFiles)).rejects.toThrow();
+    expect(existsSync(e.firstFiles)).toBe(false);
+    expect(existsSync(join(e.a.clientDirectory, 'local.sqlite'))).toBe(true);
+  } finally { renameSync(e.firstFiles + '-gone', e.firstFiles); }
+});
+
+test('pause before advance preserves exact frozen proposal for restart replay', async () => {
+  const { startBoundSync, setPaused, clientStatus } = await import('@nanosync/client-service');
+  const e = await fixture();
+  const initial = await startBoundSync(e.firstDir, e.firstFiles);
+  await initial.syncOnce(); await initial.stop();
+  writeFileSync(join(e.firstFiles, 'new'), 'durable local edit', { mode: 0o600 });
+  const binding = clientStatus(e.firstDir).bindings[0]!.connectionId;
+  let paused = false;
+  const runner = await startBoundSync(e.firstDir, e.firstFiles, { fetch: async input => {
+    const request = input as Request;
+    const response = await fetch(request);
+    if (!paused && request.method === 'PUT' && new URL(request.url).pathname.includes('/manifest/')) {
+      paused = true; setPaused(e.firstDir, { binding }, true);
+    }
+    return response;
+  } });
+  await expect(runner.syncOnce()).rejects.toMatchObject({ code: 'SYNC_PAUSED' });
+  await runner.stop();
+  const local = new ClientLocal(e.a.clientDirectory, e.a.vaultId, e.a.deviceId);
+  const frozen = local.proposal()!;
+  expect(frozen.state).toBe('prepared');
+  expect(local.statusFacts().pending.proposal).toBe(1);
+  local.close();
+  setPaused(e.firstDir, { binding }, false);
+  const advances: unknown[] = [];
+  const resumed = await startBoundSync(e.firstDir, e.firstFiles, { fetch: async input => {
+    const request = input as Request;
+    if (new URL(request.url).pathname === '/v1/head/advance') advances.push(await request.clone().json());
+    return fetch(request);
+  } });
+  runners.push(resumed);
+  await resumed.syncOnce();
+  expect(advances[0]).toEqual(frozen.request);
+  expect(readFileSync(join(e.firstFiles, 'new'), 'utf8')).toBe('durable local edit');
+});
+
+test('loss of root after scan and before upload never publishes deletions or recreates root', async () => {
+  const { startBoundSync } = await import('@nanosync/client-service');
+  const e = await fixture();
+  const initial = await startBoundSync(e.firstDir, e.firstFiles);
+  await initial.syncOnce(); await initial.stop();
+  writeFileSync(join(e.firstFiles, 'new'), 'original', { mode: 0o600 });
+  const remote = new HttpRemote({ baseUrl: e.url, token: e.a.token, fetch });
+  const before = await remote.head();
+  let removed = false, uploads = 0, advances = 0;
+  const runner = await startBoundSync(e.firstDir, e.firstFiles, { fetch: async input => {
+    const request = input as Request, path = new URL(request.url).pathname;
+    if (request.method === 'PUT') uploads++;
+    if (path === '/v1/head/advance') advances++;
+    const response = await fetch(request);
+    if (!removed && path === '/v1/objects/presence') {
+      removed = true; renameSync(e.firstFiles, e.firstFiles + '-original');
+    }
+    return response;
+  } });
+  try {
+    await expect(runner.syncOnce()).rejects.toMatchObject({ code: 'FOLDER_UNAVAILABLE' });
+    await runner.stop();
+    expect(removed).toBe(true); expect(uploads).toBe(0); expect(advances).toBe(0);
+    expect(await remote.head()).toEqual(before);
+    expect(existsSync(e.firstFiles)).toBe(false);
+    expect(readFileSync(join(e.firstFiles + '-original', 'new'), 'utf8')).toBe('original');
+    expect(existsSync(join(e.a.clientDirectory, 'local.sqlite'))).toBe(true);
+  } finally { await runner.stop(); if (removed) renameSync(e.firstFiles + '-original', e.firstFiles); }
+});
+
+test('same-process pause delivery interrupts a large scan at bounded macrotask checkpoints', async () => {
+  const { ClientError } = await import('@nanosync/client-service');
+  const e = await fixture();
+  let armed = false, blocked = false, scannedSteps = 0;
+  const delivered = Promise.withResolvers<void>();
+  const runner = start({ ...e.a,
+    beforeWork() {
+      if (armed) scannedSteps++;
+      if (blocked) throw new ClientError('SYNC_PAUSED', 'paused');
+    },
+    onEvent(event) {
+      if (event.type === 'scanning' && armed) setImmediate(() => { blocked = true; delivered.resolve(); });
+    },
+  });
+  await runner.syncOnce();
+  for (let index = 0; index < 100; index++) writeFileSync(join(e.firstFiles, `file-${index}`), 'edit');
+  armed = true;
+  await expect(runner.syncOnce()).rejects.toMatchObject({ code: 'SYNC_PAUSED' });
+  await delivered.promise;
+  expect(scannedSteps).toBeLessThan(100);
+  expect(ClientLocal.readStatus(e.a.clientDirectory, e.a.vaultId, e.a.deviceId)!.pending.proposal).toBe(0);
+});
+
+test('pause preserves independent actionable error and last success without exposing remote error text', async () => {
+  const { startBoundSync, clientStatus, setPaused } = await import('@nanosync/client-service');
+  const { RemoteError } = await import('@nanosync/sync-core');
+  const e = await fixture();
+  let denied = false, clock = 1000;
+  const runner = await startBoundSync(e.firstDir, e.firstFiles, { now: () => clock,
+    fetch: async input => {
+      if (denied) throw new RemoteError(403, 'FORBIDDEN', 'secret error sentinel');
+      return fetch(input);
+    },
+  });
+  runners.push(runner);
+  await runner.syncOnce(); denied = true; clock = 2000;
+  await expect(runner.syncOnce()).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  setPaused(e.firstDir, { all: true }, true);
+  await expect(runner.syncOnce()).rejects.toMatchObject({ code: 'SYNC_PAUSED' });
+  const status = clientStatus(e.firstDir).bindings[0]!;
+  expect(status).toMatchObject({ phase: 'paused', attentionRequired: true, error: 'FORBIDDEN', lastSuccessfulSync: 1000 });
+  expect(JSON.stringify(status)).not.toContain('secret error sentinel');
+});
+
+test.each(['upload', 'download'] as const)('bound runner pauses an in-flight %s at a chunk boundary and resumes without retransferring it', async direction => {
+  const { startBoundSync, clientStatus, setPaused } = await import('@nanosync/client-service');
+  const e = await fixture();
+  for (const [state, files] of [[e.firstDir, e.firstFiles], [e.secondDir, e.secondFiles]] as const) {
+    const initial = await startBoundSync(state, files); await initial.syncOnce(); await initial.stop();
+  }
+  const payload = Buffer.alloc(CHUNK_SIZE + 17, 7);
+  writeFileSync(join(e.firstFiles, 'bounded'), payload, { mode: 0o600 });
+  if (direction === 'download') {
+    const publisher = await startBoundSync(e.firstDir, e.firstFiles);
+    await publisher.syncOnce(); await publisher.stop();
+  }
+  const state = direction === 'upload' ? e.firstDir : e.secondDir;
+  const files = direction === 'upload' ? e.firstFiles : e.secondFiles;
+  const binding = clientStatus(state).bindings[0]!.connectionId;
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  let requests = 0;
+  const transport = async (input: RequestInfo | URL) => {
+    const request = input as Request, response = await fetch(request);
+    if (request.method === (direction === 'upload' ? 'PUT' : 'GET') &&
+        new URL(request.url).pathname.startsWith('/v1/objects/chunk/')) {
+      requests++;
+      if (requests === 1) { entered.resolve(); await release.promise; }
+    }
+    return response;
+  };
+  const owner = { origin: 'desktop' as const, instanceId: randomUUID() };
+  const runner = await startBoundSync(state, files, { fetch: transport, owner }); runners.push(runner);
+  const pass = runner.syncOnce(); void pass.catch(() => {});
+  try {
+    await entered.promise;
+    const held = clientStatus(state).bindings[0]!;
+    const before = held.progress![direction];
+    if (direction === 'download') {
+      expect(held.facts!.pending.applies).toBe(1);
+      expect(held.freshness).toBe('stale-or-unknown');
+    }
+    setPaused(state, { binding }, true);
+    const pausing = clientStatus(state).bindings[0]!;
+    expect(pausing).toMatchObject({ phase: 'pausing', ownerPresent: true, owner });
+    if (direction === 'download') {
+      expect(pausing.facts!.pending.applies).toBe(1);
+      expect(pausing.freshness).toBe('stale-or-unknown');
+    }
+    release.resolve();
+    await expect(pass).rejects.toMatchObject({ code: 'SYNC_PAUSED' });
+    expect(requests).toBe(1);
+    const paused = clientStatus(state).bindings[0]!;
+    expect(paused).toMatchObject({ phase: 'paused', upToDate: false, error: null });
+    expect(paused.progress![direction].count - before.count).toBe(1);
+    expect(paused.progress![direction].bytes - before.bytes).toBe(CHUNK_SIZE + 96);
+    if (direction === 'download') expect(paused.facts!.pending.applies).toBe(1);
+    await stop(runner);
+    const resumed = await startBoundSync(state, files, { fetch: transport, owner }); runners.push(resumed);
+    await expect(resumed.syncOnce()).rejects.toMatchObject({ code: 'SYNC_PAUSED' });
+    expect(requests).toBe(1);
+    setPaused(state, { binding }, false);
+    await resumed.syncOnce();
+    expect(requests).toBe(2);
+    expect(readFileSync(join(files, 'bounded'))).toEqual(payload);
+    expect(clientStatus(state).bindings[0]).toMatchObject({ upToDate: true });
+  } finally { release.resolve(); await pass.catch(() => {}); }
+});
+
+test.each(['pause', 'root-loss'] as const)('bound runner keeps apply recovery after %s following an atomic installation', async interruption => {
+  const fs = await import('node:fs');
+  const { dirname } = await import('node:path');
+  const { startBoundSync, clientStatus, setPaused } = await import('@nanosync/client-service');
+  const e = await fixture();
+  for (const [state, files] of [[e.firstDir, e.firstFiles], [e.secondDir, e.secondFiles]] as const) {
+    const initial = await startBoundSync(state, files); await initial.syncOnce(); await initial.stop();
+  }
+  writeFileSync(join(e.firstFiles, 'first'), 'first contents', { mode: 0o600 });
+  writeFileSync(join(e.firstFiles, 'second'), 'second contents', { mode: 0o600 });
+  const publisher = await startBoundSync(e.firstDir, e.firstFiles);
+  await publisher.syncOnce(); await publisher.stop();
+  const remote = new HttpRemote({ baseUrl: e.url, token: e.b.token, fetch });
+  const head = await remote.head(), binding = clientStatus(e.secondDir).bindings[0]!.connectionId;
+  const receiver = await startBoundSync(e.secondDir, e.secondFiles); runners.push(receiver);
+  const native = fs.linkSync;
+  let interrupted = false, installations = 0;
+  const install = spyOn(fs, 'linkSync').mockImplementation((source, target) => {
+    native(source, target);
+    if (fs.realpathSync(dirname(String(target))) !== e.secondFiles) return;
+    installations++;
+    if (interrupted) return;
+    interrupted = true;
+    if (interruption === 'pause') setPaused(e.secondDir, { binding }, true);
+    else renameSync(e.secondFiles, e.secondFiles + '-saved');
+  });
+  try {
+    await expect(receiver.syncOnce()).rejects.toThrow();
+    expect(interrupted).toBe(true); expect(installations).toBe(1);
+    expect(clientStatus(e.secondDir).bindings[0]).toMatchObject({
+      phase: interruption === 'pause' ? 'paused' : 'folder-unavailable', upToDate: false,
+    });
+  } finally { install.mockRestore(); await stop(receiver); }
+  expect(ClientLocal.readStatus(e.b.clientDirectory, e.b.vaultId, e.b.deviceId)!.pending.applies).toBe(1);
+  if (interruption === 'root-loss') {
+    try {
+      await expect(startBoundSync(e.secondDir, e.secondFiles)).rejects.toMatchObject({ code: 'FOLDER_UNAVAILABLE' });
+      expect(existsSync(e.secondFiles)).toBe(false);
+      mkdirSync(e.secondFiles, { mode: 0o700 });
+      fs.copyFileSync(join(e.secondFiles + '-saved', '.nanosync'), join(e.secondFiles, '.nanosync'));
+      await expect(startBoundSync(e.secondDir, e.secondFiles)).rejects.toMatchObject({ code: 'FOLDER_UNAVAILABLE' });
+    } finally {
+      rmSync(e.secondFiles, { recursive: true, force: true });
+      renameSync(e.secondFiles + '-saved', e.secondFiles);
+    }
+  }
+  const resumed = await startBoundSync(e.secondDir, e.secondFiles); runners.push(resumed);
+  if (interruption === 'pause') {
+    await expect(resumed.syncOnce()).rejects.toMatchObject({ code: 'SYNC_PAUSED' });
+    setPaused(e.secondDir, { binding }, false);
+  }
+  await resumed.syncOnce();
+  expect(readFileSync(join(e.secondFiles, 'first'), 'utf8')).toBe('first contents');
+  expect(readFileSync(join(e.secondFiles, 'second'), 'utf8')).toBe('second contents');
+  expect(ClientLocal.readStatus(e.b.clientDirectory, e.b.vaultId, e.b.deviceId)!.pending.applies).toBe(0);
+  expect(await remote.head()).toEqual(head);
+  expect(clientStatus(e.secondDir).bindings[0]!.upToDate).toBe(true);
 });

@@ -1,4 +1,5 @@
-import { Database } from "bun:sqlite";
+import { Database, constants as sqlite } from "bun:sqlite";
+import { pathToFileURL } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import {
   constants, closeSync, existsSync, fchmodSync, fsyncSync, fstatSync, lstatSync,
@@ -62,7 +63,12 @@ function secureFile(path: string): void {
     st.uid !== process.getuid!() || (st.mode & 0o177) !== 0
   ) throw new Error("unsafe private file");
 }
-function sidecars(path: string) { for (const suffix of ["", "-wal", "-shm", "-journal"]) if (existsSync(path + suffix)) secureFile(path + suffix); }
+function sidecars(path: string) {
+  for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+    try { secureFile(path + suffix); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  }
+}
 function syncDir(path: string) { const fd = openSync(path, constants.O_RDONLY | noSymlink); try { fsyncSync(fd); } finally { closeSync(fd); } }
 function createPrivate(path: string) { const fd = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | noSymlink, 0o600); try { fchmodSync(fd, 0o600); fsyncSync(fd); } finally { closeSync(fd); } syncDir(dirname(path)); }
 function row<T>(db: Database, sql: string, ...params: (string | number)[]): T | null { return db.query<T, (string | number)[]>(sql).get(...params); }
@@ -74,6 +80,74 @@ export interface Head { revisionId: string | null; sequence: number }
 export interface Entry { executable?: 0 | 1 | null; id: string; path: string; kind: "file" | "directory" | "tombstone"; fingerprint: string | null; hydration: "downloaded" | "evicted"; revision: string | null }
 export interface Work { id: string; state: "pending" | "running" | "done" | "blocked" }
 export interface HydrationIntent { id: string; entryId: string; revision: string; sequence: number; direction: "evict" | "download"; rootDevice: string; rootInode: string; fileDevice: string | null; fileInode: string | null }
+export interface StatusFacts {
+  heads: Record<"observed" | "accepted" | "applied", Head>;
+  pending: { operations: number; transfers: number; applies: number; hydration: number; proposal: number; restore: number; reconciliation: number };
+  conflicts: number;
+  rootIdentity: { device: string; inode: string } | null;
+}
+export type StatusReadCode = "STATUS_RACE" | "JOURNAL_RECOVERY_REQUIRED" | "JOURNAL_INVALID";
+export class StatusReadError extends Error {
+  constructor(readonly code: StatusReadCode) {
+    const messages: Record<StatusReadCode, string> = {
+      STATUS_RACE: "Journal changed during status observation; refresh and retry.",
+      JOURNAL_RECOVERY_REQUIRED: "Journal recovery requires a compatible sync owner; preserve private state and start syncing to recover.",
+      JOURNAL_INVALID: "Journal files or schema are unsafe, incompatible or invalid; stop syncing and inspect or restore private state. Do not reset it.",
+    };
+    super(messages[code]);
+    this.name = "StatusReadError";
+  }
+}
+function factObject(value: unknown, keys: string[]): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      Object.keys(value).sort().join(",") !== [...keys].sort().join(",")) throw new StatusReadError("JOURNAL_INVALID");
+  return value as Record<string, unknown>;
+}
+/** Shared validation for SQLite aggregates and persisted secret-free observations. */
+export function parseStatusFacts(input: unknown): StatusFacts {
+  const facts = factObject(input, ["heads", "pending", "conflicts", "rootIdentity"]);
+  const heads = factObject(facts.heads, ["observed", "accepted", "applied"]);
+  for (const kind of ["observed", "accepted", "applied"]) {
+    const head = factObject(heads[kind], ["revisionId", "sequence"]);
+    if (!Number.isSafeInteger(head.sequence) || (head.sequence as number) < 0 ||
+        ((head.sequence === 0) !== (head.revisionId === null))) throw new StatusReadError("JOURNAL_INVALID");
+    if (head.revisionId !== null) {
+      try { parseRevisionId(head.revisionId); } catch { throw new StatusReadError("JOURNAL_INVALID"); }
+    }
+  }
+  const pending = factObject(facts.pending, [
+    "operations", "transfers", "applies", "hydration", "proposal", "restore", "reconciliation",
+  ]);
+  for (const count of [...Object.values(pending), facts.conflicts]) {
+    if (!Number.isSafeInteger(count) || (count as number) < 0) throw new StatusReadError("JOURNAL_INVALID");
+  }
+  if (facts.rootIdentity !== null) {
+    const root = factObject(facts.rootIdentity, ["device", "inode"]);
+    if (typeof root.device !== "string" || !/^\d+$/.test(root.device) ||
+        typeof root.inode !== "string" || !/^[1-9]\d*$/.test(root.inode)) throw new StatusReadError("JOURNAL_INVALID");
+  }
+  return input as StatusFacts;
+}
+function statusFacts(db: Database): StatusFacts {
+  const count = (sql: string) => row<{ n: number }>(db, sql)!.n;
+  const heads = {} as StatusFacts["heads"];
+  for (const kind of ["observed", "accepted", "applied"] as const) {
+    const head = row<Head>(db, "SELECT revision revisionId,sequence FROM heads WHERE kind=?", kind) ?? { revisionId: null, sequence: 0 };
+    integer(head.sequence); if (head.revisionId !== null) uuid(head.revisionId);
+    if ((head.sequence === 0) !== (head.revisionId === null)) throw new Error("corrupt head observation");
+    heads[kind] = head;
+  }
+  return parseStatusFacts({ heads, pending: {
+    operations: count("SELECT count(*) n FROM operations WHERE state!='done'"),
+    transfers: count("SELECT count(*) n FROM transfers WHERE state!='done'"),
+    applies: count("SELECT count(*) n FROM operations WHERE kind='apply' AND state!='done'"),
+    hydration: count("SELECT count(*) n FROM hydration"),
+    proposal: count("SELECT count(*) n FROM proposals"),
+    restore: count("SELECT count(*) n FROM restores"),
+    reconciliation: count("SELECT count(*) n FROM operations WHERE kind='merge' AND state!='done'"),
+  }, conflicts: count("SELECT count(*) n FROM conflicts WHERE state='open'"),
+  rootIdentity: row<{ device: string; inode: string }>(db, "SELECT device,inode FROM file_identity JOIN entries ON entry_id=entries.id WHERE path='' AND kind='directory'") });
+}
 export class ClientLocal implements ChunkJournal {
   private readonly db: Database;
   private readonly root: string;
@@ -102,6 +176,7 @@ export class ClientLocal implements ChunkJournal {
       ) throw new Error("unsafe SQLite settings");
       this.migrate();
       if (row<{ integrity_check: string }>(this.db, "PRAGMA integrity_check")?.integrity_check !== "ok" || schemaDigest(this.db) !== expectedDigest()) throw new Error("corrupt local schema");
+      if (all(this.db, "PRAGMA foreign_key_check").length) throw new Error("corrupt local references");
       this.write(() => {
         const identity = row<{ vault: string; device: string }>(this.db, "SELECT vault,device FROM identity WHERE singleton=1");
         if (identity && (identity.vault !== vaultId || identity.device !== deviceId)) throw new Error("conflicting local identity");
@@ -114,6 +189,82 @@ export class ClientLocal implements ChunkJournal {
       this.db.close();
       throw error;
     }
+  }
+
+  /** Noncreating/nonmigrating observation; an owner remains the only journal writer. */
+  static readStatus(directory: string, vaultId: string, deviceId: string): StatusFacts | null {
+    try { return ClientLocal.readStatusSnapshot(directory, vaultId, deviceId); }
+    catch (error) {
+      if (error instanceof StatusReadError) throw error;
+      const code = (error as { code?: string }).code;
+      if (["ENOENT", "SQLITE_BUSY", "SQLITE_LOCKED", "SQLITE_BUSY_SNAPSHOT"].includes(code ?? ""))
+        throw new StatusReadError("STATUS_RACE");
+      throw new StatusReadError("JOURNAL_INVALID");
+    }
+  }
+  private static readStatusSnapshot(directory: string, vaultId: string, deviceId: string): StatusFacts | null {
+    parseVaultId(vaultId); parseDeviceId(deviceId);
+    try { secureDir(directory); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
+    const filename = join(directory, "local.sqlite");
+    try { secureFile(filename); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
+    sidecars(filename);
+    // SQLite readonly WAL access requires an existing shared-memory index. Never create one for status.
+    if (existsSync(filename + "-wal") && !existsSync(filename + "-shm")) throw new StatusReadError("JOURNAL_RECOVERY_REQUIRED");
+    const hasWal = existsSync(filename + "-wal");
+    if (existsSync(filename + "-journal")) throw new StatusReadError("JOURNAL_RECOVERY_REQUIRED");
+    const before = lstatSync(filename, { bigint: true });
+    const walIdentity = hasWal ? lstatSync(filename + "-wal") : null;
+    const shmIdentity = hasWal ? lstatSync(filename + "-shm") : null;
+    const uri = pathToFileURL(filename);
+    // Closed WAL-mode databases otherwise create sidecars even with SQLITE_OPEN_READONLY.
+    // Immutable is used only without WAL; reject a racing writer/checkpoint below.
+    if (!hasWal) uri.searchParams.set("immutable", "1");
+    const checkReadBoundary = () => {
+    if (walIdentity && shmIdentity) {
+      let walAfter, shmAfter;
+      try { walAfter = lstatSync(filename + "-wal"); shmAfter = lstatSync(filename + "-shm"); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new StatusReadError("STATUS_RACE");
+        throw error;
+      }
+      if (walAfter.dev !== walIdentity.dev || walAfter.ino !== walIdentity.ino ||
+          shmAfter.dev !== shmIdentity.dev || shmAfter.ino !== shmIdentity.ino)
+        throw new StatusReadError("STATUS_RACE");
+    } else {
+      const after = lstatSync(filename, { bigint: true });
+      if (existsSync(filename + "-wal") || existsSync(filename + "-journal") ||
+          before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size ||
+          before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs)
+        throw new StatusReadError("STATUS_RACE");
+    }
+    };
+    let db: Database;
+    try { db = new Database(uri.href, sqlite.SQLITE_OPEN_READONLY | sqlite.SQLITE_OPEN_URI); }
+    catch (error) { checkReadBoundary(); throw error; }
+    try {
+      db.exec("PRAGMA query_only=ON; BEGIN");
+      const version = row<{ user_version: number }>(db, "PRAGMA user_version")!.user_version;
+      const history = all<{ version: number; checksum: string }>(db, "SELECT * FROM migrations ORDER BY version");
+      if (version !== migrations.length || history.length !== version ||
+          history.some((item, index) => item.version !== index + 1 || item.checksum !== hash(`${index + 1}\0${migrations[index]}`)) ||
+          schemaDigest(db) !== expectedDigest())
+        throw new Error("incompatible or corrupt local schema; sync with a compatible client first");
+      const identity = row<{ vault: string; device: string }>(db, "SELECT vault,device FROM identity WHERE singleton=1");
+      if (!identity || identity.vault !== vaultId || identity.device !== deviceId) throw new Error("conflicting local identity");
+      const facts = statusFacts(db);
+      db.exec("COMMIT"); sidecars(filename);
+      return facts;
+    } finally {
+      db.close();
+      checkReadBoundary();
+    }
+  }
+  statusFacts(): StatusFacts {
+    this.db.exec("BEGIN");
+    try { const facts = statusFacts(this.db); this.db.exec("COMMIT"); return facts; }
+    catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
   private migrate() {

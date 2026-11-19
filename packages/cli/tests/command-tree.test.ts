@@ -132,3 +132,19 @@ test('independent pending requests retain denial until explicit fresh, and inter
     out.mockRestore(); err.mockRestore(); rmSync(base,{recursive:true,force:true});
   }
 });
+
+test('pause CLI requires exactly one target and settings-only root remains uninitialized', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'nanosync-pause-cli-'));
+  const out = spyOn(console, 'log').mockImplementation(() => {}), err = spyOn(console, 'error').mockImplementation(() => {});
+  const invoke = (args: string[]) => main(['client', ...args, '--client-dir', dir, '--json', '--non-interactive']);
+  try {
+    expect(await invoke(['pause'])).toBe(2);
+    expect(await invoke(['pause', '--all', '--path', dir])).toBe(2);
+    expect(await invoke(['pause', '--all'])).toBe(0);
+    expect(await invoke(['status'])).toBe(0);
+    expect(JSON.parse(String(out.mock.lastCall?.[0])).data.bindings).toEqual([]);
+    expect(await invoke(['resume', '--all'])).toBe(0);
+    expect(await invoke(['credentials', 'view'])).toBe(0);
+    expect(JSON.parse(String(out.mock.lastCall?.[0])).data.mode).toBe('uninitialized');
+  } finally { out.mockRestore(); err.mockRestore(); rmSync(dir, { recursive: true, force: true }); }
+});

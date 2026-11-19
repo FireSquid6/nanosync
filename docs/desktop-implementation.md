@@ -93,7 +93,7 @@ Ignore validation reuses `IgnoreRules`, not another glob dialect. Extract a pure
 
 No mandatory always-on daemon: each CLI watch or desktop trusted main process can host an owner; a CLI one-shot can host temporarily. An owner holds the existing replica `.sync-owner` lock through the runner's complete stop/close/key cleanup. Registry mutation and acquisition remain serialized by the registry gate; multi-binding mutation acquires replica locks in UUID order. PID alone, heartbeat timeout or failed IPC never proves death. Existing `/proc` start-time checks remain authoritative on Linux; permission/identity uncertainty fails closed.
 
-Proposed Linux control transport: Unix-domain sockets in a validated per-user 0700 runtime directory, socket access restricted to the user. Endpoint discovery is secret-free metadata keyed by canonical client-state identity, owner instance nonce and process identity; it is not ownership authority. Authenticate requests with a per-owner random capability stored in checked 0600 private state; validate ownership, permissions and identity of the socket and its containing directory before connecting. Verify OS peer credentials where the runtime exposes them. These checks authorize the same-user client boundary, not arbitrary local callers. The capability is control-only, not a device token or vault key; never pass it through renderer RPC, argv, logs or exports. Missing peer-credential APIs do not justify unauthenticated localhost HTTP: private socket discovery and capability checks remain mandatory and require adversarial integration tests. No TCP listener/browser-accessible control API.
+Proposed Linux control transport: Unix-domain sockets in a validated per-user 0700 runtime directory, socket access restricted to the user. Endpoint discovery is secret-free metadata keyed by canonical client-state identity, owner instance nonce and process identity; it is not ownership authority. Authenticate requests with a per-owner random capability stored in checked 0600 private state; validate ownership, permissions and identity of the socket and its containing directory before connecting. Verify OS peer credentials where the runtime exposes them. These checks authorize the same-user client boundary, not arbitrary local callers. The capability is control-only, not a device token or vault key; never pass it through renderer RPC, argv, logs or exports. Missing peer-credential APIs do not justify unauthenticated localhost HTTP: private socket discovery and capability checks remain mandatory and require adversarial integration tests. No new application TCP sync-owner control listener or browser-accessible owner API. Electrobun's existing renderer bridge is a distinct, per-view authenticated/encrypted loopback WebSocket transport; the [validated SDK prerequisite](desktop-sdk-security.md) records its limits and source patches. Do not describe all application IPC as Unix-only.
 
 Only same-user authorized clients are in scope; root or a compromised same-user process able to read private state is not isolated by a bearer capability. Do not claim otherwise. Authenticate before dispatch, version the protocol, bound frame sizes/queues, validate operation schemas/IDs and authorize operations against that endpoint's client root and bindings. No arbitrary SQL, filesystem read, shell execution, credential export or unrestricted native calls. Secret enrollment/recovery input may cross the trusted private client boundary only for the requested operation and is never echoed; synchronization forwarding uses credential references, not keys in IPC responses.
 
@@ -370,3 +370,174 @@ to read private state, root, and credential-memory erasure remain out of scope.
 No product UI, pause/settings state, native lifecycle integration, user-keyring
 locking, real-user credentials, or global keyboard injection was used for this
 slice. The browser suite is not a native desktop smoke claim.
+
+## Step 6 — durable status and pauses
+
+Shared `readSettings`/`setPaused` provide versioned, fsynced global/folder OR pause
+intent, a separate settings gate, and optional revision-CAS. Valid settings-only
+state (including checked interrupted replacement stages) remains credential-
+uninitialized. No native preferences, automatic startup or continuous adoption are
+introduced. Connect retains its no-transfer behavior.
+
+The existing engine now accepts optional `beforeWork` checkpoints: each HTTP request
+and retry, cached download reference, publication producer `next`, scanner inventory/
+content step, apply staging/mutation/cleanup unit and hydration boundaries. Producer
+iterators and file descriptors close on checkpoint rejection. The shared runner
+checks persisted intent and root/marker identity; it yields a macrotask at least
+every 16 guarded steps so synchronous work cannot starve same-process control.
+Atomic filesystem mutation/fsync/bookkeeping units finish uninterrupted. Pause is
+an allowlisted `paused` progress event and local `SYNC_PAUSED` exit 2, not a failure;
+watch keeps ownership and retries on its usual schedule. Shutdown still cancels,
+awaits the active pass, closes journal/keys, then releases ownership.
+
+New bindings record root device/inode at connect; scanned legacy roots reuse journal
+identity. Never-scanned legacy roots establish identity only at explicit validated
+first start under the replica lock; pre-upgrade replacement with a copied marker
+cannot be detected retrospectively. Retry never creates/adopts a replacement root.
+Known root/status metadata is removed with discarded replica state. Interrupted
+apply recovery now recognizes only the exact planned two-link stage/destination
+pair, not unrelated hardlinks.
+
+`clientStatus`/`client status [--path]` return secret-free observed facts, owner origin/
+instance, independent pause causes, coarse/engine phases, actual completed ciphertext
+counters, heads and pending/conflict counts, safe error codes and separately persisted
+check/success times. Up-to-date needs verified completion, no local invalidation,
+matching checked/applied heads, no work/recovery/conflicts and a matching live owner;
+completion alone is insufficient. Closed/dead-owner status is stale/unknown, retaining
+history. Missing roots remain selectable by saved binding path. Passive observation
+never loads keys and uses the checked `ClientLocal.readStatus` snapshot rather than
+a competing writer. CLI/schema/recovery details are in `packages/cli/README.md` and
+SQLite WAL/URI branch evidence is documented in `packages/client-local/README.md`.
+
+This stage does not implement product UI, notifications, login/tray lifecycle,
+continuous-start persistence/adoption, or the later full removal/ignore-edit upgrade.
+
+Step 6 verification (disposable fixtures only): full suite **426 passed** on both
+Bun 1.4.4 / 38afee6c8 and project Nix Bun 1.4.2 / 744846f84; workspace/tools and
+native SDK typechecks, existing browser suite **7 passed**, binary build and
+`nix build path:. --no-link`. Deterministic tests cover independent pause intent,
+forwarded requests, cached/network/retry/producer boundaries and iterator cleanup,
+same-process macrotask delivery, paused watches avoiding new readiness scans,
+filesystem-unit pause/restart, frozen proposal identity replay, root loss before
+publication and mid-apply/restart, read-only live/closed WAL snapshots, stale/conflict/
+pending facts and success/error retention. The existing deferred enrollment fixture
+uses Connection: close to avoid a reproducible Bun 1.4.2 keepalive-parser 400; no
+credential behavior changed for that runtime fixture adjustment. Scoped codehygiene
+was run using Nix Python/NumPy; new settings is clean, remaining advisory findings
+are primarily long validation/aggregate expressions and existing engine style.
+No native GUI, real user folders/credentials/keyring or host-keyboard tests were run.
+
+### Step 6 review corrections
+
+- Root identity publication now flushes the replica directory (with its file),
+  containing `replicas`, client root and its parent **before** publishing the
+  connection record and marker. Connect and copy repair have fsync-order and
+  injected-failure regressions; these verify call ordering/failure behavior, not
+  physical power-loss survival.
+- Settings/status JSON errors are fixed actionable local errors with no input/native
+  snippets. Saved observation owner/lock/progress/facts/issue shapes are fully
+  checked; stored locks contain only the process and inode identity summary.
+- One journal/owner/cache error no longer aborts all-folder status. Each binding has
+  safe `statusIssues` codes/messages/retryability/actions. Snapshot races remain
+  retryable unknown, while unsafe/incompatible/corrupt state or recovery-required
+  WAL requires attention. All such observations fail closed for up-to-date.
+  Primary credential-unavailable guidance survives secondary journal/status failure;
+  facts stay unknown and secondary issues are surfaced. If status cannot be written,
+  the primary credential error gains a fixed status-recording warning instead of
+  being replaced by a native exception.
+- Passive snapshots retain schema/migration/identity and specific aggregate shape
+  validation, while full integrity and foreign-key checks run at owner startup.
+  The disposable 100k-entry manual probe `/tmp/nanosync-status-read-benchmark.ts`
+  returned identical facts at approximately 1.1 ms versus 0.18 ms for owned facts
+  on Bun 1.4.4 (previous full-scan snapshot approximately 80 ms); project Nix Bun
+  1.4.2 measured approximately 1.2 ms versus 0.20 ms. These are individual manual
+  measurements, not performance guarantees or timing-test assertions.
+- Additional real bound-runner tests hold upload/download requests at explicit
+  barriers, persist pause mid-pass, complete only the already-started chunk, restart
+  paused, and resume without retransferring it. The held-download case changes
+  pending-apply facts before the cached observation is rewritten: checked ownership
+  retains `pausing` despite stale facts, until the owner confirms `paused`.
+  Connected apply tests interrupt
+  immediately after an actual atomic link with pause or root loss, retain intent,
+  refuse missing/replacement/copied-marker roots, and replay after restoration.
+  The existing bound-runner frozen-proposal test compares the replayed advance
+  request with the exact persisted request, not just its final head.
+
+Review-fix verification in the shared checkout: full suites **453 passed** on Bun
+1.4.4 and project Nix Bun 1.4.2, workspace/tools typecheck and Nix build passed.
+The separate SDK-security agent owns native SDK validation and related desktop/
+flake artifacts; no new native/UI validation is claimed by these shared fixes.
+
+### Legacy journal recovery before root validation
+
+A legacy binding can lack `root-identity.json` while retaining historical root
+identity in a valid journal whose WAL has no SHM after a crash/backup restore.
+Read-only status must not repair that journal. Explicit `startBoundSync` now acquires
+the replica lock and opens/recovers only private journal/cache state first; inside
+the constructor cleanup boundary it then validates the marker and recovered
+historical root identity **before creating the scanner or starting user-root work**.
+A rejected root closes the journal, clears the copied key and releases ownership.
+An unreadable/incompatible journal cannot authorize capturing a new root identity.
+The existing never-scanned legacy compatibility limit remains unchanged.
+
+`assertBindingRoot` preserves typed journal recovery/race errors instead of turning
+them into `FOLDER_UNAVAILABLE`. Passive status collects those identity-observation
+issues before deriving freshness/attention: a second-read race stays retryable
+unknown, and a present root with an unrecovered journal reports journal recovery,
+not physical folder loss. Transfer guards still reject unverified identity.
+Root identity capture and comparison use BigInt filesystem stats and exact decimal
+strings, consistent with the Linux scanner; ownership/path checks retain their
+existing behavior. Adjacent inode IDs above 2^53 are no longer rounded together.
+
+Verification: 28 focused status/root tests passed; full core suites (`bun test
+packages`) **454 passed** on both Bun 1.4.4 and project Nix Bun 1.4.2, workspace/tools
+typecheck and diff checks passed. The disposable parent reproduction now reports
+`Public owner start recovered legacy WAL: yes` on both runtimes without a manual
+journal open. Regressions cover scanned/unscanned legacy startup, passive recovery
+reporting without mutation, a race only in the second identity snapshot, rejection
+of a replaced root/copied marker after owned recovery with zero scans/transfers and
+unchanged pending facts, lock cleanup, and high-bit identity precision. No physical
+power-loss, deployed-state, native SDK or GUI validation is claimed by this fix.
+
+### Explicit move repair compatibility and constructor cleanup
+
+A disposable scanned-root copy/remove probe reproduced a false success: move repair
+published the new path, then public start rejected the journal's old root inode.
+The pre-step-6 baseline (`1e90d5c`, `apply.ts::planApply`, lines 273–280) already
+required each recorded entry **and root** device/inode to match. Existing move tests
+exercise `renameSync`, not cross-filesystem identity rebinding. Cross-inode move was
+therefore not a generally valid retained-journal operation; no new reindexing API or
+filesystem reconciliation engine is introduced here.
+
+Explicit move repair now acquires replica ownership under the existing registry gate,
+recovers private state if necessary, and verifies compatibility before changing the
+root metadata or binding record. Scanned cross-inode moves return `MOVE_REQUIRES_COPY`
+for clean state, or `MOVE_RECOVERY_REQUIRED` for interrupted/uncertain state. Records,
+markers and pending intent remain intact on refusal; an independent copy remains an
+explicit separate choice, never automatic abandonment. Same-inode renames preserve
+pending work and can publicly start afterwards. Never-scanned roots without recovery
+work remain explicitly movable; ordinary replacement-root checks are unchanged.
+
+Constructor error cleanup now zeroes the runner's copied key in a `finally` even if
+journal close throws, consistent with stop cleanup. A controlled close-failure test
+inspects only a disposable fake-key copy and confirms the caller-owned input remains
+unchanged; it makes no physical-memory erasure claim.
+
+Move/cleanup verification: **40 focused tests** (status/root plus existing connection
+callers), **460 core tests** on both default Bun 1.4.4 and project Nix Bun 1.4.2,
+workspace/tools typecheck and diff checks passed. The no-HTTP copy/remove probe
+`/tmp/nanosync-scanned-move-probe.ts` now refuses with `MOVE_REQUIRES_COPY` before
+publishing; copied-root start remains blocked by the original binding/marker guard.
+Tests also cover same-inode repair with WAL recovery and retained pending work,
+interrupted cross-inode refusal, live-owner contention without journal mutation,
+unchanged unscanned/no-recovery behavior, and key cleanup after a controlled close
+failure. These fixtures do not claim physical cross-filesystem/power-loss testing.
+
+Parent checkpoint: **464 workspace tests** passed on Bun 1.4.4 and locked-nixpkgs
+Bun 1.4.2; workspace/tools types, 7 browser tests, CLI binary and default Nix build
+passed. The independent public legacy-WAL recovery probe also passed. The separate
+SDK security prerequisite is committed at `e039823`; its packaged fatal/normal Quit,
+privacy, authenticated loopback transport and navigation gates passed independently.
+Scoped codehygiene retained density advisories and intentional issue-reporting catches;
+its optional 0.6.1 update is available. No real credentials or physical power-loss
+validation is claimed.

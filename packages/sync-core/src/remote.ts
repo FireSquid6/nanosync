@@ -47,6 +47,7 @@ export interface RemoteOptions {
   journal?: ChunkJournal;
   retries?: number;
   signal?: AbortSignal;
+  beforeWork?: () => void | Promise<void>;
   onTransfer?: (direction: "upload" | "download", bytes: number) => void;
 }
 
@@ -188,6 +189,7 @@ export class HttpRemote {
   }
 
   private async request(path: string, init: RequestInit = {}, authenticated = true): Promise<Response> {
+    await this.options.beforeWork?.();
     const headers = new Headers(init.headers);
     if (authenticated) headers.set("authorization", `Bearer ${this.options.token}`);
     if (authenticated && this.options.vaultId) headers.set("x-nanosync-vault-id", this.options.vaultId);
@@ -346,6 +348,7 @@ export class HttpRemote {
     if (!(master instanceof Uint8Array) || master.byteLength !== 32) throw new Error("invalid master key");
     const stableMaster = master.slice(), stableReferences = references.map(reference => ({ ...reference }));
     for (const reference of stableReferences) {
+      await this.options.beforeWork?.();
       validateReference(reference);
       if (reference.objectType !== "chunk") throw new Error("expected chunk reference");
       let plaintext: Uint8Array | null = null;
@@ -437,22 +440,31 @@ export class HttpRemote {
       }
       batch = [];
     };
-    for await (const input of newChunks) {
-      const object: EncryptedObject = { frame: input.frame.slice(), reference: { ...input.reference } };
-      const ref = object.reference;
-      validateFrame(object.frame, ref, manifest.vaultId);
-      const reused = knownById.get(ref.objectId);
-      if (ref.objectType !== "chunk" || streamed.has(ref.objectId) ||
-          (reused ? !unavailable.has(ref.objectId) || !sameReference(reused, ref) : seen.has(ref.objectId)) ||
-          required.get(ref.objectId) !== ref.ciphertextLength - 96) throw new Error("duplicate, extra or mismatched chunk frame");
-      // The producer may supply an internally consistent checksum for a corrupt
-      // frame; authenticate GCM and the keyed plaintext chunk ID before publishing.
-      await decryptObject(object.frame, master, manifest.vaultId, ref);
-      if (!reused) { seen.add(ref.objectId); chunkReferences.push(ref); }
-      streamed.add(ref.objectId);
-      batch.push(object);
-      if (batch.length === batchSize) await flush();
-    }
+    const iterator = Symbol.asyncIterator in newChunks
+      ? newChunks[Symbol.asyncIterator]() : newChunks[Symbol.iterator]();
+    let exhausted = false;
+    try {
+      while (true) {
+        await this.options.beforeWork?.();
+        const next = await iterator.next();
+        if (next.done) { exhausted = true; break; }
+        const input = next.value;
+        const object: EncryptedObject = { frame: input.frame.slice(), reference: { ...input.reference } };
+        const ref = object.reference;
+        validateFrame(object.frame, ref, manifest.vaultId);
+        const reused = knownById.get(ref.objectId);
+        if (ref.objectType !== "chunk" || streamed.has(ref.objectId) ||
+            (reused ? !unavailable.has(ref.objectId) || !sameReference(reused, ref) : seen.has(ref.objectId)) ||
+            required.get(ref.objectId) !== ref.ciphertextLength - 96) throw new Error("duplicate, extra or mismatched chunk frame");
+        // The producer may supply an internally consistent checksum for a corrupt
+        // frame; authenticate GCM and the keyed plaintext chunk ID before publishing.
+        await decryptObject(object.frame, master, manifest.vaultId, ref);
+        if (!reused) { seen.add(ref.objectId); chunkReferences.push(ref); }
+        streamed.add(ref.objectId);
+        batch.push(object);
+        if (batch.length === batchSize) await flush();
+      }
+    } finally { if (!exhausted) await iterator.return?.(); }
     if (required.size !== seen.size) throw new Error("missing chunk frames");
     await flush();
     if (unavailable.size) throw new Error("reused chunk is absent remotely; provide its verified frame to repair it");

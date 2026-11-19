@@ -41,13 +41,13 @@ class Anchor {
   readonly stat: Stats;
   constructor(readonly path: string, expected?: HydrationIntent) {
     this.fd = openSync(path, dirFlags);
-    this.stat = fstatSync(this.fd);
-    if (!this.stat.isDirectory() || this.stat.uid !== process.getuid!() || this.stat.mode & 0o022 ||
-      expected && (String(this.stat.dev) !== expected.rootDevice || String(this.stat.ino) !== expected.rootInode)) {
-      closeSync(this.fd);
-      throw new Error("unsafe hydration root");
-    }
-    this.check();
+    try {
+      this.stat = fstatSync(this.fd);
+      if (!this.stat.isDirectory() || this.stat.uid !== process.getuid!() || this.stat.mode & 0o022 ||
+        expected && (String(this.stat.dev) !== expected.rootDevice || String(this.stat.ino) !== expected.rootInode))
+        throw new Error("unsafe hydration root");
+      this.check();
+    } catch (error) { closeSync(this.fd); throw error; }
   }
   check() {
     const st = lstatSync(this.path);
@@ -109,8 +109,9 @@ export async function hydrateFile(
   direction: "evict" | "download",
   path: string,
   existing?: HydrationIntent,
-  hooks: { beforeLink?: () => void; afterLink?: () => void } = {},
+  hooks: { beforeLink?: () => void; afterLink?: () => void; beforeWork?: () => void | Promise<void> } = {},
 ): Promise<{ path: string; hydration: "evicted" | "downloaded"; revisionId: string }> {
+  await hooks.beforeWork?.();
   if (new IgnoreRules(resolve(root)).ignores(path)) throw new Error("hydration target is locally ignored");
   const paths = manifestPaths(manifest), file = paths.get(path), localEntry = local.entries().find(entry => entry.path === path);
   if (!file || file.kind !== "file" || !localEntry || localEntry.id !== file.id || localEntry.fingerprint !== file.sha256 ||
@@ -148,6 +149,7 @@ export async function hydrateFile(
       throw new Error("hydration recovery context differs");
     if (direction === "evict") {
       if ((await remote.presence("chunk", [...new Set(references.map(ref => ref.objectId))])).size) throw new Error("cannot evict: remote ciphertext is missing");
+      await hooks.beforeWork?.(); anchor.check();
       anchor.parent(path, (target, fd, check) => {
         if (!at(target)) return; // Unlink completed before the previous process exited.
         verifyFile(anchor, path, file.size!, file.sha256!, file.executable!, intent);
@@ -155,6 +157,7 @@ export async function hydrateFile(
       });
       local.finishHydration(intent);
     } else {
+      await hooks.beforeWork?.(); anchor.check();
       const stage = stageName(intent), stagedPath = `/proc/self/fd/${anchor.fd}/${stage}`;
       const target = anchor.parent(path, name => at(name));
       if (target) {
@@ -177,6 +180,7 @@ export async function hydrateFile(
           try {
             const hash = createHash("sha256"); let size = 0, index = 0;
             for await (const bytes of remote.downloadChunks(references, master, manifest.vaultId)) {
+              await hooks.beforeWork?.(); anchor.check();
               if (bytes.length !== file.chunks![index++]?.length || bytes.length > CHUNK_SIZE) throw new Error("authenticated chunk length mismatch");
               hash.update(bytes); size += bytes.length;
               for (let offset = 0; offset < bytes.length;) { const written = writeSync(fd, bytes, offset, bytes.length - offset); if (!written) throw new Error("short download write"); offset += written; }
@@ -186,6 +190,7 @@ export async function hydrateFile(
           } catch (error) { closeSync(fd); unlinkSync(stagedPath); fsyncSync(anchor.fd); throw error; }
           closeSync(fd); fsyncSync(anchor.fd);
         }
+        await hooks.beforeWork?.(); anchor.check();
         anchor.parent(path, (name, fd, check) => {
           check(); if (at(name)) throw new Error("download target occupied");
           hooks.beforeLink?.();

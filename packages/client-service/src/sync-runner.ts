@@ -6,6 +6,10 @@ import { decryptManifest, HttpRemote, IntegrityError, RemoteError, mergeManifest
 import { parseDeviceId, parseVaultId, type RevisionEnvelope, type VisibleObjectReference } from "@nanosync/protocol";
 import { acquireSyncLock } from "./sync-lock.ts";
 import { privateDirectory } from "./security.ts";
+import { readObservation, writeObservation, statusError, type SyncObservation, type SyncPhase } from "./status.ts";
+import { observeSyncLock } from "./sync-lock.ts";
+import { ClientError } from "./errors.ts";
+import { setImmediate as yieldWork } from "node:timers/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { resolve, sep } from "node:path";
 
@@ -24,6 +28,10 @@ export interface SyncOptions {
   pollMs?: number;
   scan?: ScanOptions;
   onEvent?: (event: SyncEvent) => void;
+  beforeWork?: () => void | Promise<void>;
+  validateRoot?: () => void;
+  now?: () => number;
+  owner?: { origin: "cli" | "desktop"; instanceId: string };
 }
 
 function sameTree(a: ManifestV1, b: ManifestV1): boolean {
@@ -44,6 +52,9 @@ export class SyncRunner {
   private readonly unlock: () => void;
   private readonly onEvent: SyncOptions["onEvent"];
   private readonly transfers = { upload: { count: 0, bytes: 0 }, download: { count: 0, bytes: 0 } };
+  private checkpoints = 0;
+  private readonly options: SyncOptions;
+  private observation!: SyncObservation;
   private watcher?: LinuxWatcher;
   private active?: Promise<{ revisionId: string; sequence: number }>;
   private stopped = false;
@@ -51,6 +62,7 @@ export class SyncRunner {
   private readonly cancellation = new AbortController();
 
   private constructor(options: SyncOptions, unlock: () => void) {
+    this.options = options;
     this.unlock = unlock;
     this.onEvent = options.onEvent;
     this.vault = parseVaultId(options.vaultId);
@@ -61,21 +73,57 @@ export class SyncRunner {
     this.local = new ClientLocal(options.clientDirectory, this.vault, this.device);
     this.key = Uint8Array.from(options.masterKey);
     try {
-      this.scanner = new LinuxScanner(options.syncDirectory, this.local, options.scan);
+      // Legacy identity lookup needs the owned private journal recovered before any user-root work.
+      options.validateRoot?.();
+      this.scanner = new LinuxScanner(options.syncDirectory, this.local, { ...options.scan, beforeWork: () => this.beforeWork() });
+      const previous = readObservation(options.clientDirectory);
+      this.observation = { version: 1, observedAt: this.now(), phase: "idle", owner: options.owner ?? null,
+        lock: observeSyncLock(options.clientDirectory), progress: structuredClone(this.transfers), facts: this.local.statusFacts(),
+        verified: false, enginePhase: null, statusIssues: [], attentionError: previous?.attentionError ?? null, lastRemoteCheck: previous?.lastRemoteCheck ?? null, lastSuccess: previous?.lastSuccess ?? null, error: null };
+      this.record("idle");
       this.remote = new HttpRemote({ baseUrl: options.baseUrl, token: options.token, vaultId: this.vault,
+        beforeWork: () => this.beforeWork(),
         fetch: options.fetch ?? fetch, journal: this.local, signal: this.cancellation.signal,
         onTransfer: (direction, bytes) => {
           const total = this.transfers[direction];
           total.count++; total.bytes += bytes;
+          this.observation.enginePhase = "transferring";
+          this.record("syncing");
           if (total.count === 1 || total.count % 25 === 0) {
             this.onEvent?.({ type: 'transfer', direction, count: total.count, bytes: total.bytes });
           }
         } });
     } catch (error) {
-      this.local.close();
-      this.key.fill(0);
+      try { this.local.close(); } finally { this.key.fill(0); }
       throw error;
     }
+  }
+
+  private now() { return (this.options.now ?? Date.now)(); }
+  private record(phase: SyncPhase, error: string | null = null) {
+    this.observation.phase = phase;
+    if (phase !== "syncing") this.observation.enginePhase = null;
+    this.observation.observedAt = this.now();
+    this.observation.error = error;
+    if (["failed", "folder-unavailable", "credentials-locked"].includes(phase)) this.observation.attentionError = error;
+    if (phase === "idle" && this.observation.verified) this.observation.attentionError = null;
+    this.observation.progress = structuredClone(this.transfers);
+    this.observation.facts = this.local.statusFacts();
+    this.observation.statusIssues = [];
+    writeObservation(this.options.clientDirectory, this.observation);
+  }
+  private async beforeWork() {
+    // Bound synchronous checkpoint runs without delaying every HTTP round trip.
+    if (this.options.beforeWork && ++this.checkpoints % 16 === 0) await yieldWork();
+    this.cancellation.signal.throwIfAborted();
+    await this.options.beforeWork?.();
+    this.scanner.assertRoot();
+  }
+  private async head() {
+    const head = await this.remote.head();
+    this.observation.lastRemoteCheck = this.now();
+    this.record("syncing");
+    return head;
   }
 
   static start(options: SyncOptions): SyncRunner {
@@ -108,8 +156,12 @@ export class SyncRunner {
     if (this.stopped) return Promise.reject(new Error("sync runner stopped"));
     if (this.active) return this.active;
     const work = (async () => {
+      await this.beforeWork();
+      this.observation.verified = false;
       this.transfers.upload = { count: 0, bytes: 0 };
       this.transfers.download = { count: 0, bytes: 0 };
+      this.observation.enginePhase = "checking";
+      this.record("syncing");
       this.onEvent?.({ type: 'checking' });
       // A concurrent publisher may advance the head between the first pass and its
       // final observation. Retry a bounded number of times rather than claim success.
@@ -117,22 +169,51 @@ export class SyncRunner {
         await this.run();
         const applied = this.local.head("applied");
         if (!applied.revisionId) throw new Error("sync did not apply a head");
-        this.local.reconcileConflicts((await this.verified(applied.revisionId)).manifest);
-        const observed = await this.remote.head();
+        const appliedManifest = (await this.verified(applied.revisionId)).manifest;
+        this.local.reconcileConflicts(appliedManifest);
+        const observed = await this.head();
         this.local.recordHead("observed", observed);
         if (observed.revisionId === applied.revisionId && observed.sequence === applied.sequence &&
             this.local.head("accepted").revisionId === applied.revisionId && !this.local.proposal() &&
             !this.local.pendingApplies().length) {
+          await this.beforeWork();
+          const verification = await this.scanner.plan(appliedManifest, randomUUID(), this.device, this.key);
+          if (!sameTree(verification.manifest, appliedManifest)) continue;
           this.watcher?.refresh();
+          this.observation.lastSuccess = this.now();
+          this.observation.attentionError = null;
+          const facts = this.local.statusFacts();
+          this.observation.verified = facts.conflicts === 0 && Object.values(facts.pending).every(count => count === 0);
+          this.record("idle");
           this.onEvent?.({ type: 'complete' });
           return { revisionId: applied.revisionId, sequence: applied.sequence };
         }
       }
       throw new Error("remote head changed repeatedly during sync");
-    })();
+    })().catch(error => {
+      this.reportFailure(error);
+      throw error;
+    });
     this.active = work;
     void work.finally(() => { if (this.active === work) this.active = undefined; }).catch(() => {});
     return work;
+  }
+
+  private reportFailure(error: unknown) {
+    if (this.stopped) return;
+    this.observation.verified = false;
+    const code = statusError(error);
+    if (code === "SYNC_PAUSED") {
+      if (this.observation.phase !== "paused") {
+        this.record("paused"); this.onEvent?.({ type: "paused" });
+      }
+      return;
+    }
+    let phase: SyncPhase = "failed";
+    if (code === "FOLDER_UNAVAILABLE") phase = "folder-unavailable";
+    else if (error instanceof TypeError || error instanceof RemoteError &&
+      ["UNAVAILABLE", "RATE_LIMITED"].includes(error.code)) phase = "offline";
+    this.record(phase, code);
   }
 
   /** Foreground loop: watcher events are hints; periodic full passes catch missed notifications. */
@@ -147,21 +228,31 @@ export class SyncRunner {
       while (!signal.aborted && !this.stopped) {
         const now = timing.now();
         let shouldSync = now - lastPoll >= this.pollMs;
-        if (this.watcher) {
+        let canWork = true;
+        try { await this.beforeWork(); }
+        catch (error) {
+          if (signal.aborted || this.stopped) break;
+          canWork = false;
+          if (error instanceof ClientError && error.code === "SYNC_PAUSED") this.reportFailure(error);
+          else if (shouldSync) { lastPoll = now; this.reportFailure(error); onError(error); }
+        }
+        if (canWork && this.watcher) {
           try { shouldSync = this.watcher.ready(now) || shouldSync; }
           catch (error) { if (shouldSync) onError(error); }
         }
-        if (shouldSync) {
+        if (canWork && shouldSync) {
           lastPoll = timing.now();
           try {
             const head = await this.syncOnce();
             if (!signal.aborted && !this.stopped) {
-              if (!this.watcher) { this.watcher = new LinuxWatcher(this.scanner); this.watcher.start(); }
+              if (!this.watcher) { this.watcher = new LinuxWatcher(this.scanner, {}, () => {
+                if (!this.stopped) { this.observation.verified = false; this.record(this.observation.phase); }
+              }); this.watcher.start(); }
               onSuccess(head);
             }
           } catch (error) {
             if (signal.aborted || this.stopped) break;
-            onError(error);
+            if (!(error instanceof ClientError && error.code === "SYNC_PAUSED")) onError(error);
             if (error instanceof RemoteError && error.code === "VAULT_DELETED") {
               this.watcher?.close();
               throw error;
@@ -189,7 +280,7 @@ export class SyncRunner {
     const hydration = this.local.pendingHydration();
     if (!hydration) return;
     await this.remote.capabilities();
-    const head = this.local.head("applied"), remoteHead = await this.remote.head();
+    const head = this.local.head("applied"), remoteHead = await this.head();
     if (head.revisionId !== hydration.revision || head.sequence !== hydration.sequence ||
         this.local.head("accepted").revisionId !== hydration.revision ||
         remoteHead.sequence < hydration.sequence || remoteHead.sequence === hydration.sequence && remoteHead.revisionId !== hydration.revision)
@@ -203,7 +294,7 @@ export class SyncRunner {
       await this.remotePath(verified, current);
     }
     await hydrateFile(this.scanner.root, this.local, this.remote, verified.manifest, verified.revision, this.key, hydration.direction,
-      this.local.entry(hydration.entryId)?.path ?? "", hydration);
+      this.local.entry(hydration.entryId)?.path ?? "", hydration, { beforeWork: () => this.beforeWork() });
   }
   private async replay(): Promise<{ stale: Verified | null; local: Verified | null }> {
     const proposal = this.local.proposal();
@@ -264,6 +355,7 @@ export class SyncRunner {
   private async finishLocal(plan: ScanPlan, verified: Verified) {
     const head = this.local.head("accepted");
     if (head.revisionId !== verified.manifest.revisionId || head.sequence !== verified.sequence) throw new Error("local revision was not accepted");
+    await this.beforeWork();
     plan.commit();
     this.local.recordHead("applied", head);
     if (this.local.proposal()?.state === "accepted") this.local.clearProposal();
@@ -380,13 +472,13 @@ export class SyncRunner {
   private async run(): Promise<void> {
     await this.remote.capabilities();
     // Check availability before replaying journals or applying local filesystem work.
-    await this.remote.head();
+    await this.head();
     await this.recoverHydration();
     // A partially applied filesystem is never scanned or overwritten.
     for (const pending of this.local.pendingApplies()) {
       const verified = await this.verified(pending.revision);
       if (verified.sequence !== pending.sequence) throw new Error("apply sequence mismatch");
-      await applyNewFiles(this.scanner.root, this.local, this.remote, verified.manifest, pending.sequence, this.key);
+      await applyNewFiles(this.scanner.root, this.local, this.remote, verified.manifest, pending.sequence, this.key, { beforeWork: () => this.beforeWork() });
     }
     let { stale, local: proposed } = await this.replay();
     const applied = this.local.head("applied");
@@ -407,10 +499,10 @@ export class SyncRunner {
         if (!sameTree(scan.manifest, original.manifest)) throw new Error("local edits changed after frozen proposal");
         if (!committed) scan.commit();
         if (!proposed || stale) {
-          const head = stale ?? await this.verified((await this.remote.head()).revisionId!);
+          const head = stale ?? await this.verified((await this.head()).revisionId!);
           proposed = await this.reconcile(originalBase, original, head);
         }
-        await applyNewFiles(this.scanner.root, this.local, this.remote, proposed.manifest, proposed.sequence!, this.key);
+        await applyNewFiles(this.scanner.root, this.local, this.remote, proposed.manifest, proposed.sequence!, this.key, { beforeWork: () => this.beforeWork() });
         this.local.finishReconciliation();
       }
       return this.run();
@@ -418,7 +510,7 @@ export class SyncRunner {
     const restore = this.local.restoreProposal();
     if (restore && proposed && !stale) {
       if (base?.manifest.revisionId !== restore.baseRevision && applied.revisionId !== restore.revision) throw new Error("restore base changed during recovery");
-      if (applied.revisionId !== restore.revision) await applyNewFiles(this.scanner.root, this.local, this.remote, proposed.manifest, proposed.sequence!, this.key);
+      if (applied.revisionId !== restore.revision) await applyNewFiles(this.scanner.root, this.local, this.remote, proposed.manifest, proposed.sequence!, this.key, { beforeWork: () => this.beforeWork() });
       this.local.finishRestoreProposal(); proposed = null;
     }
     if (proposed && !stale && this.local.proposal()?.state === "accepted" && base) {
@@ -443,12 +535,12 @@ export class SyncRunner {
         }
         if (!matched) throw new Error("local branch changed before merge apply");
         const sequence = this.local.head("accepted").sequence;
-        await applyNewFiles(this.scanner.root, this.local, this.remote, proposed.manifest, sequence, this.key);
+        await applyNewFiles(this.scanner.root, this.local, this.remote, proposed.manifest, sequence, this.key, { beforeWork: () => this.beforeWork() });
         this.local.clearProposal();
       }
       proposed = null;
     }
-    const head = await this.remote.head();
+    const head = await this.head();
     this.local.recordHead("observed", head);
     if (!head.revisionId) throw new Error("server has no genesis revision");
     const current = await this.verified(head.revisionId);
@@ -474,19 +566,21 @@ export class SyncRunner {
          return this.run();
       }
       this.local.recordHead("accepted", head);
-      await applyNewFiles(this.scanner.root, this.local, this.remote, current.manifest, head.sequence, this.key);
+      await applyNewFiles(this.scanner.root, this.local, this.remote, current.manifest, head.sequence, this.key, { beforeWork: () => this.beforeWork() });
       return;
     }
     const prior = await this.verified(latest.revisionId);
     if (prior.sequence !== latest.sequence) throw new Error("applied revision sequence mismatch");
     if (head.revisionId !== latest.revisionId) await this.remotePath(prior, current);
     else if (head.sequence !== latest.sequence) throw new Error("applied head sequence changed");
+    this.observation.enginePhase = 'scanning';
+    this.record('syncing');
     this.onEvent?.({ type: 'scanning' });
     const scan = await this.scanner.plan(prior.manifest, randomUUID(), this.device, this.key);
     if (sameTree(scan.manifest, prior.manifest)) {
       if (head.sequence > latest.sequence) {
         this.local.recordHead("accepted", head);
-        await applyNewFiles(this.scanner.root, this.local, this.remote, current.manifest, head.sequence, this.key);
+        await applyNewFiles(this.scanner.root, this.local, this.remote, current.manifest, head.sequence, this.key, { beforeWork: () => this.beforeWork() });
       }
       return;
     }

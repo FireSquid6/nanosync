@@ -339,3 +339,23 @@ test('host close drains accepted results and cancels incomplete authenticated re
     expect(existsSync(info.directory)).toBe(false);
   } finally { controller.abort(); await pending; }
 });
+
+test('authenticated forwarded one-shot and active owner share durable pause flags', async () => {
+  const { setPaused, clientStatus } = await import('../src/index.ts');
+  const { root, files, replica } = fixture();
+  const owner = await open(root, files, 'desktop');
+  const attached = await open(root, files, 'cli');
+  const binding = replica.split('/').at(-1)!;
+  setPaused(root, { binding }, true);
+  setPaused(root, { all: true }, true);
+  setPaused(root, { all: true }, false);
+  await expect(owner.syncOnce()).rejects.toMatchObject({ code: 'SYNC_PAUSED', exitCode: 2 });
+  await expect(attached.syncOnce()).rejects.toMatchObject({ code: 'SYNC_PAUSED', exitCode: 2 });
+  const status = clientStatus(root, files).bindings[0]!;
+  expect(status.pause).toEqual({ global: false, binding: true, effective: true });
+  expect(status.phase).toBe('paused');
+  expect(status.error).toBeNull();
+  expect(status.owner).toEqual(owner.owner);
+  await attached.close(); await owner.close();
+  expect(clientStatus(root, files).bindings[0]!.upToDate).toBe(false);
+});

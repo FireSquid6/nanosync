@@ -33,6 +33,7 @@ export function syncEvent(presentation: CliOutput, event: SyncEvent, watch: bool
   switch (event.type) {
     case 'checking': message = 'Connecting to server and checking sync state...'; break;
     case 'scanning': message = 'Scanning local files for changes...'; break;
+    case 'paused': message = 'Sync paused; waiting for resume.'; break;
     case 'complete': message = 'Sync complete.'; break;
     case 'transfer': {
       const verb = event.direction === 'download' ? 'Downloaded' : 'Uploaded';

@@ -207,3 +207,96 @@ or duplicated entries elsewhere. No forensic erasure from media/backups is promi
 Desktop trusted code can initialize OS mode explicitly; opening file mode returns a
 decision-required result (leave unchanged/use CLI, or explicitly migrate the root).
 No desktop onboarding UI is implemented in this step.
+
+## Shared status and durable pauses
+
+```sh
+nanosync client status --client-dir ~/.nanosync
+nanosync client status --path /absolute/folder --json
+nanosync client pause --all
+nanosync client pause --path /absolute/folder
+nanosync client resume --all
+nanosync client resume --path /absolute/folder
+```
+
+Pause/resume require **exactly one** target, `--all` or `--path`. Global and folder
+flags are independent and durable; global resume does not clear folder pauses.
+Saving a pause acknowledges intent, not completion of an in-flight operation.
+Status reports `pausing` until an active owner reaches a checkpoint, then `paused`.
+Already-started bounded ciphertext requests and atomic filesystem operations finish
+safely; no next request/retry, cached chunk, publication producer step, scan, or apply
+mutation starts past the paused checkpoint. Interrupted apply/hydration/proposal and
+reconciliation intents remain recovery barriers, including after restart.
+
+An explicit one-shot sync respects pauses (`SYNC_PAUSED`, local exit **2**), including
+when forwarded to another owner. A foreground watch remains attached and retries on
+its normal polling schedule after resume; pause is progress, not a sync failure.
+Pause does not stop the owner or release its lock. Shutdown cancellation remains
+separate. No desktop, daemon, display, or unlocked credential store is needed to
+inspect status or change pause flags. A settings-only root has **uninitialized**
+credential mode; it has not implicitly selected protected-file storage. Connect
+still transfers nothing; these commands do not enable automatic or continuous work.
+
+New commands use the existing version-1 JSON envelope and normal success code.
+Pause/resume data is `{version:1,revision,globalPaused,bindingPaused}`. Service callers
+can pass an expected settings revision to `setPaused`; stale edits fail with
+`CONFLICT` and must refresh/retry. Updates serialize separately from credential
+operations, reread current settings, atomically replace and fsync before returning.
+
+Status data is `{settingsRevision,globalPaused,observedAt,bindings}`. Each binding has
+its existing identity/path, `owner` (origin/instance), `ownerPresent`, independent
+`pause` causes/effective flag, `phase`, `enginePhase`, `freshness`, `progressUnit`,
+`progress`, `facts`, `upToDate`, `attentionRequired`, safe `error` code, `statusIssues`,
+`observationTime`, `lastRemoteCheck`, and `lastSuccessfulSync`. Progress is completed
+ciphertext-frame counts/bytes **for the latest pass**, not plaintext, partial stream
+bytes, or a percentage. Cache reads do not count as network transfers. Totals are
+unknown. Stale progress is historical, not evidence of active work.
+
+`facts` is null for an uninitialized journal; otherwise it contains observed,
+accepted and applied heads, unresolved conflict count, recorded root identity, and
+pending operation/transfer/apply/hydration/proposal/restore/reconciliation counts.
+Counts reflect durable journal work, not a complete estimate of future transfers.
+No raw SQL, plans, file inventory/content or credentials are returned. A bad journal,
+unsafe owner record, or malformed saved observation affects only that binding.
+`statusIssues` contains allowlisted codes, fixed safe messages, retryability and
+recovery actions; normal snapshot races are retryable unknown observations, while
+corruption/unsafe state/recovery-required journals require attention. Other folders
+remain visible. Missing facts never imply up to date. Malformed settings instead
+produce a safe global `SETTINGS_INVALID` error (local exit 2), since pause intent
+cannot then be trusted. JSON/native error text is not echoed. Passive status
+uses a checked noncreating/nonmigrating read-only SQLite snapshot, not the normal
+writer constructor. Schema, migration/replica identity and fact shapes are checked on each poll; full
+integrity/foreign-key scans remain at owner startup, not every dashboard read.
+Live WAL snapshots use SQLite locking and existing sidecars;
+closed journals use an explicitly read-only URI without creating WAL/SHM, rejecting
+concurrent file/WAL changes. Missing sidecars requiring recovery fail closed; start
+an owner to recover, rather than deleting/resetting the journal.
+
+**Up to date** requires a completed verified observation, matching checked/applied
+heads, no pending work/recovery, no conflicts and a matching live owner. Completion
+with preserved conflict copies is not up to date. Observed local changes invalidate
+it; a stopped/dead owner makes observations stale/unknown. It never proves absence
+of edits or remote changes after observation. Last success is persisted separately
+and survives pause, error, close and restart; merely opening status does not update it.
+Errors remain allowlisted codes, not raw remote response bodies. Brief offline work
+and pause do not by themselves require attention; conflicts and actionable failures do.
+
+Missing/replaced roots report `folder-unavailable` (`FOLDER_UNAVAILABLE`, local exit
+**2**). Status can select their original saved path. Retry with `client sync` only
+after restoring the original owned directory/marker; Nanosync does not recreate it
+or scan its absence as an empty tree. New bindings save device/inode identity at
+connect. Scanned legacy bindings reuse journal identity. Never-scanned legacy
+bindings have no historical inode to verify: only explicit validated first start,
+under the replica lock, establishes their identity. A pre-upgrade replacement with
+a copied original marker cannot be distinguished retrospectively. Explicit repair
+remains the authority for deliberate moves/copies. For a scanned replica, library
+`repairConnection(..., 'move')` requires the original filesystem identity (a rename,
+not a copied/cross-filesystem tree). It holds replica ownership and refuses a changed
+root before publishing repair. `MOVE_REQUIRES_COPY` recommends independent copy repair
+for a clean replica; `MOVE_RECOVERY_REQUIRED` requires restoring/inspecting interrupted
+state rather than silently discarding it. Same-inode renames retain pending recovery;
+unscanned copies with no recovery/history can still be selected explicitly. No
+journal reindexing or automatic abandonment is performed. Force disconnect preserves files
+and remains subject to ownership locks; the later removal-recovery upgrade is not
+part of these commands. Stop old executables before upgrading: older owners cannot
+be made to honor the new pause settings.

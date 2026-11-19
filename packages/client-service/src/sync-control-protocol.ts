@@ -17,6 +17,8 @@ export type Outcome = {
   head: Head | null; events: SyncEvent[]; error: { code: string; exitCode: number } | null;
 };
 const LOCAL_ERRORS = {
+  SYNC_PAUSED: 'Sync paused; resume this folder or global syncing before retrying.',
+  FOLDER_UNAVAILABLE: 'Folder unavailable; restore its original path and marker, then retry.',
   OWNER_UNAVAILABLE: 'Sync owner unavailable; stop it and retry with a compatible client.',
   OWNER_TEMPORARY: 'A temporary sync owns this folder; retry watch after it finishes or start continuous sync in its owner.',
   OWNER_STOPPED: 'Sync owner stopped; explicitly start syncing again.',
@@ -44,7 +46,7 @@ export function event(value: unknown): SyncEvent {
       throw failure('OWNER_UNAVAILABLE');
   } else {
     const phase = object(value, ['type']);
-    if (!['checking', 'scanning', 'complete'].includes(phase.type as string))
+    if (!['checking', 'scanning', 'complete', 'paused'].includes(phase.type as string))
       throw failure('OWNER_UNAVAILABLE');
   }
   return value as SyncEvent;

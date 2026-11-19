@@ -18,7 +18,7 @@ test("a racing destination is never overwritten; a two-link interruption replays
   const manifest: ManifestV1 = { version: 1, vaultId: vault, revisionId: revision, parents: [], creatingDeviceId: device,
     entries: [{ id: rootId, parentId: null, name: "", kind: "directory" },
       { id: fileId, parentId: rootId, name: "empty.txt", kind: "file", size: 0, sha256: empty, executable: false, chunks: [] }] };
-  const local = new ClientLocal(privateDir, vault, device);
+  let local = new ClientLocal(privateDir, vault, device);
   try {
     const head = { revisionId: revision, sequence: 1 };
     local.recordHead("observed", head); local.recordHead("accepted", head); local.recordHead("applied", head);
@@ -27,8 +27,16 @@ test("a racing destination is never overwritten; a two-link interruption replays
       { id: fileId, path: "empty.txt", kind: "file", fingerprint: empty, hydration: "evicted", revision }],
       [{ entryId: rootId, device: String(stat.dev), inode: String(stat.ino) }]);
     const remote = { async *downloadChunks() {}, async presence() { return new Set<string>(); } } as unknown as HttpRemote;
+    const paused = new Error("paused");
+    await expect(hydrateFile(sync, local, remote, manifest, { references: [] }, new Uint8Array(32), "download", "empty.txt", undefined, {
+      beforeWork() { if (readdirSync(sync).some(name => name.startsWith(".nanosync-hydrate-"))) throw paused; },
+    })).rejects.toBe(paused);
+    expect(readdirSync(sync).some(name => name === "empty.txt")).toBe(false);
+    const saved = local.pendingHydration()!;
+    local.close(); local = new ClientLocal(privateDir, vault, device);
+    expect(local.pendingHydration()).toEqual(saved);
     const args = [sync, local, remote, manifest, { references: [] }, new Uint8Array(32), "download", "empty.txt"] as const;
-    await expect(hydrateFile(...args, undefined, { beforeLink: () => writeFileSync(join(sync, "empty.txt"), "user data") }))
+    await expect(hydrateFile(...args, saved, { beforeLink: () => writeFileSync(join(sync, "empty.txt"), "user data") }))
       .rejects.toThrow(/EEXIST/);
     expect(readFileSync(join(sync, "empty.txt"), "utf8")).toBe("user data");
     const intent = local.pendingHydration()!;
@@ -43,5 +51,13 @@ test("a racing destination is never overwritten; a two-link interruption replays
     expect(local.entry(fileId)?.hydration).toBe("downloaded");
     expect(readdirSync(sync)).toEqual(["empty.txt"]);
     expect(local.head("applied")).toEqual(head);
+    const evict = [sync, local, remote, manifest, { references: [] }, new Uint8Array(32), "evict", "empty.txt"] as const;
+    await expect(hydrateFile(...evict, undefined, {
+      beforeWork() { if (local.pendingHydration()) throw paused; },
+    })).rejects.toBe(paused);
+    expect(readFileSync(join(sync, "empty.txt")).length).toBe(0);
+    await hydrateFile(...evict, local.pendingHydration()!);
+    expect(local.pendingHydration()).toBeNull();
+    expect(readdirSync(sync)).toEqual([]);
   } finally { local.close(); }
 });

@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import {
+  clientStatus, setPaused, selectSavedBinding,
   baseUrl, privateDirectory, secureCreate, secureRead, openBoundSync, listRemoteVaults,
   resolveRemoteVault, connectRegisteredVault, discoverConnection, records,
   disconnectConnections, removeServerConnection, enrollServer, key, keyWritePending, server as storedServer,
@@ -263,6 +264,18 @@ async function execute(args: string[], presentation: CliOutput): Promise<number>
       if (opts(command).force) output().warning('Disconnect discards pending synchronization state. Local files and remote data are preserved.');
       disconnectConnections(dir, [binding], !!opts(command).force); result = {connectionId:binding.connectionId, disconnected:true, filesPreserved:true};
     });
+    flags(client.command('status'), ...clientFlags, ...common, '--path <directory>').action(async (_o, command) => {
+      result = clientStatus(root(command), opts(command).path);
+    });
+    for (const action of ['pause', 'resume']) {
+      flags(client.command(action), ...clientFlags, ...common, '--all', '--path <directory>').action(async (_o, command) => {
+        const o = opts(command);
+        if (!o.all && !o.path) throw new CliError('INPUT_REQUIRED', 'Choose exactly one of --all or --path <directory>.');
+        if (o.all && o.path) throw new CliError('INVALID_INPUT', 'Choose exactly one of --all or --path <directory>.');
+        const target = o.all ? { all: true as const } : { binding: selectSavedBinding(root(command), o.path).connectionId };
+        result = setPaused(root(command), target, action === 'pause');
+      });
+    }
     flags(client.command('sync'), ...clientFlags, ...common, '--path <directory>', '--watch').action(async (_o, command) => {
       const runner = await openBoundSync(root(command), opts(command).path ?? process.cwd(), {
         origin: 'cli', instanceId: crypto.randomUUID(),

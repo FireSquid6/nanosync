@@ -10,3 +10,28 @@ The local journal is not rollback-proof against replacement by an older private-
 # Ignore state
 
 Migration 6 adds a durable per-entry ignored marker. The Linux scanner sets it before inspecting a newly excluded tree, and only clears it when a successfully published scan has verified the included entry again. This prevents a missing previously ignored entry from becoming a deletion when a device removes its local ignore rule. Earlier migration checksums remain unchanged.
+
+### Read-only status facts
+
+`ClientLocal.statusFacts()` aggregates heads, pending work/recovery counts, open
+conflicts and recorded root identity in one read transaction. It does not infer
+successful synchronization or treat conflicts as resolved.
+
+`ClientLocal.readStatus(directory, vaultId, deviceId)` returns those facts or null
+for absent state. It never constructs the writer, creates a journal, migrates,
+repairs cache or initializes identity. It validates private files/sidecars, schema
+and migration history, replica identity, and every returned fact shape. Full integrity
+and foreign-key checks run when the owning writer opens, not on every passive poll.
+This is an aggregate observation, not a full-database corruption audit. Live WAL reads see committed
+WAL data through an actual readonly SQLite connection with existing SHM. A closed
+WAL-mode database would otherwise create sidecars even with `{readonly:true}`;
+this branch uses `SQLITE_OPEN_READONLY | SQLITE_OPEN_URI` and `immutable=1` **only
+without WAL**, checking base identity/size/nanosecond timestamps and WAL absence
+afterwards to fail closed on a racing writer/checkpoint. Both branches are tested
+on Bun 1.4.4 and the project Nix Bun 1.4.2. No immutable connection reads live WAL.
+Unsupported schemas or recovery-required sidecars are errors, not empty state.
+`StatusReadError` has safe fixed codes/messages: `STATUS_RACE` requests a refresh;
+`JOURNAL_RECOVERY_REQUIRED` requests owner recovery; `JOURNAL_INVALID` requests
+inspection/restoration. WAL/SHM identity changes during close/open are retryable
+unknown observations, never evidence of a clean pass. `parseStatusFacts` shares
+the same strict nested shape validation with saved service observations.

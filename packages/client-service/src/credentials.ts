@@ -1,3 +1,4 @@
+import { SETTINGS, SETTINGS_LOCK, readSettings, validateSettingsStage, settingsStage } from './settings.ts';
 import { isDeepStrictEqual } from 'node:util';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID, createHash } from 'node:crypto';
@@ -218,9 +219,13 @@ export function credentialStatus(directory: string) {
       'replicas',
       'registry-lock',
       'credential-operation',
+      SETTINGS, SETTINGS_LOCK,
     ];
-    if (readdirSync(root).some((name) => !allowed.includes(name)))
+    for (const name of readdirSync(root).filter(name => settingsStage.test(name))) validateSettingsStage(join(root, name));
+    if (readdirSync(root).some((name) => !allowed.includes(name) && !settingsStage.test(name)))
       stateInvalid('Unrecognized or incomplete client state; do not initialize as empty');
+    readSettings(root);
+    if (existsSync(join(root, SETTINGS_LOCK))) privateDirectory(join(root, SETTINGS_LOCK));
     for (const leaf of ['connections', 'replicas']) {
       const directory = join(root, leaf);
       if (!existsSync(directory)) continue;

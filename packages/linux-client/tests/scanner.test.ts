@@ -292,3 +292,12 @@ test("cache stamps do not round away nanosecond-only timestamp changes", async (
     }
   } finally { local.close(); }
 });
+
+test('scanner pins its original root across calls instead of accepting a replacement', () => {
+  const { folder, local, scanner } = setup();
+  renameSync(folder, folder + '-original');
+  mkdirSync(folder, { mode: 0o700 });
+  expect(() => scanner.snapshot()).toThrow(/root/);
+  rmSync(folder, { recursive: true }); renameSync(folder + '-original', folder);
+  local.close();
+});

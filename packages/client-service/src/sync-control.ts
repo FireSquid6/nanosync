@@ -165,8 +165,9 @@ function attached(target: Target, options: BoundSyncOptions): BoundSyncSession {
         } catch (error) {
           if (combined.aborted) break;
           // Never promote on stop, disconnect or an unknown outcome.
-          if (!(error instanceof Error) || !('exitCode' in error) || error.exitCode !== 5) throw error;
-          onError(error);
+          if (!(error instanceof Error) || !('exitCode' in error) ||
+              error.exitCode !== 5 && !('code' in error && error.code === 'SYNC_PAUSED')) throw error;
+          if (!('code' in error && error.code === 'SYNC_PAUSED')) onError(error);
           if ('code' in error && error.code === 'VAULT_DELETED') throw error;
         }
         try { await delay(5000, undefined, { signal: combined }); }
@@ -186,7 +187,7 @@ export async function openBoundSync(
     throw failure('OWNER_UNAVAILABLE');
   const selected = await withCredentialRegistry(root, async () => {
     root = privateDirectory(root);
-    const binding = discoverConnection(root, from);
+    const binding = discoverConnection(root, from, true);
     const replica = privateDirectory(join(privateDirectory(join(root, 'replicas')), binding.connectionId));
     const lock = observeSyncLock(replica);
     if (lock?.live) {
@@ -195,7 +196,7 @@ export async function openBoundSync(
     }
     const events = new Set<(event: SyncEvent) => void>();
     let lastEvent: SyncEvent | undefined;
-    const runner = await startBoundSync(root, from, { ...options, onEvent(event) {
+    const runner = await startBoundSync(root, from, { ...options, owner: { origin: options.origin, instanceId: options.instanceId }, onEvent(event) {
       lastEvent = event;
       options.onEvent?.(event);
       for (const listener of events) listener(event);
@@ -349,7 +350,7 @@ export async function stopOwnedSync(instanceId: string): Promise<void> {
 export async function stopBoundSyncForRemoval(root: string, from: string): Promise<void> {
   const target = await withCredentialRegistry(root, async () => {
     root = privateDirectory(root);
-    const binding = discoverConnection(root, from);
+    const binding = discoverConnection(root, from, true);
     const replica = privateDirectory(join(privateDirectory(join(root, 'replicas')), binding.connectionId));
     const lock = observeSyncLock(replica);
     if (!lock?.live) return null;
@@ -359,7 +360,7 @@ export async function stopBoundSyncForRemoval(root: string, from: string): Promi
     const value = object(await send(target, 'stop-for-removal'), ['stopped']);
     if (value.stopped !== true) throw failure('OWNER_UNAVAILABLE');
     await withCredentialRegistry(root, async () => {
-      const binding = discoverConnection(root, from), identity = lstatSync(root);
+      const binding = discoverConnection(root, from, true), identity = lstatSync(root);
       if (binding.connectionId !== target.metadata.binding ||
           identity.dev !== target.metadata.rootDev || identity.ino !== target.metadata.rootIno)
         throw failure('OWNER_UNAVAILABLE');
