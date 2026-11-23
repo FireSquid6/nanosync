@@ -111,9 +111,10 @@ export function createConnection(globalDirectory: string, destination: string, s
 }
 
 /** Client adapter: revalidate the selected server while mutation is serialized with removal. */
-export function connectRegisteredVault(globalDirectory: string, destination: string, serverId: string, vaultId: string, deviceId: string, confirmNonempty = false): Connection {
+export function connectRegisteredVault(globalDirectory: string, destination: string, serverId: string, vaultId: string, deviceId: string, confirmNonempty = false, validate?: () => void): Connection {
   return withConnectionRegistry(globalDirectory, () => {
     assertNotRemoving(globalDirectory, serverId);
+    validate?.();
     const saved = JSON.parse(secureRead(join(globalDirectory, 'servers', `${parseVaultId(serverId)}.json`)).toString('utf8'));
     if (saved.serverId !== serverId || saved.deviceId !== deviceId) throw new Error('server connection changed; select it again');
     return createLocked(globalDirectory, destination, serverId, vaultId, deviceId, confirmNonempty);

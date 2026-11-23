@@ -46,6 +46,12 @@ export function credentialRemoval(root: string, id: string, store: CredentialSto
         store.delete(storeId(root, id));
         if (store.get(storeId(root, id)) !== null) throw new CredentialStoreError();
       }
+      const pending = join(root, 'desktop-pending', `${id}.json`);
+      if (os && existsSync(pending)) {
+        privateDirectory(join(root,'desktop-pending'));
+        if (JSON.parse(secureRead(pending,8192).toString()).id !== id) throw new Error('invalid desktop enrollment identity');
+        unlinkSync(pending); syncPrivateDirectory(join(root,'desktop-pending'));
+      }
       if (existsSync(path)) { unlinkSync(path); syncPrivateDirectory(join(root, "servers")); }
       if (os) { unlinkSync(journal); syncPrivateDirectory(removalDirectory(root)); }
     },

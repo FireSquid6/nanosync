@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, unlinkSync } from "node:fs";
+import { timingSafeEqual } from 'node:crypto';
 import { join } from "node:path";
-import { parseDeviceId, parseVaultId } from "@nanosync/protocol";
+import { parseAuthToken, parseDeviceId, parseVaultId } from "@nanosync/protocol";
 import { baseUrl } from "./url.ts";
 import { inspectSyncOwner } from "./sync-lock.ts";
 import { storeId, assertNotRemoving } from "./credential-state.ts";
@@ -8,8 +9,8 @@ import { privateDirectory, secureRead, secureCreate, secureReplace, syncPrivateD
 import { records, withConnectionRegistry } from "./connections.ts";
 import { CredentialStoreError, defaultCredentialStore, type CredentialStore } from "./credential-store.ts";
 
-export interface ServerRegistration { version: 1; serverId: string; baseUrl: string; deviceId: string; name: string; token: string }
-export interface ServerMetadata { serverId: string; baseUrl: string; deviceId: string; name: string; credentialMode: "protected-file" | "os"; migrationPending?: boolean }
+export interface ServerRegistration { version: 1; serverId: string; baseUrl: string; deviceId: string; name: string; token: string; deviceName?: string }
+export interface ServerMetadata { serverId: string; baseUrl: string; deviceId: string; name: string; credentialMode: "protected-file" | "os"; migrationPending?: boolean; deviceName?: string }
 type OsRegistration = Omit<ServerRegistration, "version" | "token"> & { version: 2; credentialMode: "os" };
 type Registration = ServerRegistration | OsRegistration;
 interface VaultKey { version: 1; serverId: string; vaultId: string; masterKey: string }
@@ -26,7 +27,7 @@ function registrations(root: string): Registration[] {
     if (!value || value.serverId !== file.slice(0, -5) || typeof value.name !== "string" || baseUrl(value.baseUrl) !== value.baseUrl)
       throw new Error("invalid server registration");
     if (value.version === 1 && typeof value.token === "string") return value;
-    if (value.version !== 2 || value.credentialMode !== "os" || Object.keys(value).sort().join() !== "baseUrl,credentialMode,deviceId,name,serverId,version")
+    if (value.version !== 2 || value.credentialMode !== "os" || Object.keys(value).sort().join() !== (value.deviceName === undefined ? "baseUrl,credentialMode,deviceId,name,serverId,version" : "baseUrl,credentialMode,deviceId,deviceName,name,serverId,version") || value.deviceName !== undefined && typeof value.deviceName !== 'string')
       throw new Error("invalid server registration");
     parseDeviceId(value.deviceId); parseVaultId(value.serverId);
     return value;
@@ -41,6 +42,7 @@ function selected(root: string, choice?: string): Registration {
 export function listServerMetadata(root: string): ServerMetadata[] {
   return registrations(root).map(info => ({ serverId: info.serverId, baseUrl: info.baseUrl, deviceId: info.deviceId, name: info.name,
     credentialMode: info.version === 1 ? "protected-file" : "os",
+    ...(info.deviceName === undefined ? {} : {deviceName:info.deviceName}),
     ...(existsSync(journalPath(root, info.serverId)) ? { migrationPending: true } : {}) }));
 }
 function assertReady(root: string, id: string): void {
@@ -93,18 +95,22 @@ export function key(root: string, serverId: string, vaultId: string, store: Cred
   const value = readSecrets(root, serverId, store).keys[vaultId];
   return value ? Buffer.from(value, "hex") : null;
 }
-export function saveKey(root: string, info: ServerRegistration, vaultId: string, master: Uint8Array, store: CredentialStore = defaultCredentialStore): void {
+export function saveKey(root: string, info: ServerRegistration, vaultId: string, master: Uint8Array, store: CredentialStore = defaultCredentialStore, requireOs = false): void {
   parseVaultId(vaultId);
   if (master.length !== 32) throw new Error("invalid vault key");
   withConnectionRegistry(root, () => {
     assertReady(root, info.serverId);
+    const saved = selected(root, info.serverId);
+    if (requireOs && saved.version !== 2) throw new CredentialStoreError();
+    const resolved = resolveRegistration(root,saved,store);
+    if (resolved.deviceId !== info.deviceId || resolved.baseUrl !== info.baseUrl || resolved.name !== info.name || resolved.token !== info.token) throw new Error('server connection changed; select it again');
     const current = key(root, info.serverId, vaultId, store);
     if (current) {
-      if (!Buffer.from(current).equals(Buffer.from(master))) throw new Error("vault key differs from stored key");
+      try { if (!timingSafeEqual(current, master)) throw new Error("vault key differs from stored key"); }
+      finally { current.fill(0); }
       return;
     }
-    const saved = selected(root, info.serverId);
-    const hex = Buffer.from(master).toString("hex");
+    const hex = Buffer.from(master.buffer, master.byteOffset, master.byteLength).toString("hex");
     if (saved.version === 2) {
       const secrets = readSecrets(root, info.serverId, store); secrets.keys[vaultId] = hex;
       writeSecrets(root, info.serverId, secrets, store);
@@ -163,5 +169,39 @@ export function migrateCredentials(root: string, serverId: string, store: Creden
 }
 export function connectionSummary(info: Pick<ServerRegistration, "serverId" | "name" | "baseUrl" | "deviceId">) {
   return { serverId: info.serverId, alias: info.name, url: info.baseUrl, deviceId: info.deviceId, status: "approved" };
+}
+/** Pending desktop credentials use the final ID, so approval never duplicates a secret. Caller holds registry guard. */
+export function enrollmentToken(root: string, id: string, store: CredentialStore, token?: string): string | null {
+  parseVaultId(id); assertNotRemoving(root, id);
+  const existing = store.get(storeId(root, id));
+  if (existing !== null) {
+    const saved = readSecrets(root, id, store);
+    parseAuthToken(saved.token);
+    if (token && token !== saved.token) throw new Error('Enrollment credential changed; inspect local state.');
+    return saved.token;
+  }
+  if (!token) return null;
+  parseAuthToken(token);
+  writeSecrets(root, id, {version:1,serverId:id,token,keys:{}}, store);
+  return token;
+}
+/** Publish only after OS read-back verification. Replay preserves existing vault keys. Caller holds registry guard. */
+export function approveEnrollment(root: string, info: ServerRegistration, store: CredentialStore): void {
+  const token = enrollmentToken(root, info.serverId, store);
+  if (token !== info.token) throw new CredentialStoreError();
+  const metadata: OsRegistration = {version:2,credentialMode:'os',serverId:info.serverId,baseUrl:info.baseUrl,deviceId:info.deviceId,name:info.name,...(info.deviceName === undefined ? {} : {deviceName:info.deviceName})};
+  const existing = registrations(root).find(item => item.serverId === info.serverId);
+  if (existing) {
+    if (JSON.stringify(existing) !== JSON.stringify(metadata)) throw new Error('Server connection changed; inspect local state.');
+  } else {
+    if (registrations(root).some(item => item.name === info.name || item.baseUrl === info.baseUrl)) throw new Error('Connection already exists; select it instead.');
+    secureCreate(registrationPath(root, info.serverId), JSON.stringify(metadata));
+  }
+}
+export function discardEnrollmentToken(root: string, id: string, store: CredentialStore): void {
+  if (registrations(root).some(item => item.serverId === id)) throw new Error('Cannot replace an approved connection.');
+  enrollmentToken(root, id, store);
+  store.delete(storeId(root, id));
+  if (store.get(storeId(root, id)) !== null) throw new CredentialStoreError();
 }
 export type { CredentialStore } from "./credential-store.ts";

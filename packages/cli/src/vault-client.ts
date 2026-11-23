@@ -5,6 +5,8 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { decodeRecoverySecret, unwrapMasterKey, RemoteError } from "@nanosync/sync-core";
 import { enrollmentVerificationCode, parseCapabilityResponse, parseDeviceId, parseAuthToken, decodeCanonicalBase64Url } from "@nanosync/protocol";
 import { api, baseUrl, login } from "./client.ts";
+import { desktopPendingIdentities, enrollmentRequest } from '@nanosync/client-service/enrollment';
+import { withConnectionRegistry } from '@nanosync/client-service/connections';
 import { privateDirectory, secureCreate, secureRead, secureReplace, syncPrivateDirectory } from "./security.ts";
 
 import { hidden as secretPrompt, CliError } from "./prompts.ts";
@@ -60,6 +62,8 @@ export async function enrollServer(root: string, url: string, password: string |
     }
     return connectionSummary(existing);
   }
+  if (desktopPendingIdentities(root).some(item => item.url === canonical || item.alias === (options.alias ?? deviceName)))
+    throw new CliError('ENROLLMENT_CONFLICT', 'Desktop enrollment exists; resume this request in the desktop app instead of creating another identity');
   let pending: PendingEnrollment | undefined = existsSync(pendingPath) ? JSON.parse(secureRead(pendingPath, 4096).toString("utf8")) : undefined;
   if (pending && options.alias && pending.alias !== options.alias) throw new CliError("CONFLICT", "Pending request has a different alias; resume that alias");
   const alias = pending?.alias ?? options.alias ?? deviceName;
@@ -83,7 +87,13 @@ export async function enrollServer(root: string, url: string, password: string |
     output().progress('Connecting to server…');
     pending = { url: canonical, token: await bounded(signal => login(canonical, secret, signal), waitDeadline), deviceId: randomUUID(), name: deviceName, alias,
       fingerprint: randomBytes(32).toString("base64url"), serverId: randomUUID(), expiresAtMs: Date.now() + 24 * 60 * 60_000 };
-    secureCreate(pendingPath, JSON.stringify(pending));
+    withConnectionRegistry(root, () => {
+      if (listServerMetadata(root).some(item => item.baseUrl === canonical || item.name === alias) ||
+          desktopPendingIdentities(root).some(item => item.url === canonical || item.alias === alias) ||
+          pendingEnrollments(root).some(item => item.url === canonical || item.alias === alias))
+        throw new CliError('ENROLLMENT_CONFLICT', 'Connection or enrollment changed during login; resume the existing request in its original client');
+      secureCreate(pendingPath, JSON.stringify(pending));
+    });
   }
   const request = pending;
   output().info(`nanosync server devices approve --device-id ${request.deviceId}`);
@@ -110,8 +120,7 @@ export async function enrollServer(root: string, url: string, password: string |
   let status = Date.now() >= request.expiresAtMs ? "expired" : request.status ?? "pending";
   if (status === "pending") {
     try {
-      const response = await retry(signal => api(canonical, "/v1/auth/enrollments", { method: "POST", body: JSON.stringify({ protocolVersion: 1,
-        deviceId: request.deviceId, displayName: request.name, platform: process.platform, clientVersion: "1", fingerprint: request.fingerprint }), signal }, request.token));
+      const response = await retry(signal => api(canonical, "/v1/auth/enrollments", { method: "POST", body: JSON.stringify(enrollmentRequest(request.deviceId, request.name, request.fingerprint)), signal }, request.token));
       status = response?.status ?? "pending";
       if (status === "pending") {
         output().info("Waiting for approval; Ctrl-C preserves this request for resume.");
@@ -132,11 +141,19 @@ export async function enrollServer(root: string, url: string, password: string |
   if (status === "pending" && Date.now() >= request.expiresAtMs) status = "expired";
   if (status === "approved") {
     const info: ServerRegistration = { version: 1, serverId: request.serverId, baseUrl: canonical, deviceId: request.deviceId, name: alias, token: request.token };
-    const path = join(dir(root, "servers"), `${request.serverId}.json`);
-    if (existsSync(path)) {
-      if (secureRead(path).toString("utf8") !== JSON.stringify(info)) throw new CliError("CONFLICT", "saved credential differs from pending enrollment");
-    } else secureCreate(path, JSON.stringify(info));
-    unlinkSync(pendingPath); syncPrivateDirectory(dir(root, "pending"));
+    withConnectionRegistry(root, () => {
+      if (listServerMetadata(root).some(item => item.serverId !== request.serverId && (item.baseUrl === canonical || item.name === alias)) ||
+          desktopPendingIdentities(root).some(item => item.url === canonical || item.alias === alias))
+        throw new CliError('ENROLLMENT_CONFLICT', 'Connection or enrollment changed; inspect existing connections before resuming');
+      const saved = pendingEnrollments(root).find(item => item.url === canonical);
+      if (!saved || saved.serverId !== request.serverId || saved.deviceId !== request.deviceId || saved.token !== request.token || saved.alias !== alias)
+        throw new CliError('ENROLLMENT_CONFLICT', 'Pending identity changed; inspect local enrollment state');
+      const path = join(dir(root, "servers"), `${request.serverId}.json`);
+      if (existsSync(path)) {
+        if (secureRead(path).toString("utf8") !== JSON.stringify(info)) throw new CliError("CONFLICT", "saved credential differs from pending enrollment");
+      } else secureCreate(path, JSON.stringify(info));
+      unlinkSync(pendingPath); syncPrivateDirectory(dir(root, "pending"));
+    });
     output().info("Approved. Next: nanosync client vaults connect (no files transferred).");
     return connectionSummary(info);
   }

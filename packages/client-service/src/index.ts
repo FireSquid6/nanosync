@@ -7,3 +7,4 @@ export * from "./sync-lock.ts";
 export * from "./service.ts";
 export * from "./sync-control.ts";
 export * from "./security.ts";
+export * from "./connection-setup.ts";
