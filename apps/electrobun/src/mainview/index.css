@@ -48,14 +48,11 @@ a {
   color: var(--link);
   text-underline-offset: 4px;
 }
-a:hover,
-button.link:hover {
+a:hover {
   color: var(--head);
 }
 button {
   cursor: pointer;
-}
-button {
   border: 1px solid var(--line);
   padding: 7px 12px;
   background: transparent;
@@ -72,12 +69,6 @@ button.primary {
 }
 button.primary:hover {
   opacity: 0.86;
-}
-button.link {
-  padding: 0;
-  border: 0;
-  background: none;
-  text-decoration: underline;
 }
 button:disabled {
   opacity: 0.45;
@@ -175,18 +166,6 @@ small,
 .small {
   font-size: 12px;
 }
-.muted {
-  color: var(--muted);
-}
-.good {
-  color: var(--green);
-}
-.danger {
-  color: var(--link);
-}
-.warning {
-  color: var(--yellow);
-}
 .titlebar {
   height: 44px;
   border-bottom: 1px solid var(--line);
@@ -208,7 +187,7 @@ small,
 .shell {
   display: grid;
   grid-template-columns: 184px minmax(0, 1fr);
-  min-height: calc(100vh - 80px);
+  min-height: calc(100vh - 110px);
 }
 aside {
   border-right: 1px solid var(--line);
@@ -248,9 +227,6 @@ aside .brand {
 }
 .aside-bottom p {
   margin-bottom: 8px;
-}
-.count {
-  color: var(--link);
 }
 main {
   padding: 33px 34px 40px;
@@ -294,9 +270,6 @@ main {
   grid-template-columns: minmax(0, 1fr) 288px;
   gap: 28px;
 }
-.folderlist {
-  min-width: 0;
-}
 .listhead {
   display: flex;
   justify-content: space-between;
@@ -327,6 +300,7 @@ main {
   border: 0;
   padding: 0;
   background: none;
+  overflow-wrap: anywhere;
 }
 .folder .name:hover {
   text-decoration: underline;
@@ -344,7 +318,7 @@ main {
   font-size: 12px;
 }
 .status {
-  white-space: nowrap;
+  white-space: normal;
   font-size: 12px;
   display: inline-flex;
   align-items: center;
@@ -369,18 +343,6 @@ main {
 }
 .symbol.work {
   border-radius: 50%;
-}
-.progress {
-  height: 3px;
-  background: var(--line);
-  margin: 11px 0 8px;
-  max-width: 100%;
-}
-.progress span {
-  display: block;
-  height: 100%;
-  width: 62%;
-  background: var(--fg);
 }
 .inspector {
   border-left: 1px solid var(--line);
@@ -426,32 +388,6 @@ main {
 .textcol {
   max-width: 760px;
 }
-.section {
-  padding: 22px 0;
-  border-top: 1px solid var(--line);
-}
-.section:first-child {
-  padding-top: 0;
-  border-top: 0;
-}
-.twocol {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 40px;
-}
-.settingrow {
-  display: flex;
-  justify-content: space-between;
-  gap: 30px;
-  padding: 17px 0;
-  border-bottom: 1px solid var(--line);
-}
-.settingrow p {
-  max-width: 65ch;
-  font-size: 12px;
-  color: var(--muted);
-  margin: 4px 0 0;
-}
 .table {
   width: 100%;
   border-collapse: collapse;
@@ -469,9 +405,6 @@ main {
   font-weight: normal;
 }
 .table td {
-  font-size: 12px;
-}
-.table td .muted {
   font-size: 12px;
 }
 .steps {
@@ -506,6 +439,7 @@ main {
 }
 .verification {
   font-size: 31px;
+  overflow-wrap: anywhere;
   letter-spacing: 5px;
   margin: 25px 0;
   color: var(--head);
@@ -551,12 +485,6 @@ footer {
   color: var(--muted);
   height: 36px;
 }
-footer select {
-  font-size: 11px;
-  padding: 0 5px;
-  border: 0;
-  background: transparent;
-}
 .toast {
   position: fixed;
   bottom: 52px;
@@ -566,14 +494,6 @@ footer select {
   border: 1px solid var(--line);
   max-width: 420px;
   font-size: 12px;
-}
-.empty {
-  padding: 80px 0;
-  max-width: 64ch;
-}
-.inlinecode {
-  background: var(--panel);
-  padding: 2px 5px;
 }
 .export {
   font: inherit;
@@ -599,27 +519,9 @@ footer select {
   padding: 0;
   border: 0;
 }
-.subnav button.active {
+.subnav button[aria-current="page"] {
   color: var(--head);
   text-decoration: underline;
-}
-.statepick {
-  font-size: 12px;
-  margin: 16px 0;
-  display: flex;
-  gap: 10px;
-  align-items: center;
-}
-.statepick select {
-  padding: 3px 6px;
-  font-size: 12px;
-}
-.visuallyhidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
 }
 @media (max-width: 1100px) {
   main {
@@ -656,9 +558,6 @@ footer select {
     padding: 24px 0;
     margin-top: 26px;
   }
-  .twocol {
-    display: block;
-  }
   .table {
     display: block;
     overflow: auto;
@@ -686,21 +585,9 @@ footer select {
   border-bottom: 1px solid var(--line);
   background: var(--panel);
 }
-.folder .name {
-  overflow-wrap: anywhere;
-}
-.verification {
-  overflow-wrap: anywhere;
-}
 dialog label {
   margin: 16px 0;
 }
-.shell {
-  min-height: calc(100vh - 110px);
-}
 main:focus {
   outline: none;
-}
-.status {
-  white-space: normal;
 }
