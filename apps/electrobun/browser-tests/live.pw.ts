@@ -12,7 +12,7 @@ test('live starts empty without storage or unsupported actions', async ({ page }
   await page.addInitScript(() => localStorage.setItem('nanosync', '{"folders":[{"name":"Fake stored folder"}]}'));
   await page.goto('/live.html');
   await expect(page.getByText('No connected folders.', { exact: false })).toBeVisible();
-  await expect(page.getByRole('button', { name: /connect folder|pause|settings|open folder/i })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /pause|settings|open folder/i })).toHaveCount(0);
   await expect(page.getByText(/mock|demo|Fake stored folder/i)).toHaveCount(0);
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
   await expect(page.getByText('No connections.', { exact: false })).toBeVisible();
@@ -23,7 +23,7 @@ test('live safely renders real metadata, full card selection, keyboard and expli
   await page.goto('/live.html');
   await expect(page.getByRole('heading', { name: '<img src=x onerror=alert(1)>' })).toBeVisible();
   await expect(page.locator('main img')).toHaveCount(0);
-  expect(await page.evaluate(() => (window as any).liveCalls.every((c: any) => c.method === 'snapshot'))).toBe(true);
+  expect(await page.evaluate(() => (window as any).liveCalls.every((c: any) => ['snapshot', 'listEnrollments'].includes(c.method)))).toBe(true);
   await page.locator('[data-folder]').filter({ hasText: 'Other folder' }).first().locator('.path').click();
   await expect(page.getByRole('heading', { name: 'Other folder' })).toBeVisible();
   const firstButton = page.getByRole('button', { name: '<img src=x onerror=alert(1)>' });

@@ -1,3 +1,5 @@
+import type { EnrollmentSummary, VaultSummary } from '../../../../packages/client-service/src/connection-setup.ts';
+export type { EnrollmentSummary, VaultSummary } from '../../../../packages/client-service/src/connection-setup.ts';
 import type { ClientSnapshot } from '../../../../packages/client-service/src/service.ts';
 export type { ClientSnapshot, FolderSummary, ServerSummary } from '../../../../packages/client-service/src/service.ts';
 
@@ -5,6 +7,13 @@ export type Result<T = null> = { ok: true; value: T } | { ok: false; error: stri
 export type DesktopRPC = {
   bun: {
     requests: {
+      listEnrollments: { params: undefined; response: Result<EnrollmentSummary[]> };
+      enroll: { params: { url: string; alias: string; deviceName: string; password?: string; fresh?: boolean }; response: Result<EnrollmentSummary> };
+      checkEnrollment: { params: { id: string }; response: Result<EnrollmentSummary> };
+      listVaults: { params: { id: string }; response: Result<VaultSummary[]> };
+      connectFolder: { params: { serverId: string; vaultId: string; path: string; recoveryKey?: string; confirmNonempty: boolean }; response: Result<{ id: string }> };
+      chooseFolder: { params: undefined; response: Result<string | null> };
+      openAdministration: { params: { id: string }; response: Result };
       snapshot: { params: undefined; response: Result<ClientSnapshot> };
       sync: { params: { id: string }; response: Result };
       migrate: { params: { id: string }; response: Result };
