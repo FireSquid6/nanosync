@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' views:; script-src 'self' views:; style-src 'self' 'unsafe-inline' views:; connect-src 'self' ws://127.0.0.1:*; object-src 'none'; base-uri 'none'; form-action 'none'" />
+    <title>nanosync</title>
+    <link rel="stylesheet" href="./index.css" />
+    <style>
+      .folder, .folder .meta > *, .kv dd, .conflict { min-width: 0; overflow-wrap: anywhere; }
+      .folder .meta { flex-wrap: wrap; }
+      .folder:focus-within { outline: 2px solid var(--focus); outline-offset: -2px; }
+      .kv div { flex-wrap: wrap; }
+      .kv dd { max-width: 100%; text-align: left; }
+      #notice { margin: 0; padding: 8px 22px; grid-column: 1 / -1; }
+      body:has(#notice:not([hidden])) { grid-template-rows: auto auto minmax(0, 1fr); }
+      @media (max-width: 450px) { .shell { grid-template-columns: 115px minmax(0, 1fr); } aside { padding: 20px 8px; } main { padding: 20px 12px; } }
+    </style>
+  </head>
+  <body>
+    <div class="titlebar"><strong>nanosync</strong><span>Desktop</span></div>
+    <p id="notice" class="error" role="alert" hidden></p>
+    <div class="shell">
+      <aside>
+        <div class="brand">nanosync</div>
+        <nav aria-label="Main"><button data-nav="folders">Folders</button><button data-nav="connections">Connections</button></nav>
+        <div class="aside-bottom"><button data-act="quit">Quit nanosync</button></div>
+      </aside>
+      <main id="content" tabindex="-1"></main>
+    </div>
+    <dialog id="dialog" aria-labelledby="dialog-title"></dialog>
+    <script type="module" src="./index.js"></script>
+  </body>
+</html>

@@ -8,9 +8,11 @@ import { RemoteError } from '@nanosync/sync-core';
 import { api, baseUrl } from './client.ts';
 import { privateDirectory, secureCreate, secureRead } from './security.ts';
 import { runServer, initializeServerOwner, localAdminReport, withLocalOwner, localOwner } from './server.ts';
-import { SyncRunner } from './sync-runner.ts';
-import { connectRegisteredVault, discoverConnection, records, disconnectConnections, removeServerConnection, withConnectionRegistry } from './connections.ts';
-import { enrollServer, key, server as storedServer, servers, unlockVault, pendingEnrollments, connectionSummary } from './vault-client.ts';
+import { ClientService } from '@nanosync/client-service/service';
+import { listServerMetadata, migrateCredentials } from '@nanosync/client-service/credentials';
+import { removalPending } from '@nanosync/client-service/credential-state';
+import { connectRegisteredVault, discoverConnection, records, disconnectConnections, removeServerConnection } from './connections.ts';
+import { enrollServer, key, server as storedServer, unlockVault, pendingEnrollments } from './vault-client.ts';
 import { provisionLocalVault } from './local-provision.ts';
 import { CliError, interactive, text, hidden, choose, acknowledge } from './prompts.ts';
 import { CliOutput, output, withOutput } from './output.ts';
@@ -59,11 +61,17 @@ async function execute(args: string[], presentation: CliOutput): Promise<number>
       }
       return path ? secureRead(path, 4096).toString('utf8').trimEnd() : process.env[variable] ?? await hidden(label, canPrompt(command));
     };
-    async function selectServer(command: Command) {
+    async function selectServerMetadata(command: Command) {
+      const list = listServerMetadata(root(command));
       const choice = opts(command).server ?? await choose('Choose a server (--server)',
-        servers(root(command)).map(info => ({ name: `${info.name}: ${info.baseUrl}`, value: info.serverId })),
+        list.map(info => ({ name: `${info.name}: ${info.baseUrl}`, value: info.serverId })),
         canPrompt(command), 'No server connections. Run nanosync client connections add.');
-      return storedServer(root(command), choice);
+      const matches = list.filter(info => info.serverId === choice || info.name === choice || info.baseUrl === choice);
+      if (matches.length !== 1) throw new CliError('NOT_FOUND', 'server not found or ambiguous');
+      return matches[0]!;
+    }
+    async function selectServer(command: Command) {
+      return storedServer(root(command), (await selectServerMetadata(command)).serverId);
     }
     async function selectLocalVault(command: Command, directory: string) {
       if (!opts(command).vault && !canPrompt(command)) return parseVaultId(await need(command, 'vault'));
@@ -175,12 +183,12 @@ async function execute(args: string[], presentation: CliOutput): Promise<number>
     const client = flags(program.command('client').description('Local connections, vault bindings and sync'), ...clientFlags, ...common);
     const connections = flags(client.command('connections'), ...clientFlags, ...common);
     flags(connections.command('view'), ...clientFlags, ...common).action(async (_o, command) => {
-      result = {connections:servers(root(command)).map(connectionSummary), pending:pendingEnrollments(root(command)).map(p => ({alias:p.alias, url:p.url, deviceId:p.deviceId, deviceName:p.name, status:Date.now() >= p.expiresAtMs ? 'expired' : p.status ?? 'pending'}))};
+      result = {connections:listServerMetadata(root(command)).map(info => ({serverId:info.serverId, alias:info.name, url:info.baseUrl, deviceId:info.deviceId, status:'approved', credentialMode:info.credentialMode})), pending:pendingEnrollments(root(command)).map(p => ({alias:p.alias, url:p.url, deviceId:p.deviceId, deviceName:p.name, status:Date.now() >= p.expiresAtMs ? 'expired' : p.status ?? 'pending'}))};
     });
     flags(connections.command('add'), ...clientFlags, ...common, '--url <url>', '--alias <alias>', '--device-name <name>', '--password-file <file>', '--wait-ms <milliseconds>', '--fresh')
       .action(async (_o, command) => {
         const o = opts(command), dir = root(command), url = baseUrl(await need(command, 'url'));
-        const existing = servers(dir).find(s => s.baseUrl === url);
+        const existing = listServerMetadata(dir).find(s => s.baseUrl === url);
         if (existing) { result = await enrollServer(dir, url, undefined, '', 0); return; }
         const pending = pendingEnrollments(dir).find(p => p.url === url);
         const alias = o.alias ?? pending?.alias ?? await need(command, 'alias');
@@ -198,14 +206,24 @@ async function execute(args: string[], presentation: CliOutput): Promise<number>
         } finally { process.off('SIGINT', stop); }
       });
     flags(connections.command('remove'), ...clientFlags, ...common, '--server <alias-or-id>', '--force').action(async (_o, command) => {
-      const info = await selectServer(command), dir = root(command);
+      const dir = root(command), choice = opts(command).server;
+      const replayId = typeof choice === 'string' && /^[0-9a-f-]{36}$/.test(choice) && removalPending(dir, parseVaultId(choice)) ? choice : null;
+      const serverId = replayId ?? (await selectServerMetadata(command)).serverId;
       output().warning('Local removal only: remote device access is NOT revoked. Files and remote data are preserved. --force discards pending synchronization state.');
-      removeServerConnection(dir, info.serverId, !!opts(command).force);
-      result = {serverId:info.serverId, removed:true, remotelyRevoked:false};
+      removeServerConnection(dir, serverId, !!opts(command).force);
+      result = {serverId, removed:true, remotelyRevoked:false};
     });
+    flags(connections.command('migrate-credentials'), ...clientFlags, ...common, '--server <alias-or-id>')
+      .action(async (_o, command) => {
+        const info = await selectServerMetadata(command);
+        const accepted = !!opts(command).yes || await acknowledge('Move credentials to the OS store? Headless CLI access will require an unlocked user session.', canPrompt(command));
+        if (!accepted) throw new CliError('CANCELLED', 'credential migration cancelled');
+        migrateCredentials(root(command), info.serverId);
+        result = {serverId:info.serverId, credentialMode:'os'};
+      });
     const bindings = flags(client.command('vaults'), ...clientFlags, ...common);
     flags(bindings.command('view'), ...clientFlags, ...common).action(async (_o, command) => {
-      const list = servers(root(command)); result = {bindings:records(root(command)).map(c => ({...c, serverAlias:list.find(s => s.serverId === c.serverId)?.name ?? null}))};
+      const list = listServerMetadata(root(command)); result = {bindings:records(root(command)).map(c => ({...c, serverAlias:list.find(s => s.serverId === c.serverId)?.name ?? null}))};
     });
     flags(bindings.command('connect'), ...clientFlags, ...common, '--server <alias-or-id>', '--vault <name-or-uuid>', '--path <directory>', '--confirm-nonempty', '--recovery-file <file>')
       .action(async (_o, command) => {
@@ -233,33 +251,21 @@ async function execute(args: string[], presentation: CliOutput): Promise<number>
       disconnectConnections(dir, [binding], !!opts(command).force); result = {connectionId:binding.connectionId, disconnected:true, filesPreserved:true};
     });
     flags(client.command('sync'), ...clientFlags, ...common, '--path <directory>', '--watch').action(async (_o, command) => {
-      const dir = root(command), binding = discoverConnection(dir, opts(command).path ?? process.cwd()), info = storedServer(dir, binding.serverId);
-      if (binding.deviceId !== info.deviceId) throw new CliError('CONFLICT', 'binding device differs from connection');
-      const master = key(dir, info.serverId, binding.vaultId);
-      if (!master) throw new CliError('INPUT_REQUIRED', 'vault key is missing; reconnect to unlock');
-      let runner: SyncRunner;
-      try { runner = withConnectionRegistry(dir, () => {
-        if (discoverConnection(dir, binding.root).connectionId !== binding.connectionId) throw new CliError('CONFLICT', 'binding changed');
-        storedServer(dir, binding.serverId);
-        return SyncRunner.start({clientDirectory:privateDirectory(join(privateDirectory(join(privateDirectory(dir), 'replicas')), binding.connectionId)),
-          syncDirectory:binding.root, vaultId:binding.vaultId, deviceId:binding.deviceId,
-          masterKey:master, baseUrl:info.baseUrl, token:info.token,
-          onProgress: message => presentation.syncProgress(message, !!opts(command).watch) });
-      }); }
-      finally { master.fill(0); }
+      const dir = root(command), binding = discoverConnection(dir, opts(command).path ?? process.cwd());
+      const service = new ClientService(dir, {owner:'CLI', onProgress:message => presentation.syncProgress(message, !!opts(command).watch)});
       try {
-        if (!opts(command).watch) result = await runner.syncOnce();
+        if (!opts(command).watch) result = await service.sync(binding.connectionId);
         else {
           const controller = new AbortController(), stop = () => controller.abort();
           process.once('SIGINT', stop); process.once('SIGTERM', stop);
           try {
-            await runner.watch(controller.signal,
+            await service.watch(binding.connectionId, controller.signal,
               head => presentation.synced(head), error => presentation.syncError(error));
           }
           finally { process.off('SIGINT', stop); process.off('SIGTERM', stop); }
           result = {stopped:true};
         }
-      } finally { await runner.stop(); }
+      } finally { await service.stop(); }
     });
     function configureHelp(command: Command) {
       if (command.commands.length) {

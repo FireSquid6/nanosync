@@ -458,7 +458,7 @@ test("continuous sync reloads ignore rules and prunes new unsafe directories", a
   } finally { await watching.stop(); await stop(runner); }
 });
 
-test("continuous CLI command runs in the foreground and releases the lock on SIGTERM", async () => {
+test("continuous CLI command accepts coordinated sync requests and releases the lock on SIGTERM", async () => {
   const e = await fixture();
   const lock = join(e.a.clientDirectory, ".sync-owner");
   const started = Promise.withResolvers<void>(), transport = globalThis.fetch;
@@ -470,7 +470,8 @@ test("continuous CLI command runs in the foreground and releases the lock on SIG
   try {
     await started.promise;
     expect(existsSync(lock)).toBe(true);
-    expect(await main(["client", "sync", "--client-dir", e.firstDir, "--path", e.firstFiles])).toBe(2);
+    expect(await main(["client", "sync", "--client-dir", e.firstDir, "--path", e.firstFiles])).toBe(0);
+    expect(existsSync(lock)).toBe(true);
     expect(await main(["client", "vaults", "disconnect", "--client-dir", e.firstDir, "--path", e.firstFiles, "--force", "--yes"])).toBe(2);
     expect(await main(["client", "connections", "remove", "--client-dir", e.firstDir, "--server", "test", "--force", "--yes"])).toBe(2);
     expect(existsSync(join(e.firstFiles, ".nanosync"))).toBe(true);

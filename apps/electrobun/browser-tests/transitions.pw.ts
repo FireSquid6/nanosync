@@ -56,7 +56,7 @@ test('successful unlock restores focus to meaningful application content', async
   await openApp(page);
   await page.getByRole('button', { name: 'Private', exact: true }).click();
   await page.getByRole('button', { name: 'Unlock credentials', exact: true }).click();
-  await page.getByRole('button', { name: 'Simulate unlock', exact: true }).click();
+  await page.getByRole('button', { name: 'Unlock', exact: true }).click();
   await expect(page.getByRole('dialog')).not.toBeVisible();
   expect((await savedState(page)).connections.find(c => c.id === 'locked')?.credential).toBe('os');
   expect(await page.evaluate(() => document.activeElement !== document.body && document.activeElement !== document.documentElement)).toBe(true);

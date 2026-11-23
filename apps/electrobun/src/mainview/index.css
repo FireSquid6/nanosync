@@ -27,8 +27,15 @@ html[data-theme="dark"] {
 * {
   box-sizing: border-box;
 }
+html {
+  overflow: hidden;
+}
 body {
   margin: 0;
+  height: 100dvh;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
   background: var(--bg);
   color: var(--fg);
   font:
@@ -187,9 +194,11 @@ small,
 .shell {
   display: grid;
   grid-template-columns: 184px minmax(0, 1fr);
-  min-height: calc(100vh - 110px);
+  min-height: 0;
 }
 aside {
+  min-height: 0;
+  overflow: auto;
   border-right: 1px solid var(--line);
   padding: 30px 20px;
   display: flex;
@@ -231,6 +240,8 @@ aside .brand {
 main {
   padding: 33px 34px 40px;
   min-width: 0;
+  min-height: 0;
+  overflow: auto;
 }
 .pagehead {
   display: flex;
@@ -279,6 +290,7 @@ main {
   border-bottom: 1px solid var(--line);
 }
 .folder {
+  cursor: pointer;
   padding: 18px 12px 18px 0;
   border-bottom: 1px solid var(--line);
 }
@@ -475,16 +487,6 @@ dialog h2 {
 dialog .actions {
   margin-top: 25px;
 }
-footer {
-  border-top: 1px solid var(--line);
-  padding: 8px 20px;
-  display: flex;
-  justify-content: space-between;
-  gap: 20px;
-  font-size: 11px;
-  color: var(--muted);
-  height: 36px;
-}
 .toast {
   position: fixed;
   bottom: 52px;
@@ -568,10 +570,6 @@ footer {
   .pagehead .actions {
     gap: 10px;
   }
-  footer {
-    height: auto;
-    min-height: 36px;
-  }
   .titlebar {
     padding: 0 15px;
   }
@@ -579,11 +577,6 @@ footer {
 
 [hidden] {
   display: none !important;
-}
-.mock-banner {
-  padding: 8px 22px;
-  border-bottom: 1px solid var(--line);
-  background: var(--panel);
 }
 dialog label {
   margin: 16px 0;

@@ -2,7 +2,7 @@ import type { ElectrobunConfig } from "electrobun";
 
 export default {
   app: {
-    name: "nanosync-mock",
+    name: "nanosync",
     identifier: "dev.nanosync.mock",
     version: "0.0.1",
   },
@@ -13,11 +13,11 @@ export default {
     },
     views: {
       mainview: {
-        entrypoint: "src/mainview/index.ts",
+        entrypoint: "src/mainview/live.ts",
       },
     },
     copy: {
-      "src/mainview/index.html": "views/mainview/index.html",
+      "src/mainview/live.html": "views/mainview/live.html",
       "src/mainview/index.css": "views/mainview/index.css",
     },
     mac: {

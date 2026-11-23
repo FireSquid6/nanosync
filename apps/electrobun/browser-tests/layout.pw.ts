@@ -9,12 +9,30 @@ for (const colorScheme of ['light', 'dark'] as const) {
       for (const name of ['Folders', 'Conflicts', 'Connections', 'Settings']) {
         await page.getByRole('navigation', { name: 'Main', exact: true }).getByRole('button', { name, exact: true }).click();
         await expect(page.getByRole('heading', { name, exact: true, level: 1 })).toBeVisible();
+        await expect(page).toHaveTitle('nanosync');
+        await expect(page.locator('body')).not.toContainText(/\b(mock|demo|simulat\w*|synthetic|fictional)\b/i);
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), name).toBe(true);
+        expect(await page.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight), name).toBe(true);
+        await page.evaluate(() => window.scrollTo(0, 100));
+        expect(await page.evaluate(() => window.scrollY), name).toBe(0);
+        await expect(page.getByRole('button', { name: 'Quit nanosync', exact: true })).toBeInViewport();
         if (name === 'Folders') await page.screenshot({ path: testInfo.outputPath(`folders-${colorScheme}-${width}.png`), fullPage: true });
       }
     });
   }
 }
+
+test('long folder lists scroll inside the content pane, not the window', async ({ page }) => {
+  await page.setViewportSize({ width: 960, height: 600 });
+  await openApp(page);
+  const content = page.locator('main');
+  expect(await content.evaluate(el => el.scrollHeight > el.clientHeight)).toBe(true);
+  await page.getByRole('button', { name: 'Research', exact: true }).scrollIntoViewIfNeeded();
+  await expect(page.getByRole('button', { name: 'Research', exact: true })).toBeInViewport();
+  expect(await content.evaluate(el => el.scrollTop)).toBeGreaterThan(0);
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
+  await expect(page.getByRole('button', { name: 'Quit nanosync', exact: true })).toBeInViewport();
+});
 
 test('dialog keeps keyboard focus inside and Escape restores its trigger', async ({ page }) => {
   await openApp(page);

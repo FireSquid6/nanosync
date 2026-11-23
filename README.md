@@ -30,12 +30,13 @@ bun packages/cli/src/main.ts --help
 
 To run the Linux CLI and server from source, see [packages/cli/README.md](packages/cli/README.md).
 
-## Desktop UI preview
+## Desktop client (first backend milestone)
 
-The [Electrobun desktop app](apps/electrobun/README.md) implements the issue #18
-Field Guide interface with a mock backend. Run `bun run dev:electrobun` or check
-its browser flows with `bun run test:electrobun`. It does not sync files or share
-CLI state yet; real Linux native integration and packaging remain unvalidated.
+The [Electrobun desktop app](apps/electrobun/README.md) reads shared CLI state and
+supports explicit sync, owner coordination and opt-in OS credential migration.
+Run `nix develop .#desktop`, then `bun run dev:electrobun`; browser checks use
+`bun run test:electrobun`. Enrollment and remaining client controls are not wired
+yet. Real Linux desktop integration and packaging remain unvalidated.
 
 ## Android
 

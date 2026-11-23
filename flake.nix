@@ -62,6 +62,9 @@
         default = pkgs.mkShell {
           packages = [ pkgs.bun pkgs.nodejs ];
         };
+        desktop = pkgs.mkShell {
+          packages = [ pkgs.bun pkgs.nodejs pkgs.libsecret ];
+        };
         checks = pkgs.mkShell {
           packages = [ pkgs.bun pkgs.nodejs pkgs.python3 pkgs.chromium ];
         };

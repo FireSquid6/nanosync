@@ -3,6 +3,15 @@ import { test, expect, openApp, savedState } from './fixtures';
 test('folder selection shows identity, progress, CLI owner, and missing-root safety', async ({ page }) => {
   await openApp(page);
   await expect(page.getByRole('heading', { name: 'Folders', exact: true })).toBeVisible();
+  await expect(page.locator('.mock-banner, footer')).toHaveCount(0);
+  for (const text of [
+    'Connected folders, not another filesystem.',
+    'local editing remains unrestricted',
+    'Desktop owns this binding.',
+    'Mock engine state;',
+  ]) {
+    await expect(page.getByText(text, { exact: false })).toHaveCount(0);
+  }
   const inspector = page.getByRole('region', { name: 'Selected folder' });
   await expect(inspector).toContainText('/home/alex/Documents');
   await expect(inspector).toContainText('Last successful sync');
@@ -18,6 +27,23 @@ test('folder selection shows identity, progress, CLI owner, and missing-root saf
   await page.reload();
   await page.getByRole('button', { name: 'Media', exact: true }).click();
   await expect(inspector).toContainText('Folder unavailable');
+});
+
+test('clicking folder card details or padding selects the folder', async ({ page }) => {
+  await openApp(page);
+  const inspector = page.getByRole('region', { name: 'Selected folder' });
+  for (const target of ['.path', '.status', '.meta']) {
+    await page.getByRole('button', { name: 'Documents', exact: true }).click();
+    const card = page.locator('article[data-folder="notes"]');
+    await card.locator(target).click();
+    await expect(card).toHaveClass(/selected/);
+    await expect(inspector.getByRole('heading', { name: 'Notes', exact: true })).toBeVisible();
+    await expect(card.getByRole('button', { name: 'Notes', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  }
+  const media = page.locator('article[data-folder="media"]');
+  await media.click({ position: { x: 2, y: 2 } });
+  await expect(media).toHaveClass(/selected/);
+  await expect(inspector.getByRole('heading', { name: 'Media', exact: true })).toBeVisible();
 });
 
 test('global pause and individual pause persist independently across reload', async ({ page }) => {

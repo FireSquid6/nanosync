@@ -33,7 +33,7 @@ const head = (title: string, description: string, actions = "") =>
   `<div class="pagehead">
 <div>
 <h1>${title}</h1>
-<p>${description}</p>
+${description ? `<p>${description}</p>` : ""}
 </div>
 <div class="actions">${actions}</div>
 </div>`;
@@ -54,7 +54,7 @@ function save() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   } catch {
     notify(
-      "Browser storage unavailable. Demo changes will not survive a restart.",
+      "Browser storage unavailable. Changes will not survive a restart.",
     );
   }
 }
@@ -124,7 +124,7 @@ function foldersView() {
       : "") +
     head(
       "Folders",
-      "Connected folders, not another filesystem.",
+      "",
       button("Connect folder", "connect", "primary") +
         button(
           state.globalPaused ? "Resume globally" : "Pause globally",
@@ -133,12 +133,12 @@ function foldersView() {
     ) +
     (state.globalPaused
       ? `<div class="notice">Global pause is on. New work stops in both directions at a safe filesystem boundary. Individually paused folders stay paused after global resume.</div>`
-      : `<div class="notice">${state.conflicts.length} unresolved conflicts · local editing remains unrestricted</div>`) +
+      : `<div class="notice">${state.conflicts.length} unresolved conflicts</div>`) +
     `<div class="workspace">
 <section aria-label="Connected folders">
 <div class="listhead">${state.folders.length} local copies · sync owner shown per folder</div>${state.folders
       .map(
-        (x) => `<article class="folder ${x.id === selected ? "selected" : ""}">
+        (x) => `<article class="folder ${x.id === selected ? "selected" : ""}" data-folder="${esc(x.id)}">
 <div class="foldertop">
 <button class="name" data-folder="${esc(x.id)}" aria-pressed="${x.id === selected}">${esc(x.name)}</button>${status(folderStatus(state, x))}</div>
 <div class="path">${esc(x.path)}</div>
@@ -182,7 +182,7 @@ function foldersView() {
 <div class="rule">
 <h3>${esc(folderStatus(state, f))}</h3>${detail(f)}</div>
 <div class="rule">${button("Edit ignore rules", "ignores")}${button("Disconnect folder", "disconnect")}</div>
-<p class="note">${f.owner === "CLI" ? "CLI owns this binding. Desktop operations coordinate with that owner; no competing writer or force bypass. Desktop Quit leaves CLI syncing running." : "Desktop owns this binding. Closing and explicit Quit follow your lifecycle settings."}</p>
+${f.owner === "CLI" ? '<p class="note">Desktop Quit leaves CLI syncing running.</p>' : ""}
 </section>`
         : `<p>No connected folders. Connect a folder to begin.</p>`
     }</div>`
@@ -204,7 +204,9 @@ function detail(f: Folder) {
     return `<p>Server unreachable. Local editing available. Brief outages do not trigger notifications.</p>${button("Retry connection", "retry")}`;
   if (label === "Paused")
     return `<p>New work in both directions paused. In-progress filesystem operations reach a safe stopping point. ${f.paused ? "This folder remains paused when global pause is removed." : "This folder can continue after global resume."}</p>`;
-  return `<p>${label === "Up to date" ? "No pending transfers or unresolved conflicts." : "Mock engine state; no real transfers occur."}</p>`;
+  return label === "Up to date"
+    ? "<p>No pending transfers or unresolved conflicts.</p>"
+    : "";
 }
 function conflictsView() {
   return (
@@ -230,7 +232,7 @@ function connectionsView() {
   return (
     head(
       "Connections",
-      "Mock connections shared with the client CLI.",
+      "",
       button("Add connection", "connect", "primary"),
     ) +
     `<table class="table">
@@ -253,23 +255,23 @@ function connectionsView() {
       )
       .join("")}</tbody>
 </table>
-<p class="note">Server setup, vault creation and device approval stay external. No real credentials exist in this demo.</p>`
+<p class="note">Server setup, vault creation and device approval stay external.</p>`
   );
 }
 function settingsView() {
   return (
     head(
       "Settings",
-      "Durable mock preferences; native lifecycle actions are simulated.",
+      "",
     ) +
     `<nav class="subnav" aria-label="Settings categories">${["general", "notifications", "diagnostics"].map((t) => `<button data-tab="${t}" ${tab === t ? 'aria-current="page"' : ""}>${t[0]!.toUpperCase() + t.slice(1)}</button>`).join("")}</nav>
 <div class="textcol">${
       tab === "general"
         ? `<h2>Window & startup</h2>${lifecycle()}<label class="field">Appearance<select id="theme">${["system", "light", "dark"].map((t) => `<option ${state.settings.theme === t ? "selected" : ""}>${t}</option>`).join("")}</select>
 </label>
-<p>No built-in updater. Linux-first; native packaging and other platforms are not validated.</p>`
+`
         : tab === "notifications"
-          ? `<h2>Only when something needs you</h2>${check("notifications", "Enable notifications", state.settings.notifications)}${check("conflicts", "Conflicts", state.settings.conflicts, !state.settings.notifications)}${check("revoked", "Revoked access", state.settings.revoked, !state.settings.notifications)}${check("failures", "Persistent failures", state.settings.failures, !state.settings.notifications)}${check("includePaths", "Include filenames and paths in notifications", state.settings.includePaths)}<p>Private by default. Repeated alerts are deduplicated; actionable details remain in the app. No ordinary success or brief outage alerts. Notification delivery is simulated.</p>`
+          ? `<h2>Only when something needs you</h2>${check("notifications", "Enable notifications", state.settings.notifications)}${check("conflicts", "Conflicts", state.settings.conflicts, !state.settings.notifications)}${check("revoked", "Revoked access", state.settings.revoked, !state.settings.notifications)}${check("failures", "Persistent failures", state.settings.failures, !state.settings.notifications)}${check("includePaths", "Include filenames and paths in notifications", state.settings.includePaths)}<p>Private by default. Repeated alerts are deduplicated; actionable details remain in the app. No ordinary success or brief outage alerts.</p>`
           : `<h2>Export diagnostics</h2>
 <p>Explicit export only, never uploaded. Excludes credentials, passwords, keys, recovery material, file contents, filenames and paths.</p>${button("Review diagnostic report", "diagnostics", "primary")}`
     }</div>`
@@ -294,7 +296,7 @@ function wizardView() {
       ${state.connections.map((c) => `<option value="${esc(c.id)}" ${e.connectionId === c.id ? "selected" : ""}>${esc(c.name)} · ${esc(c.credential)}</option>`).join("")}
     </select>
 </label>
-<p>Choose an existing connection for another nonoverlapping local copy. New enrollment fields below apply only to a new connection.</p>${field("url", "Server URL", e.server, "url")}${field("alias", "Connection name", e.name)}${field("device", "Device name", e.device)}${field("password", "Account password, if required (never retained)", "", "password")}<p>Offline simulation: addresses are not contacted. New mock enrollment is approved when you check approval.</p>`;
+<p>Choose an existing connection for another nonoverlapping local copy. New enrollment fields below apply only to a new connection.</p>${field("url", "Server URL", e.server, "url")}${field("alias", "Connection name", e.name)}${field("device", "Device name", e.device)}${field("password", "Account password, if required (never retained)", "", "password")}`;
   if (e.step === 1)
     body = `<h2>${{ pending: "Waiting for approval", approved: "Device approved", denied: "Enrollment denied", expired: "Enrollment expired", error: "Connection interrupted" }[e.status]}</h2>
 <p>Compare this verification code with the server operator.</p>
@@ -304,8 +306,8 @@ function wizardView() {
   if (e.step === 2)
     body = `<h2>Give this vault a local home</h2>
 <label class="field">Vault<select id="vault">${["documents", "notes", "media"].map((v) => `<option ${v === e.vault ? "selected" : ""}>${v}</option>`).join("")}</select>
-</label>${field("recovery", "Recovery key (mock vault requires a key; never retained)", "", "password")}<p>A recovery key unlocks vault encryption; it is not your account password or a backup of your files. Keep your original safe: this app cannot retrieve it later. Use fictional material in this demo.</p>${field("local-path", "Local folder", e.path)}${button("Choose folder…", "choose-folder")}<div class="quietbox">
-<strong>This mock destination already contains files.</strong>
+</label>${field("recovery", "Recovery key (never retained)", "", "password")}<p>A recovery key unlocks vault encryption; it is not your account password or a backup of your files. Keep your original safe: this app cannot retrieve it later.</p>${field("local-path", "Local folder", e.path)}${button("Choose folder…", "choose-folder")}<div class="quietbox">
+<strong>This destination already contains files.</strong>
 <p>Local and remote contents will be reconciled. Both conflicting versions are preserved. Preexisting files are not implicit remote deletions.</p>
 </div>${check("consent", "I understand that this folder’s contents will be reconciled.", e.consent)}<p>Choose a nonoverlapping absolute path. Connecting never silently starts transfers.</p>`;
   if (e.step === 3) body = `<h2>How should nanosync run?</h2>${lifecycle()}`;
@@ -338,7 +340,7 @@ function ignoresView() {
     `<div class="textcol">
 <label for="rules">.nanosyncignore rules</label>
 <textarea id="rules" spellcheck="false">${esc(folder().rules)}</textarea>
-<p>Uses the shared engine’s existing syntax. Unsupported negation (!), backslashes and character classes are rejected. Ignore rules cannot unignore protected metadata. Rules apply only to this copy, not other devices. Saving never deletes local or remote data. Existing tracked files are not silently deleted. Newly unignored files may reconcile with remote contents and create preserved conflicts. This mock does not implement a real tracked-file inventory.</p>
+<p>Uses the shared engine’s existing syntax. Unsupported negation (!), backslashes and character classes are rejected. Ignore rules cannot unignore protected metadata. Rules apply only to this copy, not other devices. Saving never deletes local or remote data. Existing tracked files are not silently deleted. Newly unignored files may reconcile with remote contents and create preserved conflicts.</p>
 <p id="validation" role="status">
 </p>
 <div class="actions">${button("Validate rules", "validate")}${button("Save rules", "save-ignores", "primary")}</div>
@@ -365,11 +367,10 @@ function render() {
   if (state.quit || state.hidden)
     content.innerHTML =
       head(
-        state.quit ? "Desktop stopped" : "Window hidden (simulated)",
+        state.quit ? "Desktop stopped" : "Window hidden",
         "Independently CLI-owned syncing continues; shared pauses remain in effect.",
         button("Reopen nanosync", "reopen"),
-      ) +
-      `<p>This browser remains open to demonstrate lifecycle state. No native process was stopped or hidden.</p>`;
+      );
   else
     content.innerHTML = (
       {
@@ -409,7 +410,7 @@ function render() {
 function admin() {
   modal(
     "External server administration",
-    `<p>Simulated external browser action. No network request or embedded administration. The server operator handles approval.</p>${button("Close", "modal-close")}`,
+    `<p>The server operator handles device approval in server administration.</p>${button("Close", "modal-close")}`,
   );
 }
 function connectionDetails() {
@@ -426,8 +427,8 @@ function credentialDecision() {
   if (c.credential === "locked")
     modal(
       "Unlock the OS credential store",
-      `<p>No plaintext fallback. Native unlocking is simulated; no password is requested or retained.</p>
-<div class="actions">${button("Cancel", "modal-close")}${button("Simulate unlock", "confirm-unlock")}</div>`,
+      `<p>Unlock the OS credential store to continue. No plaintext fallback.</p>
+<div class="actions">${button("Cancel", "modal-close")}${button("Unlock", "confirm-unlock")}</div>`,
     );
   else
     modal(
@@ -468,7 +469,7 @@ function finish(start: boolean) {
     error("This path overlaps an existing binding.");
     return;
   }
-  const id = `mock-${crypto.randomUUID()}`;
+  const id = `connection-${crypto.randomUUID()}`;
   if (!e.connectionId)
     state.connections.push({
       id,
@@ -495,7 +496,7 @@ function finish(start: boolean) {
   go("folders");
   notify(
     start
-      ? "Mock syncing explicitly started. No real transfers."
+      ? "Syncing started."
       : "Connected paused. No transfers started.",
   );
 }
@@ -572,7 +573,7 @@ function next() {
       return;
     }
     if (!value("recovery").trim()) {
-      error("Enter a mock recovery key. It is never retained.");
+      error("Enter a recovery key. It is never retained.");
       return;
     }
     if (!checked("consent")) {
@@ -602,7 +603,7 @@ function actions(action: string) {
     resolving = action.slice(8);
     modal(
       "Acknowledge manual resolution?",
-      `<p>Review both versions in your own editor first. Acknowledgment clears the mock conflict record only; neither version is discarded.</p>${check("resolved", "I reviewed both preserved versions and manually resolved the content.", false)}<div class="actions">${button("Cancel", "modal-close")}${button("Acknowledge resolution", "confirm-resolve")}</div>`,
+      `<p>Review both versions in your own editor first. Acknowledgment clears the conflict record; neither version is discarded.</p>${check("resolved", "I reviewed both preserved versions and manually resolved the content.", false)}<div class="actions">${button("Cancel", "modal-close")}${button("Acknowledge resolution", "confirm-resolve")}</div>`,
     );
     return;
   }
@@ -655,7 +656,7 @@ function actions(action: string) {
       break;
     case "choose-folder":
       notify(
-        "Native folder picker simulated. Edit the Local folder path field; no filesystem is accessed.",
+        "Enter the folder path in the Local folder field.",
       );
       break;
     case "finish":
@@ -676,16 +677,16 @@ function actions(action: string) {
       );
       break;
     case "open":
-      notify("Simulated file manager action. No files opened or changed.");
+
       break;
     case "sync":
       notify(
-        `Simulated request through ${folder().owner} owner. Pauses, locks and recovery guards still apply; no competing writer.`,
+        `Sync requested through the ${folder().owner} owner.`,
       );
       break;
     case "retry":
       notify(
-        "Simulated retry: root/server still unavailable. State preserved; no folder recreated or deletions propagated.",
+        "Folder or server still unavailable. State preserved.",
       );
       break;
     case "unlock":
@@ -700,7 +701,7 @@ function actions(action: string) {
       state.connections.find((c) => c.id === connectionId)!.credential = "os";
       close();
       render();
-      notify("Mock OS store unlocked. No real credentials accessed.");
+      notify("Credential store unlocked.");
       break;
     case "migrate":
       if (!checked("migration-consent")) {
@@ -720,7 +721,7 @@ function actions(action: string) {
       state.connections.find((c) => c.id === connectionId)!.credential = "os";
       close();
       render();
-      notify("Mock migration decision saved. No secrets moved or duplicated.");
+      notify("Credential migration preference saved.");
       break;
     case "disconnect":
       disconnectDialog(false);
@@ -763,7 +764,7 @@ function actions(action: string) {
       selected = state.folders[0]?.id || "";
       close();
       render();
-      notify("Mock state removed. All local files and remote data preserved.");
+      notify("Disconnected. All local files and remote data preserved.");
       break;
     }
     case "confirm-resolve": {
@@ -813,14 +814,14 @@ function actions(action: string) {
       folder().rules = validated;
       go("folders");
       notify(
-        "Validated mock ignore rules saved for this binding. No files deleted.",
+        "Ignore rules saved for this binding. No files deleted.",
       );
       break;
     case "diagnostics":
       modal(
         "Review diagnostics",
         `<pre class="export">${esc(JSON.stringify(report(), null, 2))}</pre>
-<p>Synthetic report only. No paths, filenames, contents, secrets or enrollment identity. Nothing uploaded.</p>
+<p>No paths, filenames, contents, secrets or enrollment identity. Nothing uploaded.</p>
 <div class="actions">${button("Cancel", "modal-close")}${button("Export diagnostics", "export")}</div>`,
       );
       break;
@@ -832,11 +833,11 @@ function actions(action: string) {
       );
       const a = document.createElement("a");
       a.href = url;
-      a.download = "nanosync-mock-diagnostics.json";
+      a.download = "nanosync-diagnostics.json";
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 0);
       close();
-      notify("Synthetic redacted diagnostics exported. Nothing uploaded.");
+      notify("Diagnostics exported. Nothing uploaded.");
       break;
     }
     case "quit":
@@ -844,7 +845,6 @@ function actions(action: string) {
       modal(
         action === "quit" ? "Quit nanosync?" : "Close window?",
         `<p>${action === "close-window" && state.settings.background ? "Closing hides the window and keeps desktop-owned sync running. Reopen from the launcher." : "Desktop-owned syncing stops safely. Independently CLI-owned syncing continues. Shared pauses are preserved."}</p>
-<p>Native lifecycle is simulated; this browser stays open.</p>
 <div class="actions">${button("Cancel", "modal-close")}${button(action === "quit" ? "Quit desktop" : "Close window", action === "quit" ? "confirm-quit" : "confirm-close")}</div>`,
       );
       break;
@@ -872,8 +872,8 @@ function actions(action: string) {
 }
 function report() {
   return {
-    source: "synthetic mock demo",
-    platform: "Linux-first (unvalidated)",
+    source: "nanosync",
+    platform: "Linux",
     folderCount: state.folders.length,
     statuses: state.folders.map((f) => ({
       status: folderStatus(state, f),
@@ -884,7 +884,7 @@ function report() {
   };
 }
 document.addEventListener("click", (event) => {
-  const el = (event.target as HTMLElement).closest<HTMLElement>("button");
+  const el = (event.target as HTMLElement).closest<HTMLElement>("button, [data-folder]");
   if (!el) return;
   if (el.dataset["nav"]) go(el.dataset["nav"]!);
   else if (el.dataset["folder"]) {

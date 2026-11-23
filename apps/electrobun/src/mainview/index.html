@@ -3,17 +3,13 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>nanosync — Mock desktop demo</title>
+    <title>nanosync</title>
     <link rel="stylesheet" href="./index.css" />
   </head>
   <body>
     <div class="titlebar">
-      <strong>nanosync</strong><span>Desktop / Linux-first mock</span
+      <strong>nanosync</strong><span>Desktop</span
       ><button data-act="close-window">Close window</button>
-    </div>
-    <div class="mock-banner">
-      <strong>Mock demo — no real syncing.</strong> Native actions are
-      simulated. No networking, credentials or file operations.
     </div>
     <div class="shell">
       <aside>
@@ -25,16 +21,11 @@
           ><button data-nav="settings">Settings</button>
         </nav>
         <div class="aside-bottom">
-          <p>Mock shared Desktop + CLI state</p>
           <button data-act="quit">Quit nanosync</button>
         </div>
       </aside>
       <main id="content" tabindex="-1"></main>
     </div>
-    <footer>
-      Offline mock demo · nonsensitive demo state saved on this device · native
-      integration not validated
-    </footer>
     <dialog id="dialog" aria-labelledby="dialog-title"></dialog>
     <div class="toast" role="status" hidden></div>
     <script type="module" src="./index.js"></script>
