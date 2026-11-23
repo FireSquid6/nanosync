@@ -16,6 +16,10 @@
     "nanosync": "bun packages/cli/src/main.ts",
     "build:frontend": "bun build/frontend.ts",
     "test:browser": "bun --bun node_modules/@playwright/test/cli.js test",
+    "dev:electrobun": "cd apps/electrobun && bunx electrobun@2.0.7 dev --watch",
+    "build:electrobun": "cd apps/electrobun && bunx electrobun@2.0.7 build",
+    "typecheck:electrobun": "tsc -p apps/electrobun/tsconfig.json --noEmit",
+    "test:electrobun": "bun --bun node_modules/@playwright/test/cli.js test --config apps/electrobun/playwright.config.ts",
     "dev:site": "bun run --cwd apps/site dev",
     "build:site": "bun run --cwd apps/site build",
     "test:site": "cd apps/site && bun --bun ../../node_modules/@playwright/test/cli.js test"

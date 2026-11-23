@@ -30,6 +30,13 @@ bun packages/cli/src/main.ts --help
 
 To run the Linux CLI and server from source, see [packages/cli/README.md](packages/cli/README.md).
 
+## Desktop UI preview
+
+The [Electrobun desktop app](apps/electrobun/README.md) implements the issue #18
+Field Guide interface with a mock backend. Run `bun run dev:electrobun` or check
+its browser flows with `bun run test:electrobun`. It does not sync files or share
+CLI state yet; real Linux native integration and packaging remain unvalidated.
+
 ## Android
 
 The native Android 12+ dashboard connects existing vaults to shared local folders,

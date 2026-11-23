@@ -1,5 +1,5 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": { "lib": ["ESNext", "DOM", "DOM.Iterable"], "types": ["bun"] },
-  "include": ["build/frontend.ts", "build/release-policy.ts", "build/release-policy.test.ts", "build/android-workflow.test.ts", "browser-tests/**/*.ts", "playwright.config.ts"]
+  "include": ["build/frontend.ts", "build/release-policy.ts", "build/release-policy.test.ts", "build/android-workflow.test.ts", "browser-tests/**/*.ts", "playwright.config.ts", "apps/electrobun/browser-tests/**/*.ts", "apps/electrobun/playwright.config.ts", "apps/electrobun/test-server.ts"]
 }
